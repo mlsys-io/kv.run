@@ -114,7 +114,7 @@ class LlavaLM(Model):
         self.projector = self.build_projector(mm_config)
         self.projector.to(self.device).eval()
         self.id_embedder = self.model.model.embed_tokens
-        self.additional_init_length = 576 # 512 + 64 I guess
+        self.additional_init_length = 576
 
         super(LlavaLM, self).__init__(
             model=self.model,
@@ -159,17 +159,18 @@ class LlavaLM(Model):
     ):
         img_features = []
         for r in batch.requests:
-            img = Image.open(r.inputb).convert('RGB')
+            img = Image.open(BytesIO(base64.b64decode(r.inputb))).convert('RGB')
             img = self.vision_model.image_processor(img, return_tensors='pt')['pixel_values'].squeeze(0)
-            img_features.append(self.vision_model(img))
+            img_features.append(img)
         img_features = torch.stack(img_features, dim=0)
+        img_features = self.vision_model(img_features)
         if self.projector:
             img_features = self.projector(img_features)
 
-        input_ids = torch.tensor(batch.input_ids, dtype=torch.long, device=self.device)
-        input_embeddings = self.id_embedder(input_ids).unsqueeze(0)
-        input_embeddings = torch.cat([img_features,input_embeddings], dim=1)
-        lens = batch.input_lengths + self.additional_init_length
+        input_embeddings = self.id_embedder(batch.input_ids)
+        input_embeddings = torch.cat([img_features,input_embeddings], dim=1).half()
+
+        lens = [input_embeddings.size(1) for _ in batch.requests]
         blen = BatchLenInfo(lens, 0, self.device)
 
         for r,l in zip(batch.requests,lens):

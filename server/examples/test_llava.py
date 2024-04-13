@@ -1,6 +1,6 @@
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
 from text_generation_server.models.llava_causal_lm import LlavaLM, LlavaBatch
-import random, torch, torchvision
+import random, torch
 import base64
 
 model = LlavaLM(model_id="liuhaotian/llava-v1.5-7b")
@@ -59,7 +59,7 @@ pb_batch = LlavaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cud
 
 results = []
 for i in range(50):
-    generations, pb_batch, _ = model.generate_token(pb_batch)
+    generations, pb_batch, _ = model.generate(pb_batch)
     for gen in generations:
         if gen.generated_text is not None:
             results.append(gen.generated_text.text)

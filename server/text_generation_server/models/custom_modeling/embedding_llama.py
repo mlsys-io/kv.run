@@ -17,9 +17,10 @@ from transformers.models.llama.modeling_llama import (
     LlamaConfig,
     PreTrainedModel,
     LlamaMLP,
-    LlamaRMSNorm,
+    #LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
+from einops import rearrange
 
 class LlamaAttention(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
@@ -110,7 +111,16 @@ class LlamaAttention(nn.Module):
         torch.cuda.nvtx.range_pop()
 
         return attn_output
+    
+class LlamaRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
 
+    def forward(self, hidden_states):
+        return rms_norm(hidden_states, self.weight, self.variance_epsilon)
+    
 class LlamaDecoderLayer(nn.Module):
     def __init__(
             self, 
@@ -140,6 +150,7 @@ class LlamaDecoderLayer(nn.Module):
         prefill_kv: BatchedKvCache | None,
         decode_kv: BatchedKvCache | None,
     ) -> torch.Tensor:
+        hidden_states = rearrange(hidden_states, 'b s h -> (b s) h')
         residual = hidden_states
 
         torch.cuda.nvtx.range_push("input_norm")
