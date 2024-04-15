@@ -4,8 +4,6 @@ import random, torch
 import base64
 
 model = LlavaLM(model_id="liuhaotian/llava-v1.5-7b")
-print(model)
-
 tokenizer = model.tokenizer
 
 prompts = [
@@ -33,7 +31,7 @@ def make_input(jpg_path, id = 0):
         lora_id=None,
         id=id,
         truncate=1024,
-        prefill_logprobs=True,
+        prefill_logprobs=False,
         top_n_tokens=20,
         parameters=generate_pb2.NextTokenChooserParameters(
             temperature=0.9,
@@ -48,20 +46,17 @@ def make_input(jpg_path, id = 0):
             grammar='',
             grammar_type=0),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=1024,
+            max_new_tokens=32,
             stop_sequences=[],
             ignore_eos_token=True))
     return request
 
-requests = [make_input('test.jpg') for _ in range(5)]
+requests = [make_input('test.jpg', id=i) for i in range(5)]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = LlavaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
-results = []
-for i in range(50):
+while pb_batch is not None:
     generations, pb_batch, _ = model.generate(pb_batch)
     for gen in generations:
         if gen.generated_text is not None:
-            results.append(gen.generated_text.text)
-
-print(results)
+            print(gen.generated_text.text)

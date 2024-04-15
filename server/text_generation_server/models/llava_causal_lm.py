@@ -203,6 +203,7 @@ class LlavaLM(Model):
             decode_kv.append(kv_cache)
             kv_cache.acquire_one()
 
+        input_ids = torch.tensor(input_ids, dtype=torch.long, device=self.device)
         blen = BatchLenInfo([], len(input_ids), self.device)
         decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
 
@@ -301,6 +302,7 @@ class LlavaLM(Model):
                     )
 
                     # release kv-cache
+                    logger.debug(f"Releasing kv-cache for request {request.id}")
                     self.cache_pool[str(request.id)].release()
                     del self.cache_pool[str(request.id)]
 

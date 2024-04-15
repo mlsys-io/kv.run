@@ -150,7 +150,6 @@ class LlamaDecoderLayer(nn.Module):
         prefill_kv: BatchedKvCache | None,
         decode_kv: BatchedKvCache | None,
     ) -> torch.Tensor:
-        hidden_states = rearrange(hidden_states, 'b s h -> (b s) h')
         residual = hidden_states
 
         torch.cuda.nvtx.range_push("input_norm")
@@ -235,7 +234,7 @@ class LlamaModel(LlamaPreTrainedModel):
             hidden_states = self.embed_tokens(input_ids)
             torch.cuda.nvtx.range_pop()
         else:
-            hidden_states = input_embeddings
+            hidden_states = rearrange(input_embeddings, "b s h -> (b s) h")
 
         for layer_idx, decoder_layer in enumerate(self.layers):
             torch.cuda.nvtx.range_push(f"layer={layer_idx}")
