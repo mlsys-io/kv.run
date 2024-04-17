@@ -203,9 +203,9 @@ class LlamaModel(LlamaPreTrainedModel):
             config.vocab_size, config.hidden_size, self.padding_idx
         )
 
-        use_adapter = kwargs.get('use_adapter',False)
+        use_adapter = getattr(config, 'use_adapter', False)
         if use_adapter:
-            adapter_freq = kwargs.get('adapter_freq',1)
+            adapter_freq = getattr(config, 'adapter_freq', 1)
             assert adapter_freq >= 1
             adapter_layers = list(range(0, config.num_hidden_layers, adapter_freq))
             print("### Add adapters to: ", adapter_layers, flush=True)

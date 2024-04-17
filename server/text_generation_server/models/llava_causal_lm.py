@@ -8,25 +8,23 @@ from .custom_modeling.embedding_llama import LlamaForCausalLM
 import time
 import json
 from opentelemetry import trace
-from typing import Optional, Tuple, List, Type, Dict
+from typing import Optional, Tuple, List, Type
 from text_generation_server.models import Model
 from text_generation_server.utils.tokens import batch_top_tokens
 from text_generation_server.models.types import (
-    Batch,
     Tokens,
     Generation,
     GeneratedText,
 )
 from text_generation_server.utils import Sampling
 from dataclasses import dataclass
-from transformers import AutoTokenizer, AutoConfig, LlavaConfig
+from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import hf_hub_download
 
 from loguru import logger
 from PIL import Image
 from io import BytesIO
 import base64
-tracer = trace.get_tracer(__name__)
 
 from .causal_lm import CausalLMBatch
 
@@ -59,6 +57,7 @@ class LlavaLM(Model):
 
         self.device = device
         self.model_id = model_id
+        self.model_config = AutoConfig.from_pretrained(model_id)
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             revision=revision,
@@ -76,6 +75,7 @@ class LlavaLM(Model):
             #device_map="auto" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else None,
             load_in_8bit=quantize == "bitsandbytes",
             trust_remote_code=trust_remote_code,
+            config=self.model_config,
         )
         if (
             torch.cuda.is_available()
@@ -95,7 +95,6 @@ class LlavaLM(Model):
             else:
                 tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-        self.model_config = AutoConfig.from_pretrained(model_id)
         self.kvpool = KvPool(
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_attention_heads,
@@ -302,7 +301,6 @@ class LlavaLM(Model):
                     )
 
                     # release kv-cache
-                    logger.debug(f"Releasing kv-cache for request {request.id}")
                     self.cache_pool[str(request.id)].release()
                     del self.cache_pool[str(request.id)]
 

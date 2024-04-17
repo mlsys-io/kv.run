@@ -46,12 +46,12 @@ def make_input(jpg_path, id = 0):
             grammar='',
             grammar_type=0),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=32,
+            max_new_tokens=256,
             stop_sequences=[],
             ignore_eos_token=True))
     return request
 
-requests = [make_input('test.jpg', id=i) for i in range(5)]
+requests = [make_input('test/photo.jpg', id=i) for i in range(5)]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = LlavaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
