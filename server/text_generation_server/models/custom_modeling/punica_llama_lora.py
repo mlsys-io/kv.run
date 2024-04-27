@@ -207,7 +207,7 @@ class LlamaAttention(nn.Module):
                 k,
                 v,
                 blen.indptr,
-                batchKvCacheFlashinfer.cache_data[self.layer_idx],
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
                 kv_page_indices,
                 kv_page_indptr,
                 kv_last_page_len)
@@ -228,7 +228,7 @@ class LlamaAttention(nn.Module):
             
             attn_output_flashinfer = prefill_wrapper.forward(
                 q, 
-                batchKvCacheFlashinfer.cache_data[self.layer_idx], 
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
                 causal=True, 
                 pos_encoding_mode="ROPE_LLAMA"
             ).view(blen.doff, self.hidden_size)
@@ -266,7 +266,7 @@ class LlamaAttention(nn.Module):
             
             attn_output_flashinfer = decode_wrapper.forward(
                 q, 
-                batchKvCacheFlashinfer.cache_data[self.layer_idx], 
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
                 pos_encoding_mode="ROPE_LLAMA"
             ).view(blen.decode, self.hidden_size)
             
@@ -281,7 +281,7 @@ class LlamaAttention(nn.Module):
                 k,
                 v,
                 qo_decode_indptr,
-                batchKvCacheFlashinfer.cache_data[self.layer_idx],
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
                 kv_page_indices,
                 kv_page_indptr,
                 kv_last_page_len

@@ -5,7 +5,7 @@ import torch
 from typing import Any, TypedDict, cast
 from transformers.models.llama.modeling_llama import LlamaConfig
 from text_generation_server.utils.punica_utils import BatchedKvCache, BatchLenInfo, KvPool, KvCache
-from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, BatchKvCache, RequestKvCache
+from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
 from .custom_modeling.punica_llama_lora import LlamaForCausalLM, LlamaLoraWeight, BatchedLlamaLoraWeight
 from transformers import PreTrainedTokenizerBase
 import peft, transformers
@@ -213,7 +213,7 @@ class RequestContext:
         self.prompt_len = len(self.output_ids)
         self.kvcache = KvCache(kvpool, self.prompt_len)
         self.batchKvCacheFlashinfer = modelKvCacheFlashinfer.getOrCreate(batch_id)
-        self.reqKvCacheFlashInfer = self.batchKvCacheFlashinfer.getOrCreate(req_id, self.maxlen, self.prompt_len)
+        self.reqKvCacheFlashInfer = self.batchKvCacheFlashinfer.getOrCreate(req_id, self.prompt_len)
         
         self.lora_id = lora_id
         self.tokenizer = tokenizer
@@ -336,16 +336,17 @@ class PunicaLM(Model):
         
         TOTAL_NUM_PAGES_FLASHINFER = 200
         PAGE_LEN = 16
-        self.modelKvCacheFlashinfer = ModelKvCache(
-            num_pages=TOTAL_NUM_PAGES_FLASHINFER, 
-            num_layers=self.model_config.num_hidden_layers, 
-            num_heads=self.model_config.num_attention_heads, 
-            head_dim=self.model_config.num_attention_heads,
+        kvCachePool = KvCachePool(
+            num_pages=TOTAL_NUM_PAGES_FLASHINFER,
+            num_layers=self.model_config.num_hidden_layers,
+            num_heads=self.model_config.num_attention_heads,
+            head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
             page_len=PAGE_LEN,
             dtype=dtype,
-            device=device 
+            device=device
         )
-        
+                 
+        self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
         self.cache_pool = {}
 
         self.lora_weights = {}
