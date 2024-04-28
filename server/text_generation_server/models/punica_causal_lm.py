@@ -336,10 +336,10 @@ class PunicaLM(Model):
             device=device,
         )
         
-        TOTAL_NUM_PAGES_FLASHINFER = 200
+        TOTAL_NUM_PAGES_FLASHINFER = 2000
         PAGE_LEN = 16
         kvCachePool = KvCachePool(
-            num_pages=TOTAL_NUM_PAGES_FLASHINFER,
+            max_pages=TOTAL_NUM_PAGES_FLASHINFER,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_attention_heads,
             head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,

@@ -4,15 +4,16 @@ import torch
 
 
 class KvCachePool:
-    def __init__(self, num_pages: int, num_layers: int, num_heads: int, head_dim: int, page_len: int, dtype: torch.dtype, device: torch.device):
-        self.cache_data = []
-        for i in range(num_layers):
-            self.cache_data.append(torch.zeros(num_pages, 2, page_len, num_heads, head_dim, dtype=dtype, device=device))
+    def __init__(self, max_pages: int, num_layers: int, num_heads: int, head_dim: int, page_len: int, dtype: torch.dtype, device: torch.device):
+        self.cache_data = [ torch.zeros(max_pages, 2, page_len, num_heads, head_dim, dtype=dtype, device=device) for _ in range(num_layers)]
         self.device = device
+        self.max_pages = max_pages
         self.page_len = page_len
         self.starting_free_page_idx = 0
 
     def allocate(self, num_pages: int):
+        if self.starting_free_page_idx + num_pages > self.max_pages:
+            raise Exception("Flashinfer cache pool out of cache pages")
         start_page_idx = self.starting_free_page_idx
         self.starting_free_page_idx += num_pages
         return [i for i in range(start_page_idx, start_page_idx + num_pages)]
