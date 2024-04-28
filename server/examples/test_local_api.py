@@ -31,18 +31,17 @@ for name, spec in DEMO.items():
     lora_specs[name] = LoraSpec(lora_prompts, base_prompts)
 
 # Create input requests
-def make_input(model_name, lora_or_base, promptOverride):
+def make_input(lora_id, lora_or_base, promptOverride=None):
     if lora_or_base == "lora":
-        prompts = lora_specs[model_name].lora_prompts
-        lora_id = model_name
-    elif lora_or_base == "base":
-        prompts = lora_specs[model_name].base_prompts
+        prompts = lora_specs[lora_id].lora_prompts
+    elif lora_or_base == "base" or lora_or_base == "empty":
+        prompts = lora_specs[lora_id].base_prompts
         lora_id = "empty"
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
-    prompt = promptOverride # random.choice(prompts)
-
+    prompt = promptOverride or random.choice(prompts)
     inputs = json.dumps({"inputs": prompt, "lora_id": lora_id})
+
     request = generate_pb2.Request(
         inputs=inputs,
         truncate=256,
@@ -53,7 +52,7 @@ def make_input(model_name, lora_or_base, promptOverride):
             top_k=10,
             top_p=0.9,
             typical_p=0.9,
-            repetition_penalty=1.1
+            repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
             max_new_tokens=30,
@@ -67,11 +66,8 @@ batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = PunicaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
 # Add input batch to model service
-service.add_request(pb_batch)
-
+ids = service.add_request(pb_batch)
 results = {}
-for r in pb_batch.requests:
-    results[r.id] = []
 
 # Iterative generation: each step generates a token for each input in the batch
 while True:
@@ -82,7 +78,10 @@ while True:
     if not generations:
         break
     for gen in generations:
-        results[gen.request_id].append(gen.tokens.texts[0])
+        if gen.request_id in results:
+            results[gen.request_id].append(gen.tokens.texts[0])
+        else:
+            results[gen.request_id] = [gen.tokens.texts[0]]
 
 for id in results:
     print(str(id) + '='*30)

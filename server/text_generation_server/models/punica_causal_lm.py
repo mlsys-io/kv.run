@@ -106,8 +106,6 @@ class TextGenerationChunk(TypedDict):
 
 @dataclass
 class PunicaBatch(CausalLMBatch):
-    lora_ids = []
-
     @classmethod
     def from_pb(
             cls,
@@ -122,14 +120,18 @@ class PunicaBatch(CausalLMBatch):
         top_n_tokens = []
         prefix_offsets = []
         read_offsets = []
-        requests_idx_mapping = {}
+        cls.lora_ids = []
 
         # Parse batch
         for i, r in enumerate(pb.requests):
-            inputs = json.loads(r.inputs)
-            cls.lora_ids.append(inputs['lora_id'])
-            prompt = inputs['inputs']
-            requests_idx_mapping[r.id] = i
+            try:
+                inputs = json.loads(r.inputs)
+                cls.lora_ids.append(inputs['lora_id'])
+                prompt = inputs['inputs']
+            except:
+                prompt = r.inputs
+                cls.lora_ids.append('empty')
+
             next_token_choosers.append(
                 NextTokenChooser.from_pb(r.parameters, device, tokenizer)
             )
@@ -151,7 +153,7 @@ class PunicaBatch(CausalLMBatch):
         return cls(
             batch_id=pb.id,
             requests=pb.requests,
-            requests_idx_mapping=requests_idx_mapping,
+            requests_idx_mapping=None,
             input_ids=input_ids,
             attention_mask=None,
             position_ids=None,
@@ -362,6 +364,7 @@ class PunicaLM(Model):
             )
 
         self.reqctx: dict[int, RequestContext] = {}
+        self.reqid: int = 1
 
         super(PunicaLM, self).__init__(
             model=model,
@@ -435,20 +438,20 @@ class PunicaLM(Model):
         )
 
     def add_request(self, batch: PunicaBatch):
+        ids = []
         for r in range(len(batch.requests)):
             lora_id = batch.lora_ids[r]
-            req = batch.requests[r]
             input = batch.input_ids[r]
-            parameters = req.parameters
-            stop = req.stopping_parameters
+            parameters = batch.requests[r].parameters
+            stop = batch.requests[r].stopping_parameters
 
-            req.id = max(list(self.reqctx)) + 1 if self.reqctx else 1
+            ids.append(self.reqid)
             if lora_id not in self.lora_weights:
                 raise ValueError("Cannot find lora weights", lora_id)
 
-            self.reqctx[req.id] = RequestContext(
+            self.reqctx[self.reqid] = RequestContext(
                 batch.batch_id,
-                req.id,
+                self.reqid,
                 input,
                 self.kvpool,
                 self.modelKvCacheFlashinfer,
@@ -461,6 +464,8 @@ class PunicaLM(Model):
                 maxlen=min(stop.max_new_tokens, 4096),
                 stop_token_id=self.tokenizer.eos_token_id,
             )
+            self.reqid += 1
+        return ids
 
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
@@ -469,8 +474,9 @@ class PunicaLM(Model):
     )-> Tuple[List[Generation], Optional[PunicaBatch], Tuple[int, int]]:
         start = time.time_ns()
 
-        if batch.requests:
-            self.add_request(batch)
+        if hasattr(batch, 'requests') and batch.requests:
+            ids = self.add_request(batch)
+            print("====Request " + str(ids) + " added.")
 
         if not self.reqctx:
             return None, batch, (0, 0)
@@ -531,18 +537,21 @@ class PunicaLM(Model):
             next_token_id = reqctx.get_next_token_id(logits[i].unsqueeze(0))
             reqctx.append_token(next_token_id)
             text = reqctx.decode_tokens()
-            generation = Generation(
-                reqid, None,
-                Tokens(
-                    [next_token_id],
-                    None,
-                    [text],
-                    [next_token_id in self.all_special_ids]
-                ), None, None
-            )
-            generations.append(generation)
-            if reqctx.is_stop():
+
+            is_stop = reqctx.is_stop()
+            if is_stop:
                 self._delete_request(reqid)
+            else:
+                generation = Generation(
+                    reqid, None,
+                    Tokens(
+                        [next_token_id],
+                        None,
+                        [text],
+                        [next_token_id in self.all_special_ids]
+                    ), None, None,
+                )
+                generations.append(generation)
 
         forward_ns = start_decode - start
         decode_ns = time.time_ns() - start_decode

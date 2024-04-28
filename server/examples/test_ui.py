@@ -41,17 +41,19 @@ class MultiLora:
         self.tokenizer = self.model.tokenizer
 
         # Create text generation requests
-        self.reqname, self.reqtext = {}, {}
-        for model_name in lora_specs:
+        self.reqname = {}
+        self.finished = []
+        for lora_id in lora_specs:
             for lora_or_base in ["lora", "base"]:
-                self._create_request(model_name, lora_or_base)
+                id, prompt = self._create_request(lora_id, lora_or_base)
+                self.reqname[id] = (lora_id, lora_or_base)
+        print('aaa')
 
-    def _create_request(self, model_name: str, lora_or_base: str):
+    def _create_request(self, lora_id: str, lora_or_base: str):
         if lora_or_base == "lora":
-            prompts = self.lora_specs[model_name].lora_prompts
-            lora_id = model_name
+            prompts = self.lora_specs[lora_id].lora_prompts
         elif lora_or_base == "base" or lora_or_base == "empty":
-            prompts = self.lora_specs[model_name].base_prompts
+            prompts = self.lora_specs[lora_id].base_prompts
             lora_id = "empty"
         else:
             raise ValueError(f"Unknown lora_or_base={lora_or_base}")
@@ -76,11 +78,8 @@ class MultiLora:
                 ignore_eos_token=True))
         batch = generate_pb2.Batch(id = 0, requests = [request], size = 1)
         pb_batch = PunicaBatch.from_pb(batch, self.tokenizer, torch.float16, torch.device("cuda"))
-        self.model.add_request(pb_batch)
-        id = pb_batch.requests[0].id
-        self.reqname[id] = f'{model_name}-{lora_or_base}'
-        self.reqtext[id] = prompt
-        return id
+        id = self.model.add_request(pb_batch)[0]
+        return id, prompt
 
     def stop(self):
         self.stop_signal.set()
@@ -90,21 +89,23 @@ class MultiLora:
         append_box: Callable[[str, str], None],
     ):
         time.sleep(0.1)
-        #for id in self.reqname:
-        #    append_box(self.reqname[id], self.reqtext[id])
-
         while not self.stop_signal.is_set():
             generations, _, timing = self.model.generate_token(PunicaBatch.from_pb(generate_pb2.Batch()))
             for gen in generations:
-                append_box(self.reqname[gen.request_id], gen.tokens.texts[0])
+                append_box('-'.join(self.reqname[gen.request_id]), gen.tokens.texts[0])
+
             now = [gen.request_id for gen in generations]
             for id in list(self.reqname):
-                if id not in now:
-                    append_box(self.reqname[id], "\n------\n\n")
-                    model_name, lora_or_base = self.reqname[id].split('-')[0], self.reqname[id].split('-')[1]
-                    nid = self._create_request(model_name, lora_or_base)
-                    append_box(self.reqname[nid], self.reqtext[nid])
-                    del self.reqname[id], self.reqtext[id]
+                if (id not in now) and (id not in self.finished):
+                    append_box('-'.join(self.reqname[id]), "\n------\n\n")
+                    model_name, lora_or_base = self.reqname[id]
+                    nid, prompt = self._create_request(model_name, lora_or_base)
+                    if nid in self.reqname:
+                        print('aaaaa')
+                    self.reqname[nid] = (model_name, lora_or_base)
+                    append_box('-'.join(self.reqname[nid]), prompt)
+                    self.finished.append(id)
+            assert(len(self.model.reqctx) == 6)
 
 
 class TailLog(Label):
