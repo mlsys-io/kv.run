@@ -248,6 +248,20 @@ class LlamaAttention(nn.Module):
             k = k_proj[blen.doff :].view(blen.decode, self.num_kv_heads, self.head_dim)
             v = v_proj[blen.doff :].view(blen.decode, self.num_kv_heads, self.head_dim)
             
+            # flashinfer append kv cache
+            batch_size = len(batchKvCacheFlashinfer.kvCacheDict.keys())
+            qo_decode_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=batchKvCacheFlashinfer.device)
+            kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
+            flashinfer.append_paged_kv_cache(
+                k,
+                v,
+                qo_decode_indptr,
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
+                kv_page_indices,
+                kv_page_indptr,
+                kv_last_page_len
+            )
+
             # flashinfer decode
             kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
             decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
@@ -264,28 +278,13 @@ class LlamaAttention(nn.Module):
                 pos_encoding_mode="ROPE_LLAMA"
             )
             
-            attn_output_flashinfer = decode_wrapper.forward(
+            attn_decode_output_flashinfer = decode_wrapper.forward(
                 q, 
                 batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
                 pos_encoding_mode="ROPE_LLAMA"
             ).view(blen.decode, self.hidden_size)
-            
+
             decode_wrapper.end_forward()
-            
-            # flashinfer append kv cache
-            batch_size = len(batchKvCacheFlashinfer.kvCacheDict.keys())
-            qo_decode_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=batchKvCacheFlashinfer.device)
-            batchKvCacheFlashinfer.increment()
-            kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
-            flashinfer.append_paged_kv_cache(
-                k,
-                v,
-                qo_decode_indptr,
-                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
-                kv_page_indices,
-                kv_page_indptr,
-                kv_last_page_len
-            )  
 
             torch.cuda.nvtx.range_push("append_kv")
             assert decode_kv is not None
@@ -295,8 +294,8 @@ class LlamaAttention(nn.Module):
             torch.cuda.nvtx.range_push("batch_decode")
             attn_outputs = batch_decode(q, decode_kv, self.layer_idx)
             attn_outputs = attn_outputs.view(blen.decode, self.hidden_size)
-            torch.testing.assert_close(attn_output_flashinfer, attn_output, rtol=1e-3, atol=5e-4)
-            stack_attn_output.append(attn_outputs)
+            torch.testing.assert_close(attn_decode_output_flashinfer, attn_outputs, rtol=1e-3, atol=5e-4)
+            stack_attn_output.append(attn_decode_output_flashinfer)
             torch.cuda.nvtx.range_pop()
 
         if len(stack_attn_output) == 1:

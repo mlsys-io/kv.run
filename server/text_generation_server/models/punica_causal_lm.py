@@ -447,9 +447,9 @@ class PunicaLM(Model):
                 raise ValueError("Cannot find lora weights", lora_id)
 
             self.reqctx[req.id] = RequestContext(
-                input,
                 batch.batch_id,
                 req.id,
+                input,
                 self.kvpool,
                 self.modelKvCacheFlashinfer,
                 lora_id,
@@ -508,6 +508,8 @@ class PunicaLM(Model):
         prefill_kv = BatchedKvCache(prefill_kv) if prefill_kv else None
         decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
         batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
+        if decode_kv:
+            batchKvCacheFlashinfer.increment()
         
         lora = BatchedLlamaLoraWeight(
             [self.lora_weights[id] for id in lora_ids], lora_lens

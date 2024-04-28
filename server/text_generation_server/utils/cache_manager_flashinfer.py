@@ -5,7 +5,9 @@ import torch
 
 class KvCachePool:
     def __init__(self, num_pages: int, num_layers: int, num_heads: int, head_dim: int, page_len: int, dtype: torch.dtype, device: torch.device):
-        self.cache_data = [ torch.zeros(num_pages, 2, page_len, num_heads, head_dim, dtype=dtype, device=device) ] * num_layers
+        self.cache_data = []
+        for i in range(num_layers):
+            self.cache_data.append(torch.zeros(num_pages, 2, page_len, num_heads, head_dim, dtype=dtype, device=device))
         self.device = device
         self.page_len = page_len
         self.starting_free_page_idx = 0
