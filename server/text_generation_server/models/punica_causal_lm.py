@@ -178,7 +178,7 @@ class RequestContext:
         req_id: int,
         input_ids: list[int],
         kvpool: KvPool,
-        modelKvCacheFlashinfer: ModelKvCache,
+        modelKvCacheFlashinfer: Optional[ModelKvCache],
         lora_id: str,
         tokenizer,
         *,
@@ -214,8 +214,8 @@ class RequestContext:
         self.output_ids = [int(x) for x in input_ids]
         self.prompt_len = len(self.output_ids)
         self.kvcache = KvCache(kvpool, self.prompt_len)
-        self.batchKvCacheFlashinfer = modelKvCacheFlashinfer.getOrCreate(batch_id)
-        self.reqKvCacheFlashInfer = self.batchKvCacheFlashinfer.getOrCreate(req_id, self.prompt_len)
+        self.batchKvCacheFlashinfer = None if modelKvCacheFlashinfer == None else modelKvCacheFlashinfer.getOrCreate(batch_id)
+        self.reqKvCacheFlashInfer = None if modelKvCacheFlashinfer == None else self.batchKvCacheFlashinfer.getOrCreate(req_id, self.prompt_len)
         
         self.lora_id = lora_id
         self.tokenizer = tokenizer
@@ -281,7 +281,8 @@ class PunicaLM(Model):
         quantize: Optional[str] = None,
         use_medusa: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
-        trust_remote_code: bool = False
+        trust_remote_code: bool = False,
+        validate_flashinfer: bool = False,
     ):
         if use_medusa:
             raise RuntimeError("Medusa decoding is not enabled for AutoModel")
@@ -336,19 +337,20 @@ class PunicaLM(Model):
             device=device,
         )
         
-        TOTAL_NUM_PAGES_FLASHINFER = 2000
-        PAGE_LEN = 16
-        kvCachePool = KvCachePool(
-            max_pages=TOTAL_NUM_PAGES_FLASHINFER,
-            num_layers=self.model_config.num_hidden_layers,
-            num_heads=self.model_config.num_attention_heads,
-            head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
-            page_len=PAGE_LEN,
-            dtype=dtype,
-            device=device
-        )
-                 
-        self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
+        if validate_flashinfer:
+            TOTAL_NUM_PAGES_FLASHINFER = 2000
+            PAGE_LEN = 16
+            kvCachePool = KvCachePool(
+                max_pages=TOTAL_NUM_PAGES_FLASHINFER,
+                num_layers=self.model_config.num_hidden_layers,
+                num_heads=self.model_config.num_attention_heads,
+                head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
+                page_len=PAGE_LEN,
+                dtype=dtype,
+                device=device
+            )
+                    
+            self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
         self.cache_pool = {}
 
         self.lora_weights = {}
@@ -513,9 +515,11 @@ class PunicaLM(Model):
         blen = BatchLenInfo(prefill_lens, len(decode_input_ids), self.device)
         prefill_kv = BatchedKvCache(prefill_kv) if prefill_kv else None
         decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
-        batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
-        if decode_kv:
-            batchKvCacheFlashinfer.increment()
+        
+        if self.modelKvCacheFlashinfer:
+            batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
+            if decode_kv:
+                batchKvCacheFlashinfer.increment()
         
         lora = BatchedLlamaLoraWeight(
             [self.lora_weights[id] for id in lora_ids], lora_lens

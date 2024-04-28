@@ -7,6 +7,12 @@ from test_cases import DEMO, LoraSpec
 # Load model
 service = PunicaLM(model_id="meta-llama/Llama-2-7b-hf",
                lora_ids={'gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'})
+
+# With validate_flashinfer = True, the attention computation will be validated against the flashinfer implementation
+# Exception will be raised if there is discrepancy at any step
+# service = PunicaLM(model_id="meta-llama/Llama-2-7b-hf",
+#                lora_ids={'gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'}, validate_flashinfer=True)
+
 tokenizer = service.tokenizer
 
 # Test print lora adapters
