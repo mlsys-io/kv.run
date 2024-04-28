@@ -31,7 +31,7 @@ for name, spec in DEMO.items():
     lora_specs[name] = LoraSpec(lora_prompts, base_prompts)
 
 # Create input requests
-def make_input(model_name, lora_or_base):
+def make_input(model_name, lora_or_base, promptOverride):
     if lora_or_base == "lora":
         prompts = lora_specs[model_name].lora_prompts
         lora_id = model_name
@@ -40,7 +40,7 @@ def make_input(model_name, lora_or_base):
         lora_id = "empty"
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
-    prompt = random.choice(prompts)
+    prompt = promptOverride # random.choice(prompts)
 
     inputs = json.dumps({"inputs": prompt, "lora_id": lora_id})
     request = generate_pb2.Request(
@@ -56,13 +56,13 @@ def make_input(model_name, lora_or_base):
             repetition_penalty=1.1
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=2048,
+            max_new_tokens=30,
             stop_sequences=[],
             ignore_eos_token=True))
     return request
 
 # Create an input batch of two queries
-requests = [make_input('gsm8k', 'lora'), make_input('gsm8k', 'base')]
+requests = [make_input('gsm8k', 'base', "What is deep learning? "), make_input('gsm8k', 'base', "Where is WTC? ")]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = PunicaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
