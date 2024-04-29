@@ -1,11 +1,6 @@
 import grpc
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
-from text_generation_server.models import Model, get_model
-from transformers import AutoTokenizer
-import torch
-from text_generation_server.utils import weight_hub_files, download_weights
-from text_generation_server.models.punica_causal_lm import PunicaLM, PunicaBatch
-import random
+import random, json
 from test_cases import DEMO, LoraSpec
 
 # put this file in ROOT\server, so you don't need to compile TGI
@@ -17,23 +12,20 @@ for name, spec in DEMO.items():
     lora_prompts, base_prompts = spec.generate_prompts()
     lora_specs[name] = LoraSpec(lora_prompts, base_prompts)
 
-def make_input(model_name, lora_or_base, id = 0):
+def make_input(lora_id, lora_or_base):
     if lora_or_base == "lora":
-        prompts = lora_specs[model_name].lora_prompts
-        lora_id = model_name
-    elif lora_or_base == "base":
-        prompts = lora_specs[model_name].base_prompts
+        prompts = lora_specs[lora_id].lora_prompts
+    elif lora_or_base == "base" or lora_or_base == "empty":
+        prompts = lora_specs[lora_id].base_prompts
         lora_id = "empty"
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
     prompt = random.choice(prompts)
+    inputs = json.dumps({"inputs": prompt, "lora_id": lora_id})
 
-    # Try out prefill / decode from the client side
     request = generate_pb2.Request(
-        inputs=prompt,
-        lora_id=lora_id,
-        id=0,
-        truncate=1024,
+        inputs=inputs,
+        truncate=256,
         prefill_logprobs=True,
         top_n_tokens=20,
         parameters=generate_pb2.NextTokenChooserParameters(
@@ -41,15 +33,10 @@ def make_input(model_name, lora_or_base, id = 0):
             top_k=10,
             top_p=0.9,
             typical_p=0.9,
-            do_sample=False,
-            seed=0,
-            repetition_penalty=1.0,
-            frequency_penalty=0.1,
-            watermark=True,
-            grammar='',
-            grammar_type=0),
+            repetition_penalty=1.1,
+        ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=1024,
+            max_new_tokens=2048,
             stop_sequences=[],
             ignore_eos_token=True))
     return request
@@ -59,7 +46,8 @@ req2 = make_input('gsm8k', 'lora')
 requests = [req1, req2]
 
 # Assemble input batch
-default_pb_batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
+pb_batch_with_inputs = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
+pb_batch_empty = generate_pb2.Batch()
 
 with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
@@ -81,10 +69,10 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     # Info
     print(stub.Info(generate_pb2.InfoRequest()))
     # Warm up
-    wr = generate_pb2.WarmupRequest(batch = default_pb_batch, max_total_tokens = 2048, max_prefill_tokens = 1024*10, max_input_length = 1024)
+    wr = generate_pb2.WarmupRequest(batch = pb_batch_with_inputs, max_total_tokens = 2048, max_prefill_tokens = 1024*10, max_input_length = 1024)
     stub.Warmup(wr)
     # Prefill
-    pr = generate_pb2.PrefillRequest(batch = default_pb_batch)
+    pr = generate_pb2.PrefillRequest(batch = pb_batch_empty)
     resp = stub.Prefill(pr)
     gen, cbatch = resp.generations, resp.batch
     # Decode
@@ -92,4 +80,20 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     resp = stub.Decode(dr)
     gen, cbatch = resp.generations, resp.batch
 
+    results = {}
+    # Generate token
+    pr = generate_pb2.GenerateTokenRequest(batch = pb_batch_empty)
+    while True:
+        resp = stub.GenerateToken(pr)
+        generations, cbatch = resp.generations, resp.batch
+        if not generations:
+            break
+        for gen in generations:
+            if gen.request_id in results:
+                results[gen.request_id].append(gen.tokens.texts[0])
+            else:
+                results[gen.request_id] = [gen.tokens.texts[0]]
+    for id in results:
+        print(str(id) + '=' * 30)
+        print(''.join(results[id]))
     print('done')
