@@ -261,7 +261,7 @@ class LlamaAttention(nn.Module):
             torch.cuda.nvtx.range_push("batch_decode")
             attn_outputs = batch_decode(q, decode_kv, self.layer_idx)
             attn_outputs = attn_outputs.view(blen.decode, self.hidden_size)
-            stack_attn_output.append(attn_decode_output_flashinfer)
+            stack_attn_output.append(attn_outputs)
             torch.cuda.nvtx.range_pop()
             
             if batchKvCacheFlashinfer:

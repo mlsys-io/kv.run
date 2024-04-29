@@ -61,13 +61,15 @@ def make_input(lora_id, lora_or_base, promptOverride=None):
             repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=30,
+            max_new_tokens=2048,
             stop_sequences=[],
             ignore_eos_token=True))
     return request
 
 # Create an input batch of two queries
-requests = [make_input('gsm8k', 'base', "What is deep learning? "), make_input('gsm8k', 'base', "Where is WTC? ")]
+
+# requests = [make_input('gsm8k', 'base', "What is deep learning? "), make_input('gsm8k', 'base', "Where is WTC? ")]
+requests = [make_input('gsm8k', 'lora'), make_input('gsm8k', 'base')]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = PunicaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 

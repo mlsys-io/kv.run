@@ -338,7 +338,7 @@ class PunicaLM(Model):
         )
         
         if validate_flashinfer:
-            TOTAL_NUM_PAGES_FLASHINFER = 2000
+            TOTAL_NUM_PAGES_FLASHINFER = 200
             PAGE_LEN = 16
             kvCachePool = KvCachePool(
                 max_pages=TOTAL_NUM_PAGES_FLASHINFER,
@@ -351,6 +351,8 @@ class PunicaLM(Model):
             )
                     
             self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
+        else:
+            self.modelKvCacheFlashinfer = None
         self.cache_pool = {}
 
         self.lora_weights = {}
@@ -422,7 +424,8 @@ class PunicaLM(Model):
     def _delete_request(self, reqid: Any):
         reqctx = self.reqctx.pop(reqid)
         reqctx.kvcache.release()
-        reqctx.batchKvCacheFlashinfer.release(reqid)
+        if self.modelKvCacheFlashinfer:
+            reqctx.batchKvCacheFlashinfer.release(reqid)
 
     def cancel_request(self, reqid: Any):
         self._delete_request(reqid)
@@ -516,6 +519,7 @@ class PunicaLM(Model):
         prefill_kv = BatchedKvCache(prefill_kv) if prefill_kv else None
         decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
         
+        batchKvCacheFlashinfer = None
         if self.modelKvCacheFlashinfer:
             batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
             if decode_kv:
