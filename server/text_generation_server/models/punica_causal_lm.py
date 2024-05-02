@@ -107,9 +107,9 @@ class TextGenerationChunk(TypedDict):
 @dataclass
 class PunicaBatch(CausalLMBatch):
     @classmethod
-    def Empty(cls):
+    def Empty(cls, batch_id):
         return cls(
-            batch_id=None,
+            batch_id=batch_id,
             requests=None,
             prefix_offsets=None,
             read_offsets=None,
@@ -200,8 +200,7 @@ class RequestContext:
         batch_id: int,
         req_id: int,
         input_ids: list[int],
-        kvpool: KvPool,
-        modelKvCacheFlashinfer: Optional[ModelKvCache],
+        modelKvCacheFlashinfer: ModelKvCache,
         lora_id: str,
         tokenizer,
         *,
@@ -236,9 +235,8 @@ class RequestContext:
 
         self.output_ids = [int(x) for x in input_ids]
         self.prompt_len = len(self.output_ids)
-        self.kvcache = KvCache(kvpool, self.prompt_len)
-        self.batchKvCacheFlashinfer = None if modelKvCacheFlashinfer == None else modelKvCacheFlashinfer.getOrCreate(batch_id)
-        self.reqKvCacheFlashInfer = None if modelKvCacheFlashinfer == None else self.batchKvCacheFlashinfer.getOrCreate(req_id, self.prompt_len)
+        self.batchKvCacheFlashinfer = modelKvCacheFlashinfer.getOrCreate(batch_id)
+        self.reqKvCacheFlashInfer = self.batchKvCacheFlashinfer.getOrCreate(req_id, self.prompt_len)
         
         self.lora_id = lora_id
         self.tokenizer = tokenizer
@@ -303,8 +301,7 @@ class PunicaLM(Model):
         quantize: Optional[str] = None,
         use_medusa: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
-        trust_remote_code: bool = False,
-        validate_flashinfer: bool = False,
+        trust_remote_code: bool = False
     ):
         if use_medusa:
             raise RuntimeError("Medusa decoding is not enabled for AutoModel")
@@ -350,32 +347,20 @@ class PunicaLM(Model):
                 tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
         self.model_config = model.config
-        self.kvpool = KvPool(
+        
+        TOTAL_NUM_PAGES_FLASHINFER = 500
+        PAGE_LEN = 16
+        kvCachePool = KvCachePool(
+            max_pages=TOTAL_NUM_PAGES_FLASHINFER,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_attention_heads,
             head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
-            page_len=16,
+            page_len=PAGE_LEN,
             dtype=dtype,
-            device=device,
+            device=device
         )
-        
-        if validate_flashinfer:
-            TOTAL_NUM_PAGES_FLASHINFER = 200
-            PAGE_LEN = 16
-            kvCachePool = KvCachePool(
-                max_pages=TOTAL_NUM_PAGES_FLASHINFER,
-                num_layers=self.model_config.num_hidden_layers,
-                num_heads=self.model_config.num_attention_heads,
-                head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
-                page_len=PAGE_LEN,
-                dtype=dtype,
-                device=device
-            )
-                    
-            self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
-        else:
-            self.modelKvCacheFlashinfer = None
-        self.cache_pool = {}
+                
+        self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
 
         self.lora_weights = {}
         self.defalut_rank = 16
@@ -444,9 +429,7 @@ class PunicaLM(Model):
 
     def _delete_request(self, reqid: Any):
         reqctx = self.reqctx.pop(reqid)
-        reqctx.kvcache.release()
-        if self.modelKvCacheFlashinfer:
-            reqctx.batchKvCacheFlashinfer.release(reqid)
+        reqctx.batchKvCacheFlashinfer.release(reqid)
 
     def cancel_request(self, reqid: Any):
         self._delete_request(reqid)
@@ -481,7 +464,6 @@ class PunicaLM(Model):
                 batch.batch_id,
                 id,
                 input,
-                self.kvpool,
                 self.modelKvCacheFlashinfer,
                 lora_id,
                 self.tokenizer,
@@ -515,19 +497,20 @@ class PunicaLM(Model):
             key=lambda kv: (not kv[1].is_prefill(), kv[1].lora_id),
         )
 
-        prefill_input_ids, prefill_lens, prefill_kv = [], [], []
-        decode_input_ids, decode_kv = [], []
+        prefill_input_ids, prefill_lens = [], []
+        decode_input_ids = []
         lora_ids, lora_lens = [], []
 
+        # The current assumption is that a batch is either decode or prefill batch
+        # TODO: make it handle mixed batch
+        isDecode = False
         for _, reqctx in reqs:
             if reqctx.is_prefill():
                 prefill_input_ids.extend(reqctx.output_ids)
                 prefill_lens.append(len(reqctx.output_ids))
-                prefill_kv.append(reqctx.kvcache)
             else:
+                isDecode = True
                 decode_input_ids.append(reqctx.output_ids[-1])
-                decode_kv.append(reqctx.kvcache)
-                reqctx.kvcache.acquire_one()
             if lora_ids and lora_ids[-1] == reqctx.lora_id:
                 lora_lens[-1] += 1
             else:
@@ -540,29 +523,21 @@ class PunicaLM(Model):
                 device=self.device,
             )
         blen = BatchLenInfo(prefill_lens, len(decode_input_ids), self.device)
-        prefill_kv = BatchedKvCache(prefill_kv) if prefill_kv else None
-        decode_kv = BatchedKvCache(decode_kv) if decode_kv else None
-        
-        batchKvCacheFlashinfer = None
-        if self.modelKvCacheFlashinfer:
-            batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
-            if decode_kv:
-                batchKvCacheFlashinfer.increment()
+        batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
+        if isDecode:
+            batchKvCacheFlashinfer.increment()
         
         lora = BatchedLlamaLoraWeight(
             [self.lora_weights[id] for id in lora_ids], lora_lens
         )
 
         # Forward pass
-        logits, _ = self.model(input_ids, blen, prefill_kv, decode_kv, batchKvCacheFlashinfer, lora)
+        logits, _ = self.model(input_ids, blen, batchKvCacheFlashinfer, lora)
 
         start_decode = time.time_ns()
 
-        if prefill_kv:
-            if decode_kv:
-                logits = torch.cat([logits[blen.indptr[1:] - 1], logits[blen.doff:]])
-            else:
-                logits = logits[blen.indptr[1:] - 1]
+        if not isDecode:
+            logits = logits[blen.indptr[1:] - 1]
 
         generations: List[Generation] = []
         for i, (reqid, reqctx) in enumerate(reqs):

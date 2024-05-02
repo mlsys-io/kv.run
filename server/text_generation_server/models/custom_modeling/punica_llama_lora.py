@@ -148,9 +148,7 @@ class LlamaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         blen: BatchLenInfo,
-        prefill_kv: BatchedKvCache | None,
-        decode_kv: BatchedKvCache | None,
-        batchKvCacheFlashinfer: BatchKvCache | None,
+        batchKvCacheFlashinfer: BatchKvCache,
         lora: BatchedLlamaLoraWeight | None,
     ) -> torch.Tensor:
         torch.cuda.nvtx.range_push("qkv_proj")
@@ -192,123 +190,89 @@ class LlamaAttention(nn.Module):
 
         stack_attn_output = []
         if len(blen.prefills) > 0:
-            assert prefill_kv is not None
             assert blen.indptr is not None
             q = q_proj[: blen.doff].view(blen.doff, self.num_qo_heads, self.head_dim)
             k = k_proj[: blen.doff].view(blen.doff, self.num_kv_heads, self.head_dim)
             v = v_proj[: blen.doff].view(blen.doff, self.num_kv_heads, self.head_dim)
-
-            torch.cuda.nvtx.range_push("init_kv")
-            init_kv(prefill_kv, k, v, blen.indptr, self.layer_idx)
-            torch.cuda.nvtx.range_pop()
-
-            torch.cuda.nvtx.range_push("batch_prefill")
-            attn_output = batch_prefill(q, blen.indptr, prefill_kv, self.layer_idx)
-            attn_output = attn_output.view(blen.doff, self.hidden_size)
-            stack_attn_output.append(attn_output)
-            torch.cuda.nvtx.range_pop()
             
-            if batchKvCacheFlashinfer:
-                workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=batchKvCacheFlashinfer.device)
-                kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
-                flashinfer.append_paged_kv_cache(
-                    k,
-                    v,
-                    blen.indptr,
-                    batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
-                    kv_page_indices,
-                    kv_page_indptr,
-                    kv_last_page_len)
+            workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=batchKvCacheFlashinfer.device)
+            kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
+            flashinfer.append_paged_kv_cache(
+                k,
+                v,
+                blen.indptr,
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
+                kv_page_indices,
+                kv_page_indptr,
+                kv_last_page_len)
 
-                prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                    workspace_buffer, "NHD"
-                )
+            prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD"
+            )
 
-                prefill_wrapper.begin_forward(
-                    blen.indptr,
-                    kv_page_indptr,
-                    kv_page_indices,
-                    kv_last_page_len,
-                    self.num_qo_heads,
-                    self.num_kv_heads,
-                    self.head_dim,
-                )
-                
-                attn_output_flashinfer = prefill_wrapper.forward(
-                    q, 
-                    batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
-                    causal=True, 
-                    pos_encoding_mode="ROPE_LLAMA"
-                ).view(blen.doff, self.hidden_size)
-                prefill_wrapper.end_forward()
-                try:
-                    torch.testing.assert_close(attn_output_flashinfer, attn_output, rtol=1e-3, atol=5e-4)
-                except AssertionError as e:
-                    print("token_num={}".format(k.data.shape[0]))
-                    print("prefill mismatch", e)
-                    raise e
+            prefill_wrapper.begin_forward(
+                blen.indptr,
+                kv_page_indptr,
+                kv_page_indices,
+                kv_last_page_len,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+            )
+            
+            attn_output_flashinfer = prefill_wrapper.forward(
+                q, 
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
+                causal=True, 
+                pos_encoding_mode="ROPE_LLAMA"
+            ).view(blen.doff, self.hidden_size)
+            prefill_wrapper.end_forward()
+            stack_attn_output.append(attn_output_flashinfer)
 
         if blen.decode > 0:
             q = q_proj[blen.doff :].view(blen.decode, self.num_qo_heads, self.head_dim)
             k = k_proj[blen.doff :].view(blen.decode, self.num_kv_heads, self.head_dim)
             v = v_proj[blen.doff :].view(blen.decode, self.num_kv_heads, self.head_dim)
 
-            torch.cuda.nvtx.range_push("append_kv")
-            assert decode_kv is not None
-            append_kv(decode_kv, k, v, self.layer_idx)
-            torch.cuda.nvtx.range_pop()
+            workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=batchKvCacheFlashinfer.device)
+            # flashinfer append kv cache
+            batch_size = len(batchKvCacheFlashinfer.kvCacheDict.keys())
+            qo_decode_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=batchKvCacheFlashinfer.device)
+            kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
+            flashinfer.append_paged_kv_cache(
+                k,
+                v,
+                qo_decode_indptr,
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
+                kv_page_indices,
+                kv_page_indptr,
+                kv_last_page_len
+            )
 
-            torch.cuda.nvtx.range_push("batch_decode")
-            attn_outputs = batch_decode(q, decode_kv, self.layer_idx)
-            attn_outputs = attn_outputs.view(blen.decode, self.hidden_size)
-            stack_attn_output.append(attn_outputs)
-            torch.cuda.nvtx.range_pop()
+            # flashinfer decode
+            kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
+            decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD"
+            )
+            decode_wrapper.begin_forward(
+                kv_page_indptr,
+                kv_page_indices,
+                kv_last_page_len,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                batchKvCacheFlashinfer.page_len,
+                pos_encoding_mode="ROPE_LLAMA"
+            )
             
-            if batchKvCacheFlashinfer:
-                workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=batchKvCacheFlashinfer.device)
-                # flashinfer append kv cache
-                batch_size = len(batchKvCacheFlashinfer.kvCacheDict.keys())
-                qo_decode_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=batchKvCacheFlashinfer.device)
-                kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
-                flashinfer.append_paged_kv_cache(
-                    k,
-                    v,
-                    qo_decode_indptr,
-                    batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx],
-                    kv_page_indices,
-                    kv_page_indptr,
-                    kv_last_page_len
-                )
+            attn_decode_output_flashinfer = decode_wrapper.forward(
+                q, 
+                batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
+                pos_encoding_mode="ROPE_LLAMA"
+            ).view(blen.decode, self.hidden_size)
 
-                # flashinfer decode
-                kv_page_indices, kv_page_indptr, kv_last_page_len = batchKvCacheFlashinfer.computeActiveKvData()
-                decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                    workspace_buffer, "NHD"
-                )
-                decode_wrapper.begin_forward(
-                    kv_page_indptr,
-                    kv_page_indices,
-                    kv_last_page_len,
-                    self.num_qo_heads,
-                    self.num_kv_heads,
-                    self.head_dim,
-                    batchKvCacheFlashinfer.page_len,
-                    pos_encoding_mode="ROPE_LLAMA"
-                )
-                
-                attn_decode_output_flashinfer = decode_wrapper.forward(
-                    q, 
-                    batchKvCacheFlashinfer.kvCachePool.cache_data[self.layer_idx], 
-                    pos_encoding_mode="ROPE_LLAMA"
-                ).view(blen.decode, self.hidden_size)
-
-                decode_wrapper.end_forward()
-                try:          
-                    torch.testing.assert_close(attn_decode_output_flashinfer, attn_outputs, rtol=1e-3, atol=5e-4)
-                except AssertionError as e:
-                    print("token_num={}".format(k.data.shape[0]))
-                    print("decode mismatch", e)
-                    raise e
+            decode_wrapper.end_forward()
+            stack_attn_output.append(attn_decode_output_flashinfer)
 
         if len(stack_attn_output) == 1:
             attn_outputs = stack_attn_output[0]
@@ -426,9 +390,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         blen: BatchLenInfo,
-        prefill_kv: BatchedKvCache | None,
-        decode_kv: BatchedKvCache | None,
-        batchKvCacheFlashinfer: BatchKvCache | None,
+        batchKvCacheFlashinfer: BatchKvCache,
         lora: BatchedLlamaLoraWeight = None,
     ) -> torch.Tensor:
         residual = hidden_states
@@ -439,7 +401,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # Self Attention
         torch.cuda.nvtx.range_push("LlamaAttention")
-        hidden_states = self.self_attn(hidden_states, blen, prefill_kv, decode_kv, batchKvCacheFlashinfer, lora)
+        hidden_states = self.self_attn(hidden_states, blen, batchKvCacheFlashinfer, lora)
         torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("r")
         hidden_states = residual + hidden_states
@@ -492,9 +454,7 @@ class LlamaModel(LlamaPreTrainedModel):
         self,
         input_ids: torch.Tensor,
         blen: BatchLenInfo,
-        prefill_kv: BatchedKvCache | None,
-        decode_kv: BatchedKvCache | None,
-        batchKvCacheFlashinfer: BatchKvCache | None,
+        batchKvCacheFlashinfer: BatchKvCache,
         lora: BatchedLlamaLoraWeight = None,
     ) -> torch.Tensor:
         torch.cuda.nvtx.range_push("embed")
@@ -503,7 +463,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         for layer_idx, decoder_layer in enumerate(self.layers):
             torch.cuda.nvtx.range_push(f"layer={layer_idx}")
-            hidden_states = decoder_layer(hidden_states, blen, prefill_kv, decode_kv, batchKvCacheFlashinfer, lora)
+            hidden_states = decoder_layer(hidden_states, blen, batchKvCacheFlashinfer, lora)
             torch.cuda.nvtx.range_pop()
 
         torch.cuda.nvtx.range_push("lastnorm")
@@ -524,13 +484,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         self,
         input_ids: torch.Tensor,
         blen: BatchLenInfo,
-        prefill_kv: BatchedKvCache | None,
-        decode_kv: BatchedKvCache | None,
-        batchKvCacheFlashinfer: BatchKvCache | None,
+        batchKvCacheFlashinfer: BatchKvCache,
         lora: BatchedLlamaLoraWeight = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         torch.cuda.nvtx.range_push("LlamaForCausalLM")
-        hidden_states = self.model(input_ids, blen, prefill_kv, decode_kv, batchKvCacheFlashinfer, lora)
+        hidden_states = self.model(input_ids, blen, batchKvCacheFlashinfer, lora)
         torch.cuda.nvtx.range_push("lm_head")
         logits = self.lm_head(hidden_states)
         torch.cuda.nvtx.range_pop()
