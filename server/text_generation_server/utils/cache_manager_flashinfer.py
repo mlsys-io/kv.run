@@ -1,4 +1,4 @@
-from typing import Set
+from typing import Set, List
 import math
 import torch
 
@@ -52,13 +52,17 @@ class BatchKvCache:
     def increment(self):
         for kvCache in self.kvCacheDict.values():
             kvCache.increment()
+            
+    def setRequestOrder(self, requestIds: List[int]):
+        self.requestIds = requestIds
 
     def computeActiveKvData(self):
         kv_page_indices_list = []
         kv_page_indptr_list = []
         kv_last_page_len_list = []
         cum_pages = 0
-        for kvCache in self.kvCacheDict.values():
+        for requestId in self.requestIds:
+            kvCache = self.kvCacheDict[requestId]        
             kv_page_indices_list.extend(kvCache.kv_page_indices)
             kv_page_indptr_list.append(cum_pages)
             kv_last_page_len_list.append(kvCache.kv_last_page_len)

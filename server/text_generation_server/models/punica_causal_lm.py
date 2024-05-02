@@ -496,7 +496,8 @@ class PunicaLM(Model):
             self.reqctx.items(),
             key=lambda kv: (not kv[1].is_prefill(), kv[1].lora_id),
         )
-
+        
+        requestIds = list(map(lambda req: req[0], reqs))
         prefill_input_ids, prefill_lens = [], []
         decode_input_ids = []
         lora_ids, lora_lens = [], []
@@ -524,6 +525,7 @@ class PunicaLM(Model):
             )
         blen = BatchLenInfo(prefill_lens, len(decode_input_ids), self.device)
         batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
+        batchKvCacheFlashinfer.setRequestOrder(requestIds)
         if isDecode:
             batchKvCacheFlashinfer.increment()
         

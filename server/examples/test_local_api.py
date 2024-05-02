@@ -5,9 +5,8 @@ import random, json
 from test_cases import DEMO, LoraSpec
 
 # Load model
-torch.manual_seed(0xABCDABCD987)
 service = PunicaLM(model_id="meta-llama/Llama-2-7b-hf",
-               lora_ids={'gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'}, quantize="bitsandbytes")
+               lora_ids={'gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'})
 
 tokenizer = service.tokenizer
 
@@ -65,8 +64,8 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     return request
 
 # Create an input batch of two queries
-requests = [make_input('gsm8k', 'lora', id=0, promptOverride="What is deep learning? "), make_input('gsm8k', 'base', id=1,  promptOverride="Where is world trade center? ")]
-# requests = [make_input('gsm8k', 'lora', id=0), make_input('gsm8k', 'lora', id=1)]
+# requests = [make_input('gsm8k', 'base', id=0, promptOverride="What is deep learning? "), make_input('gsm8k', 'lora', id=1,  promptOverride="Where is world trade center? ")]
+requests = [make_input('gsm8k', 'lora', id=0), make_input('gsm8k', 'base', id=1)]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = PunicaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
