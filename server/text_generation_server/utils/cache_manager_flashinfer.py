@@ -2,6 +2,15 @@ from typing import Set, List
 import math
 import torch
 
+class KvCacheBatchPosition:
+    def __init__(self, seq_indptr: torch.Tensor, kv_page_indptr: torch.Tensor, 
+                 kv_page_indices: torch.Tensor, kv_last_page_len: torch.Tensor, 
+                 batch_size: int):
+        self.batch_size = batch_size
+        self.seq_indptr = seq_indptr
+        self.kv_page_indptr = kv_page_indptr
+        self.kv_page_indices = kv_page_indices
+        self.kv_last_page_len = kv_last_page_len
 
 class KvCachePool:
     def __init__(self, max_pages: int, num_layers: int, num_heads: int, head_dim: int, page_len: int, dtype: torch.dtype, device: torch.device):
@@ -41,10 +50,12 @@ class BatchKvCache:
         self.device = device
         self.kvCacheDict: dict[int, RequestKvCache] = {}
 
-    def getOrCreate(self, req_id, seq_init_len):
-        kvCache = self.kvCacheDict.get(req_id) or RequestKvCache(self.kvCachePool, self.page_len, seq_init_len)
-        self.kvCacheDict[req_id] = kvCache
-        return kvCache
+    def get(self, req_id):
+        return self.kvCacheDict.get(req_id)
+    
+    def create(self, req_id, seq_init_len):
+        self.kvCacheDict[req_id] = RequestKvCache(self.kvCachePool, self.page_len, seq_init_len)
+        return self.kvCacheDict[req_id]
     
     def release(self, req_id):
         del self.kvCacheDict[req_id]
@@ -56,23 +67,29 @@ class BatchKvCache:
     def setRequestOrder(self, requestIds: List[int]):
         self.requestIds = requestIds
 
-    def computeActiveKvData(self):
+    def getKvCacheBatchPosition(self, requestIds: List[int], isPrefill: bool):
         kv_page_indices_list = []
         kv_page_indptr_list = []
+        seq_indptr_list = []
         kv_last_page_len_list = []
         cum_pages = 0
-        for requestId in self.requestIds:
+        cum_seq_len = 0
+        for requestId in requestIds:
             kvCache = self.kvCacheDict[requestId]        
             kv_page_indices_list.extend(kvCache.kv_page_indices)
             kv_page_indptr_list.append(cum_pages)
+            seq_indptr_list.append(cum_seq_len)
             kv_last_page_len_list.append(kvCache.kv_last_page_len)
             cum_pages += len(kvCache.kv_page_indices)
+            cum_seq_len += kvCache.kv_len if isPrefill else 1
 
         kv_page_indptr_list.append(cum_pages)
+        seq_indptr_list.append(cum_seq_len)
         kv_page_indices = torch.tensor(kv_page_indices_list, dtype=torch.int32, device=self.device)
         kv_page_indptr = torch.tensor(kv_page_indptr_list, dtype=torch.int32, device=self.device)
         kv_last_page_len = torch.tensor(kv_last_page_len_list, dtype=torch.int32, device=self.device)
-        return kv_page_indices, kv_page_indptr, kv_last_page_len
+        seq_indptr = torch.tensor(seq_indptr_list, dtype=torch.int32, device=self.device)
+        return KvCacheBatchPosition(kv_page_indices, kv_page_indptr, kv_last_page_len, seq_indptr, len(requestIds))
 
 class ModelKvCache:
     def __init__(self, kvCachePool: KvCachePool):

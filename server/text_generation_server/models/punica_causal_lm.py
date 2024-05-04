@@ -197,10 +197,7 @@ class PunicaBatch(CausalLMBatch):
 class RequestContext:
     def __init__(
         self,
-        batch_id: int,
-        req_id: int,
         input_ids: list[int],
-        modelKvCacheFlashinfer: ModelKvCache,
         lora_id: str,
         tokenizer,
         *,
@@ -235,9 +232,6 @@ class RequestContext:
 
         self.output_ids = [int(x) for x in input_ids]
         self.prompt_len = len(self.output_ids)
-        self.batchKvCacheFlashinfer = modelKvCacheFlashinfer.getOrCreate(batch_id)
-        self.reqKvCacheFlashInfer = self.batchKvCacheFlashinfer.getOrCreate(req_id, self.prompt_len)
-        
         self.lora_id = lora_id
         self.tokenizer = tokenizer
         self.prefix_offset = 0
@@ -360,7 +354,7 @@ class PunicaLM(Model):
             device=device
         )
                 
-        self.modelKvCacheFlashinfer = ModelKvCache(kvCachePool)
+        self.modelKvCache = ModelKvCache(kvCachePool)
 
         self.lora_weights = {}
         self.defalut_rank = 16
@@ -427,13 +421,6 @@ class PunicaLM(Model):
                 self.lora_weights[lora_id] = lora_weight
                 logger.info(f'{lora_id} loaded!')
 
-    def _delete_request(self, reqid: Any):
-        reqctx = self.reqctx.pop(reqid)
-        reqctx.batchKvCacheFlashinfer.release(reqid)
-
-    def cancel_request(self, reqid: Any):
-        self._delete_request(reqid)
-
     def has_request(self):
         return len(self.reqctx)>0
 
@@ -461,10 +448,7 @@ class PunicaLM(Model):
                 raise ValueError("Cannot find lora weights", lora_id)
 
             self.reqctx[id] = RequestContext(
-                batch.batch_id,
-                id,
                 input,
-                self.modelKvCacheFlashinfer,
                 lora_id,
                 self.tokenizer,
                 temperature=parameters.temperature,
@@ -494,53 +478,52 @@ class PunicaLM(Model):
 
         reqs = sorted(
             self.reqctx.items(),
-            key=lambda kv: (not kv[1].is_prefill(), kv[1].lora_id),
+            key=lambda req: (not req[1].is_prefill(), req[1].lora_id),
         )
-        
-        requestIds = list(map(lambda req: req[0], reqs))
-        prefill_input_ids, prefill_lens = [], []
-        decode_input_ids = []
-        lora_ids, lora_lens = [], []
 
-        # The current assumption is that a batch is either decode or prefill batch
-        # TODO: make it handle mixed batch
-        isDecode = False
-        for _, reqctx in reqs:
-            if reqctx.is_prefill():
-                prefill_input_ids.extend(reqctx.output_ids)
-                prefill_lens.append(len(reqctx.output_ids))
+        input_ids = []
+        lora_ids, lora_lens = [], []
+        batchKvCache = self.modelKvCache.getOrCreate(batch.batch_id)
+        prefill_reqIds = []
+        decode_reqIds = []
+
+        for requestId, req in reqs:
+            input_ids.append(req.output_ids[-1])
+            if req.is_prefill():
+                prefill_reqIds.append(requestId)
+                batchKvCache.create(requestId, req.prompt_len)
             else:
-                isDecode = True
-                decode_input_ids.append(reqctx.output_ids[-1])
-            if lora_ids and lora_ids[-1] == reqctx.lora_id:
+                decode_reqIds.append(requestId)
+                batchKvCache.get(requestId).increment()
+            if lora_ids and lora_ids[-1] == req.lora_id:
                 lora_lens[-1] += 1
             else:
-                lora_ids.append(reqctx.lora_id)
+                lora_ids.append(req.lora_id)
                 lora_lens.append(1)
 
         input_ids = torch.tensor(
-                prefill_input_ids + decode_input_ids,
+                input_ids,
                 dtype=torch.long,
                 device=self.device,
             )
-        blen = BatchLenInfo(prefill_lens, len(decode_input_ids), self.device)
-        batchKvCacheFlashinfer = self.modelKvCacheFlashinfer.getOrCreate(batch.batch_id)
-        batchKvCacheFlashinfer.setRequestOrder(requestIds)
-        if isDecode:
-            batchKvCacheFlashinfer.increment()
         
+        prefillBatchPosition = batchKvCache.getKvCacheBatchPosition(prefill_reqIds, isPrefill=True)
+        decodeBatchPosition = batchKvCache.getKvCacheBatchPosition(decode_reqIds, isPrefill=False)
         lora = BatchedLlamaLoraWeight(
             [self.lora_weights[id] for id in lora_ids], lora_lens
         )
 
         # Forward pass
-        logits, _ = self.model(input_ids, blen, batchKvCacheFlashinfer, lora)
+        raw_logits, _ = self.model(input_ids, self.modelKvCache.kvCachePool, prefillBatchPosition, decodeBatchPosition, lora)
 
         start_decode = time.time_ns()
 
-        if not isDecode:
-            logits = logits[blen.indptr[1:] - 1]
+        prefill_logits = raw_logits[prefillBatchPosition.seq_indptr[1:] - 1] if prefillBatchPosition.batch_size > 0 else torch.tensor([], device=self.device)
+        decode_logits = raw_logits[prefillBatchPosition.batch_size:]
+        logits = torch.cat([prefill_logits, decode_logits])
 
+        cancelledRequestIdSet = set(batchKvCache.kvCacheDict.keys()) - set(prefill_reqIds + decode_reqIds)
+        stoppedRequestIdSet = set()
         generations: List[Generation] = []
         for i, (reqid, reqctx) in enumerate(reqs):
             next_token_id = reqctx.get_next_token_id(logits[i].unsqueeze(0))
@@ -551,7 +534,7 @@ class PunicaLM(Model):
             if is_stop:
                 output_text, _, _  = self.decode_token(reqctx.output_ids[:reqctx.read_offset], skip_special_tokens=True)
                 generated_text = GeneratedText(output_text, reqctx.read_offset, 0, None)
-                self._delete_request(reqid)
+                stoppedRequestIdSet.add(reqid)
             else:
                 generated_text = None
 
@@ -566,6 +549,10 @@ class PunicaLM(Model):
                 generated_text, None,
             )
             generations.append(generation)
+            
+        for requestId in cancelledRequestIdSet + stoppedRequestIdSet:
+            self.reqctx.pop(requestId)
+            batchKvCache.release(requestId)
 
         forward_ns = start_decode - start
         decode_ns = time.time_ns() - start_decode
