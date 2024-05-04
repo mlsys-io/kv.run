@@ -40,7 +40,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
         lora_id = "empty"
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
-    prompt = promptOverride or random.choice(prompts) # prompts[id]
+    prompt = prompts[id] # promptOverride or random.choice(prompts) # prompts[id]
     print(prompt)
     inputs = json.dumps({"inputs": prompt, "lora_id": lora_id})
 
@@ -64,8 +64,8 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     return request
 
 # Create an input batch of two queries
-# requests = [make_input('gsm8k', 'base', id=0, promptOverride="What is deep learning? "), make_input('gsm8k', 'lora', id=1,  promptOverride="Where is world trade center? ")]
-requests = [make_input('gsm8k', 'lora', id=0), make_input('gsm8k', 'base', id=1)]
+requests = [make_input('gsm8k', 'base', id=0, promptOverride="What is deep learning? "), make_input('gsm8k', 'lora', id=1,  promptOverride="Where is world trade center? ")]
+# requests = [make_input('gsm8k', 'lora', id=0), make_input('gsm8k', 'base', id=1)]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 pb_batch = PunicaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 

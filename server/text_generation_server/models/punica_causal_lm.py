@@ -488,11 +488,12 @@ class PunicaLM(Model):
         decode_reqIds = []
 
         for requestId, req in reqs:
-            input_ids.append(req.output_ids[-1])
             if req.is_prefill():
+                input_ids.extend(req.output_ids)
                 prefill_reqIds.append(requestId)
                 batchKvCache.create(requestId, req.prompt_len)
             else:
+                input_ids.append(req.output_ids[-1])
                 decode_reqIds.append(requestId)
                 batchKvCache.get(requestId).increment()
             if lora_ids and lora_ids[-1] == req.lora_id:
@@ -518,8 +519,8 @@ class PunicaLM(Model):
 
         start_decode = time.time_ns()
 
-        prefill_logits = raw_logits[prefillBatchPosition.seq_indptr[1:] - 1] if prefillBatchPosition.batch_size > 0 else torch.tensor([], device=self.device)
-        decode_logits = raw_logits[prefillBatchPosition.batch_size:]
+        prefill_logits = raw_logits[prefillBatchPosition.seq_indptr[1:] - 1] if prefillBatchPosition.total_seq_len > 0 else torch.tensor([], device=self.device)
+        decode_logits = raw_logits[prefillBatchPosition.total_seq_len:]
         logits = torch.cat([prefill_logits, decode_logits])
 
         cancelledRequestIdSet = set(batchKvCache.kvCacheDict.keys()) - set(prefill_reqIds + decode_reqIds)
@@ -550,7 +551,7 @@ class PunicaLM(Model):
             )
             generations.append(generation)
             
-        for requestId in cancelledRequestIdSet + stoppedRequestIdSet:
+        for requestId in cancelledRequestIdSet | stoppedRequestIdSet:
             self.reqctx.pop(requestId)
             batchKvCache.release(requestId)
 
