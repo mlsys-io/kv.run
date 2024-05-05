@@ -347,7 +347,7 @@ class PunicaLM(Model):
         kvCachePool = KvCachePool(
             max_pages=TOTAL_NUM_PAGES_FLASHINFER,
             num_layers=self.model_config.num_hidden_layers,
-            num_heads=self.model_config.num_attention_heads,
+            num_heads=self.model_config.num_key_value_heads,
             head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
             page_len=PAGE_LEN,
             dtype=dtype,
