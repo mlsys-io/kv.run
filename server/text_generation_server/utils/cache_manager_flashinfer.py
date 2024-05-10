@@ -28,7 +28,10 @@ class KvCachePool:
         
         allocated_indices = free_page_indices[:num_pages]
         self.free_page_mask[allocated_indices] = False
-        return allocated_indices.tolist()
+        return allocated_indices.squeeze(1).tolist()
+    
+    def deallocate(self, kv_page_indices: List[int]):
+        self.free_page_mask[kv_page_indices] = True
         
 class RequestKvCache:
     def __init__(self, kvCachePool: KvCachePool, page_len:int, seq_init_len: int):
@@ -44,7 +47,11 @@ class RequestKvCache:
         self.kv_last_page_len += 1
         if self.kv_last_page_len > self.page_len:
             self.kv_last_page_len -= self.page_len
-            self.kv_page_indices.extend(self.kvCachePool.allocate(1))
+            new_indices = self.kvCachePool.allocate(1)
+            self.kv_page_indices.extend(new_indices)
+            
+    def release(self):
+        self.kvCachePool.deallocate(self.kv_page_indices)
 
 class BatchKvCache:
     def __init__(self, kvCachePool: KvCachePool, page_len, device):
@@ -61,6 +68,7 @@ class BatchKvCache:
         return self.kvCacheDict[req_id]
     
     def release(self, req_id):
+        self.kvCacheDict[req_id].release()
         del self.kvCacheDict[req_id]
 
     def increment(self):
