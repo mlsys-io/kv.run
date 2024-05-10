@@ -24,6 +24,7 @@ from text_generation_server.models.types import (
     GeneratedText,
 )
 from text_generation_server.utils import NextTokenChooser, StoppingCriteria, Sampling
+from text_generation_server.utils.dist import MEMORY_FRACTION
 from dataclasses import dataclass
 from transformers import AutoTokenizer
 
@@ -342,10 +343,27 @@ class PunicaLM(Model):
 
         self.model_config = model.config
         
-        TOTAL_NUM_PAGES_FLASHINFER = 500
+        # consider moving it into cache manager
         PAGE_LEN = 16
+        cache_page_size = (
+            2 * 
+            PAGE_LEN * 
+            self.model_config.num_hidden_layers * 
+            self.model_config.num_attention_heads * 
+            (self.model_config.hidden_size // self.model_config.num_attention_heads) *
+            dtype.element_size()
+        )
+        
+        total_free_memory, _ = torch.cuda.mem_get_info(self.device)
+        total_gpu_memory = torch.cuda.get_device_properties(self.device).total_memory
+        free_memory = max(
+            0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
+        )
+        num_pages_to_allocate = int(free_memory / cache_page_size)
+        
+        print("Cache allocation", (cache_page_size, dtype.element_size(), free_memory, total_gpu_memory, total_free_memory, num_pages_to_allocate))
         kvCachePool = KvCachePool(
-            max_pages=TOTAL_NUM_PAGES_FLASHINFER,
+            max_pages=num_pages_to_allocate,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
             head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
