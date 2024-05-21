@@ -1,4 +1,3 @@
-# Test punica batch prefill and batch decode interfaces against direct attention computation
 # Editor: Alfred Gui
 
 import pytest

@@ -1,6 +1,6 @@
 from text_generation_server.pb import generate_pb2
 import torch
-from server.text_generation_server.models.flashinfer_causal_lm import PunicaLM, PunicaBatch
+from server.text_generation_server.models.flashinfer_causal_lm import FlashinferLM, FlashinferBatch
 import random, json
 from test_cases import DEMO, LoraSpec
 
@@ -46,13 +46,13 @@ test = 'llama-3'
 
 if test == 'llama-2':
     # Load model
-    service = PunicaLM(model_id="meta-llama/Llama-2-7b-hf",
+    service = FlashinferLM(model_id="meta-llama/Llama-2-7b-hf",
               lora_ids={'llama2-gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'})
     # Create an input batch of two queries
     requests = [make_input('llama2-gsm8k', 'base', id=0), make_input('llama2-gsm8k', 'lora', id=1)]
 elif test == 'llama-3':
     # Load model
-    service = PunicaLM(model_id="tjluyao/llama-3-8b",
+    service = FlashinferLM(model_id="tjluyao/llama-3-8b",
               lora_ids={'llama3-math':'tjluyao/llama-3-8b-math',
                         'llama3-zh': 'tjluyao/llama-3-8b-zh'})
     # Test load lora adapters
@@ -73,7 +73,7 @@ print(service.get_lora_adapters())
 tokenizer = service.tokenizer
 
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
-pb_batch = PunicaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
+pb_batch = FlashinferBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
 # Add input batch to model service
 ids = service.add_request(pb_batch)
@@ -82,8 +82,8 @@ display_results = {}
 # Iterative generation: each step generates a token for each input in the batch
 while True:
     # When calling iterative text generation, we may add new inputs (use pb_batch like above)
-    # or use an empty batch (use EmptyPunicaBatch)
-    generations, _, _ = service.generate_token(PunicaBatch.Empty(batch.id))
+    # or use an empty batch (use EmptyFlashinferBatch)
+    generations, _, _ = service.generate_token(FlashinferBatch.Empty(batch.id))
     # Stop if all input generations are done
     if not generations:
         break

@@ -105,7 +105,7 @@ class TextGenerationChunk(TypedDict):
     is_stop: bool
 
 @dataclass
-class PunicaBatch(CausalLMBatch):
+class FlashinferBatch(CausalLMBatch):
     @classmethod
     def Empty(cls, batch_id):
         return cls(
@@ -286,7 +286,7 @@ class RequestContext:
             return ""
 
 
-class PunicaLM(Model):
+class FlashinferLM(Model):
     def __init__(
         self,
         model_id: str = None,
@@ -394,7 +394,7 @@ class PunicaLM(Model):
 
         self.reqctx: dict[int, RequestContext] = {}
 
-        super(PunicaLM, self).__init__(
+        super(FlashinferLM, self).__init__(
             model=model,
             tokenizer=tokenizer,
             requires_padding=True,
@@ -456,15 +456,15 @@ class PunicaLM(Model):
         return len(self.reqctx)>0
 
     @property
-    def batch_type(self) -> Type[PunicaBatch]:
-        return PunicaBatch
+    def batch_type(self) -> Type[FlashinferBatch]:
+        return FlashinferBatch
 
     def decode(self, generated_ids: List[int]) -> str:
         return self.tokenizer.decode(
             generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
 
-    def add_request(self, batch: PunicaBatch):
+    def add_request(self, batch: FlashinferBatch):
         ids = []
         for r in range(len(batch.requests)):
             id = batch.requests[r].id
@@ -495,8 +495,8 @@ class PunicaLM(Model):
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
     def generate_token(
-        self, batch: PunicaBatch
-    )-> Tuple[List[Generation], Optional[PunicaBatch], Tuple[int, int]]:
+        self, batch: FlashinferBatch
+    )-> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
         start = time.time_ns()
 
         if hasattr(batch, 'requests') and batch.requests:

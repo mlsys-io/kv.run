@@ -1,4 +1,4 @@
-from server.text_generation_server.models.flashinfer_causal_lm import PunicaLM, PunicaBatch
+from server.text_generation_server.models.flashinfer_causal_lm import FlashinferLM, FlashinferBatch
 
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
 
@@ -32,7 +32,7 @@ class MultiLora:
         self.stop_signal = threading.Event()
         self.id = 1
         # Load base model
-        self.model = PunicaLM(model_id=base_model, lora_ids=lora_ids)
+        self.model = FlashinferLM(model_id=base_model, lora_ids=lora_ids)
         self.tokenizer = self.model.tokenizer
 
         # Create text generation requests
@@ -71,7 +71,7 @@ class MultiLora:
                 stop_sequences=[],
                 ignore_eos_token=True))
         batch = generate_pb2.Batch(id = 0, requests = [request], size = 1)
-        pb_batch = PunicaBatch.from_pb(batch, self.tokenizer, torch.float16, torch.device("cuda"))
+        pb_batch = FlashinferBatch.from_pb(batch, self.tokenizer, torch.float16, torch.device("cuda"))
         self.model.add_request(pb_batch)
         self.id+=1
         return self.id-1, prompt
@@ -85,7 +85,7 @@ class MultiLora:
     ):
         time.sleep(0.1)
         while not self.stop_signal.is_set():
-            generations, _, timing = self.model.generate_token(PunicaBatch.from_pb(generate_pb2.Batch()))
+            generations, _, timing = self.model.generate_token(FlashinferBatch.from_pb(generate_pb2.Batch()))
             for gen in generations:
                 append_box('-'.join(self.reqname[gen.request_id]), gen.tokens.texts[0])
 
