@@ -1,4 +1,4 @@
-from text_generation_server.models.punica_causal_lm import PunicaLM, PunicaBatch
+from server.text_generation_server.models.flashinfer_causal_lm import PunicaLM, PunicaBatch
 
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
 

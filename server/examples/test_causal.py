@@ -1,6 +1,5 @@
 from text_generation_server.pb import generate_pb2
 import torch
-from text_generation_server.models.punica_causal_lm import PunicaLM, PunicaBatch
 from text_generation_server.models.causal_lm import CausalLM, CausalLMBatch
 import random, json
 from test_cases import DEMO, LoraSpec

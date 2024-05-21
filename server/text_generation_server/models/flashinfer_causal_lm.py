@@ -5,7 +5,7 @@ import torch
 from typing import Any, TypedDict, cast
 from transformers.models.llama.modeling_llama import LlamaConfig
 from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
-from .custom_modeling.punica_llama_lora import LlamaForCausalLM, LlamaLoraWeight, BatchedLlamaLoraWeight
+from .custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM, LlamaLoraWeight, BatchedLlamaLoraWeight
 from transformers import PreTrainedTokenizerBase
 import peft, transformers
 from huggingface_hub import hf_hub_download
