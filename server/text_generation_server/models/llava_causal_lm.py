@@ -2,7 +2,6 @@
 # Editor: Junyi Shen
 
 import torch
-from text_generation_server.utils.punica_utils import BatchedKvCache, BatchLenInfo, KvPool, KvCache
 from .custom_modeling.embedding_llama import LlamaForCausalLM
 
 import time

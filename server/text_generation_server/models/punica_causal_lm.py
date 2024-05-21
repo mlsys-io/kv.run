@@ -4,7 +4,6 @@
 import torch
 from typing import Any, TypedDict, cast
 from transformers.models.llama.modeling_llama import LlamaConfig
-from text_generation_server.utils.punica_utils import BatchedKvCache, BatchLenInfo, KvPool, KvCache
 from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
 from .custom_modeling.punica_llama_lora import LlamaForCausalLM, LlamaLoraWeight, BatchedLlamaLoraWeight
 from transformers import PreTrainedTokenizerBase

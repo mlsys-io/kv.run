@@ -6,8 +6,6 @@ import torch
 import math
 from torch.nn import functional as F
 from typing import List
-from punica_kernels import append_kv, batch_decode, batch_prefill, init_kv
-from text_generation_server.utils.punica_utils import BatchedKvCache, BatchLenInfo, KvCache, KvPool
 
 numHead = 2
 headDim = 128
@@ -22,46 +20,6 @@ def assert_close(a, b):
         torch.bfloat16: (8e-3, 8e-3),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
-
-def test_batch_prefill_punica():
-    seqLens = [1, 3, 2]
-    totalSeqLen = sum(seqLens)
-    num_layers = 1
-    layer_index = 0
-    torch.manual_seed(0xABCDABCD987)
-    k = torch.randn(totalSeqLen, numHead, headDim, dtype=dtype, device=device)
-    v = torch.randn(totalSeqLen, numHead, headDim, dtype=dtype, device=device)
-    q = torch.randn(totalSeqLen, numHead, headDim, dtype=dtype, device=device)
-    
-    cacheList, batchedKvCache, blen = init_cache(seqLens, numHead, headDim, num_layers)
-    init_kv(batchedKvCache, k, v, blen.indptr, layer_index)
-    punica_attn = batch_prefill(q, blen.indptr, batchedKvCache, layer_index)
-    baseline_attn = batch_prefill_baseline(q, k, v, seqLens)
-    assert_close(punica_attn, baseline_attn)
-
-def test_batch_decode_punica():
-    seqLens = [1, 3, 2]
-    numSeqs = len(seqLens)
-    totalSeqLen = sum(seqLens)
-    num_layers = 1
-    layer_index = 0
-    torch.manual_seed(0xABCDABCD987)
-    k = torch.randn(totalSeqLen, numHead, headDim, dtype=dtype, device=device)
-    v = torch.randn(totalSeqLen, numHead, headDim, dtype=dtype, device=device)
-    q = torch.randn(numSeqs, numHead, headDim, dtype=dtype, device=device)
-
-    cacheList, batchedKvCache, blen = init_cache(seqLens, numHead, headDim, num_layers)
-    init_kv(batchedKvCache, k, v, blen.indptr, layer_index)
-    punica_attn = batch_decode(q, batchedKvCache, layer_index)
-    baseline_attn = batch_decode_baseline(q, k, v, seqLens)
-    assert_close(punica_attn, baseline_attn)
-
-def init_cache(seqLens, numHead, headDim, num_layers):
-    kvPool = KvPool(num_layers, numHead, headDim, page_len, dtype, device) 
-    blen = BatchLenInfo(seqLens, 0, device)
-    cacheList = [KvCache(kvPool, l) for l in seqLens]
-    batchedKvCache = BatchedKvCache(cacheList)
-    return cacheList, batchedKvCache, blen
 
 ## q: (seqLen, numHead, headDim)
 ## k: (seqLen, numHead, headDim)
