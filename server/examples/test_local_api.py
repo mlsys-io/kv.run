@@ -1,6 +1,6 @@
 from text_generation_server.pb import generate_pb2
 import torch
-from server.text_generation_server.models.flashinfer_causal_lm import FlashinferLM, FlashinferBatch
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM, FlashinferBatch
 import random, json
 from test_cases import DEMO, LoraSpec
 

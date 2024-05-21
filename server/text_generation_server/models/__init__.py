@@ -21,7 +21,7 @@ from text_generation_server.models.santacoder import SantaCoder
 from text_generation_server.models.t5 import T5Sharded
 from text_generation_server.models.gpt_neox import GPTNeoxSharded
 from text_generation_server.models.phi import Phi
-from server.text_generation_server.models.flashinfer_causal_lm import FlashinferLM
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
 # in PyTorch 1.12 and later.
