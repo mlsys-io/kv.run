@@ -15,7 +15,6 @@ from text_generation_server.utils.layers import (
     TensorParallelRowLinear,
     TensorParallelColumnLinear,
     TensorParallelEmbedding,
-    PositionRotaryEmbedding,
     SpeculativeHead,
     get_linear,
     FastRMSNorm,
@@ -540,9 +539,9 @@ class FlashGemmaModel(torch.nn.Module):
 
         self.gradient_checkpointing = False
 
-        self.head_size = self.layers[0].self_attn.head_size
-        self.num_heads = self.layers[0].self_attn.num_heads
-        self.num_key_value_heads = self.layers[0].self_attn.num_key_value_heads
+        self.head_size = self.layers[0].self_attn.head_dim
+        self.num_heads = self.layers[0].self_attn.num_qo_heads
+        self.num_key_value_heads = self.layers[0].self_attn.num_kv_heads
 
     def forward(
         self,

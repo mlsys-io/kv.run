@@ -337,6 +337,21 @@ class FlashinferLM(Model):
             else:
                 raise NotImplementedError("FlashGemma is only available on GPU")
 
+            gemmaConfig = GemmaConfig.from_pretrained(
+                model_id, revision=revision, trust_remote_code=trust_remote_code
+            )
+            
+            gemmaConfig.quantize = None
+            gemmaConfig.use_medusa = False
+
+            torch.distributed.barrier(group=process_group)
+
+            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
+            weights = Weights(filenames, device, dtype, process_group=process_group)
+            if gemmaConfig.quantize in ["gptq", "awq"]:
+                weights._set_gptq_params(model_id, revision)
+
+            model = FlashGemmaForCausalLM(gemmaConfig, weights)
             tokenizer = GemmaTokenizerFast.from_pretrained(
                 model_id,
                 revision=revision,
@@ -346,19 +361,7 @@ class FlashinferLM(Model):
                 use_fast=True,
                 from_slow=False,
             )
-
-            gemmaConfig = GemmaConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-
-            torch.distributed.barrier(group=self.process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=self.process_group)
-            if gemmaConfig.quantize in ["gptq", "awq"]:
-                weights._set_gptq_params(model_id, revision)
-
-            model = FlashGemmaForCausalLM(gemmaConfig, weights)
+            model.config = gemmaConfig
         else:
             raise NotImplementedError(f"Flashinfer is not implemented for: {model_type}")     
         
