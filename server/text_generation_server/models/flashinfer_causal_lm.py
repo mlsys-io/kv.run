@@ -2,10 +2,16 @@
 # Editor: Junyi Shen
 
 import torch
-from typing import Any, TypedDict, cast
+import torch.distributed
+from typing import Any, TypedDict, Optional
 from transformers.models.llama.modeling_llama import LlamaConfig
 from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
 from .custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM, LlamaLoraWeight, BatchedLlamaLoraWeight
+from .custom_modeling.flashinfer_gemma_modeling import (
+    GemmaTokenizerFast,
+    FlashGemmaForCausalLM,
+    GemmaConfig,
+)
 from transformers import PreTrainedTokenizerBase
 import peft, transformers
 from huggingface_hub import hf_hub_download
@@ -22,7 +28,13 @@ from text_generation_server.models.types import (
     Generation,
     GeneratedText,
 )
-from text_generation_server.utils import NextTokenChooser, StoppingCriteria, Sampling
+from text_generation_server.utils import (
+    NextTokenChooser,
+    StoppingCriteria,
+    initialize_torch_distributed,
+    weight_files,
+    Weights,
+)
 from text_generation_server.utils.dist import MEMORY_FRACTION
 from dataclasses import dataclass
 from transformers import AutoTokenizer
@@ -282,6 +294,7 @@ class RequestContext:
 class FlashinferLM(Model):
     def __init__(
         self,
+        model_type: str,
         model_id: str = None,
         lora_ids: Dict = None,
         revision: Optional[str] = None,
@@ -305,17 +318,50 @@ class FlashinferLM(Model):
 
         self.device = device
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = LlamaForCausalLM.from_pretrained(
-            model_id,
-            revision=revision,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
-            device_map=device,
-            #device_map="auto" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else None,
-            load_in_8bit=quantize == "bitsandbytes",
-            trust_remote_code=trust_remote_code,
-        )
+        if model_type == "llama":
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = LlamaForCausalLM.from_pretrained(
+                model_id,
+                revision=revision,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+                device_map=device,
+                load_in_8bit=quantize == "bitsandbytes",
+                trust_remote_code=trust_remote_code,
+            )
+        elif model_type == "gemma":
+            process_group, rank, world_size = initialize_torch_distributed()
+            if torch.cuda.is_available():
+                device = torch.device(f"cuda:{rank}")
+                dtype = torch.bfloat16 if dtype is None else dtype
+            else:
+                raise NotImplementedError("FlashGemma is only available on GPU")
+
+            tokenizer = GemmaTokenizerFast.from_pretrained(
+                model_id,
+                revision=revision,
+                padding_side="left",
+                truncation_side="left",
+                trust_remote_code=trust_remote_code,
+                use_fast=True,
+                from_slow=False,
+            )
+
+            gemmaConfig = GemmaConfig.from_pretrained(
+                model_id, revision=revision, trust_remote_code=trust_remote_code
+            )
+
+            torch.distributed.barrier(group=self.process_group)
+
+            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
+            weights = Weights(filenames, device, dtype, process_group=self.process_group)
+            if gemmaConfig.quantize in ["gptq", "awq"]:
+                weights._set_gptq_params(model_id, revision)
+
+            model = FlashGemmaForCausalLM(gemmaConfig, weights)
+        else:
+            raise NotImplementedError(f"Flashinfer is not implemented for: {model_type}")     
+        
         if (
             torch.cuda.is_available()
             and torch.cuda.device_count() == 1

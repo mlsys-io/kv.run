@@ -1,23 +1,4 @@
-# coding=utf-8
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# Adapted from TGI's flash_gemma_modeling.py
 import torch
 import torch.distributed
 import os
@@ -30,8 +11,6 @@ from typing import Optional, List, Tuple
 from tokenizers import processors
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 from transformers.utils import logging
-
-from text_generation_server.utils import paged_attention, flash_attn
 from text_generation_server.utils.layers import (
     TensorParallelRowLinear,
     TensorParallelColumnLinear,
@@ -41,6 +20,23 @@ from text_generation_server.utils.layers import (
     get_linear,
     FastRMSNorm,
 )
+
+
+import math
+import flashinfer
+from punica_kernels import (
+    add_lora_sgmv_custom_cutlass as add_lora,
+    rms_norm,
+)
+from text_generation_server.utils.lora_utils import BatchedLoraWeight, LoraWeight
+from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+
+class FlashinferBatch:
+    def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
+        self.seq_indptr = seq_indptr
+        self.kv_page_indptr = kv_page_indptr
+        self.kv_page_indices = kv_page_indices
+        self.kv_last_page_len = kv_last_page_len
 
 GemmaTokenizer = None
 
@@ -254,13 +250,11 @@ class GemmaConfig(PretrainedConfig):
             **kwargs,
         )
 
-
 class GemmaFastRMSNorm(FastRMSNorm):
     @classmethod
     def load(cls, prefix, weights, eps=1e-6):
         weight = weights.get_tensor(f"{prefix}.weight") + 1
         return cls(weight, eps)
-
 
 def load_attention(config, prefix, weights):
     if config.num_attention_heads != config.num_key_value_heads:
@@ -273,7 +267,6 @@ def load_attention(config, prefix, weights):
             weights=weights,
             bias=False,
         )
-
 
 def _load_gqa(config, prefix: str, weights):
     assert config.num_attention_heads % weights.process_group.size() == 0
@@ -299,109 +292,142 @@ def _load_gqa(config, prefix: str, weights):
         get_linear(weight, bias=None, quantize=config.quantize)
     )
 
-
-class FlashGemmaAttention(torch.nn.Module):
-    def __init__(
-        self,
-        prefix: str,
-        config,
-        weights,
-    ):
+class FlashGemmaAttention(nn.Module):
+    def __init__(self, prefix: str, config: GemmaConfig, weights, layer_idx: int):
         super().__init__()
         self.num_heads = config.num_attention_heads
-        self.head_size = config.head_dim
-
-        self.rotary_emb = PositionRotaryEmbedding.static(
-            config=config,
-            dim=self.head_size,
-            base=config.rope_theta,
-            device=weights.device,
-        )
-
-        self.softmax_scale = self.head_size**-0.5
-
+        self.head_dim = config.head_dim
         if self.num_heads % weights.process_group.size() != 0:
             raise ValueError(
                 f"`num_heads` must be divisible by `num_shards` (got `num_heads`: {self.num_heads} "
                 f"and `num_shards`: {weights.process_group.size()}"
             )
-        self.num_heads = self.num_heads // weights.process_group.size()
-        self.num_key_value_heads = (
+        self.num_qo_heads = self.num_heads // weights.process_group.size()
+        self.num_kv_heads = (
             config.num_key_value_heads // weights.process_group.size()
         )
+        # self.num_groups = self.num_heads // self.num_key_value_heads
 
-        self.query_key_value = load_attention(config, prefix, weights)
-
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.layer_idx = layer_idx
+        self.qkv_proj = load_attention(config, prefix, weights)
         self.o_proj = TensorParallelRowLinear.load(
             config,
             prefix=f"{prefix}.o_proj",
             weights=weights,
             bias=False,
         )
-        self.num_groups = self.num_heads // self.num_key_value_heads
-        self.kv_head_mapping = torch.arange(
-            0, self.num_key_value_heads, dtype=torch.int32, device=weights.device
-        ).repeat_interleave(self.num_groups)
 
     def forward(
         self,
-        hidden_states,
-        cos,
-        sin,
-        cu_seqlen_prefill,
-        kv_cache,
-        block_tables,
-        slots,
-        input_lengths,
-        max_s,
-    ):
-        qkv = self.query_key_value(hidden_states)
-        query, kv = qkv.split(
+        hidden_states: torch.Tensor,
+        kvCachePool: KvCachePool, 
+        prefillBatchPosition: KvCacheBatchPosition,
+        decodeBatchPosition: KvCacheBatchPosition
+    ) -> torch.Tensor:
+        qkv = self.qkv_proj(hidden_states)
+        q_proj, k_proj, v_proj = qkv.split(
             [
-                self.head_size * self.num_heads,
-                2 * self.head_size * self.num_key_value_heads,
+                self.head_dim * self.num_qo_heads,
+                self.head_dim * self.num_kv_heads,
+                self.head_dim * self.num_kv_heads
             ],
             dim=1,
         )
-        query = query.view(-1, self.num_heads, self.head_size)
-        kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
 
-        self.rotary_emb(query, torch.select(kv, dim=1, index=0), cos, sin)
+        stack_attn_output = []
+        workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device)
+        prefillTotalSeqLen = prefillBatchPosition.total_seq_len
+        if prefillTotalSeqLen > 0:
+            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
+            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            
+            seq_indptr = prefillBatchPosition.seq_indptr.clone()
+            kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
+            kv_page_indptr = prefillBatchPosition.kv_page_indptr.clone()
+            kv_last_page_len = prefillBatchPosition.kv_last_page_len.clone()
+            
+            flashinfer.append_paged_kv_cache(
+                k,
+                v,
+                seq_indptr,
+                kvCachePool.cache_data[self.layer_idx],
+                kv_page_indices,
+                kv_page_indptr,
+                kv_last_page_len)
 
-        paged_attention.reshape_and_cache(
-            kv[:, 0], kv[:, 1], kv_cache[0], kv_cache[1], slots
-        )
-
-        # output tensor
-        attn_output = torch.empty_like(query)
-
-        # Prefill
-        if cu_seqlen_prefill is not None:
-            # flash attention
-            flash_attn.attention(
-                query,
-                torch.select(kv, dim=1, index=0),
-                torch.select(kv, dim=1, index=1),
-                attn_output,
-                cu_seqlen_prefill,
-                max_s,
-                self.softmax_scale,
+            prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD"
             )
-        # Decode
+
+            prefill_wrapper.begin_forward(
+                seq_indptr,
+                kv_page_indptr,
+                kv_page_indices,
+                kv_last_page_len,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+            )
+            
+            attn_output_prefill = prefill_wrapper.forward(
+                q, 
+                kvCachePool.cache_data[self.layer_idx], 
+                causal=True, 
+                pos_encoding_mode="ROPE_LLAMA" # this may need change
+            ).view(prefillTotalSeqLen, self.hidden_size)
+            prefill_wrapper.end_forward()
+            stack_attn_output.append(attn_output_prefill)
+
+        decodeTotalSeqLen = decodeBatchPosition.total_seq_len
+        if decodeTotalSeqLen > 0:
+            q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim)
+            k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+            v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+
+            flashinfer.append_paged_kv_cache(
+                k,
+                v,
+                decodeBatchPosition.seq_indptr,
+                kvCachePool.cache_data[self.layer_idx],
+                decodeBatchPosition.kv_page_indices,
+                decodeBatchPosition.kv_page_indptr,
+                decodeBatchPosition.kv_last_page_len
+            )
+
+            decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD"
+            )
+            decode_wrapper.begin_forward(
+                decodeBatchPosition.kv_page_indptr,
+                decodeBatchPosition.kv_page_indices,
+                decodeBatchPosition.kv_last_page_len,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                kvCachePool.page_len,
+                pos_encoding_mode="ROPE_LLAMA"
+            )
+            
+            attn_output_decode = decode_wrapper.forward(
+                q, 
+                kvCachePool.cache_data[self.layer_idx], 
+                pos_encoding_mode="ROPE_LLAMA"
+            ).view(decodeTotalSeqLen, self.hidden_size)
+
+            decode_wrapper.end_forward()
+            stack_attn_output.append(attn_output_decode)
+
+        if len(stack_attn_output) == 1:
+            attn_outputs = stack_attn_output[0]
         else:
-            paged_attention.attention(
-                attn_output,
-                query,
-                kv_cache[0],
-                kv_cache[1],
-                self.kv_head_mapping,
-                self.softmax_scale,
-                block_tables,
-                input_lengths,
-                max_s,
-            )
+            attn_outputs = torch.cat(stack_attn_output, dim=0)
 
-        return self.o_proj(attn_output.view(-1, self.num_heads * self.head_size))
+        # output projection
+        o = self.o_proj(attn_outputs)
+        return o
 
 
 class GemmaMLP(nn.Module):
@@ -441,13 +467,12 @@ class GemmaMLP(nn.Module):
         gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
         return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
 
-
 class FlashGemmaLayer(nn.Module):
     def __init__(self, layer_id, config, weights):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = FlashGemmaAttention(
-            prefix=f"{prefix}.self_attn", config=config, weights=weights
+            prefix=f"{prefix}.self_attn", config=config, weights=weights, layer_idx=layer_id
         )
         self.mlp = GemmaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
 
@@ -462,30 +487,18 @@ class FlashGemmaLayer(nn.Module):
 
     def forward(
         self,
-        hidden_states,
-        residual,
-        cos,
-        sin,
-        cu_seqlen_prefill,
-        kv_cache,
-        block_tables,
-        slots,
-        input_lengths,
-        max_s,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        kvCachePool: KvCachePool, 
+        prefillBatchPosition: KvCacheBatchPosition,
+        decodeBatchPosition: KvCacheBatchPosition
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
-
-        # Self Attention
         attn_output = self.self_attn(
             normed_hidden_states,
-            cos,
-            sin,
-            cu_seqlen_prefill,
-            kv_cache,
-            block_tables,
-            slots,
-            input_lengths,
-            max_s,
+            kvCachePool,
+            prefillBatchPosition,
+            decodeBatchPosition
         )
 
         # faster post attention rms norm
@@ -534,35 +547,19 @@ class FlashGemmaModel(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        cu_seqlen_prefill: Optional[torch.Tensor],
-        kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
-        block_tables: torch.Tensor,
-        slots: torch.Tensor,
-        input_lengths: torch.Tensor,
-        max_s: int,
+        kvCachePool: KvCachePool, 
+        prefillBatchPosition: KvCacheBatchPosition,
+        decodeBatchPosition: KvCacheBatchPosition
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-
-        # Get rotary cos and sin for this forward
-        # Avoid to index in each layer
-        cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(
-            position_ids, max_s, hidden_states.dtype
-        )
-
         residual = None
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                cos,
-                sin,
-                cu_seqlen_prefill,
-                kv_cache[i],
-                block_tables,
-                slots,
-                input_lengths,
-                max_s,
+                kvCachePool,
+                prefillBatchPosition,
+                decodeBatchPosition
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -584,26 +581,16 @@ class FlashGemmaForCausalLM(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        cu_seqlen_prefill: Optional[torch.Tensor],
-        kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
-        block_tables: torch.Tensor,
-        slots: torch.Tensor,
-        input_lengths: torch.Tensor,
-        max_s: int,
-        lm_head_indices: Optional[torch.Tensor] = None,
+        kvCachePool: KvCachePool,
+        prefillBatchPosition: KvCacheBatchPosition,
+        decodeBatchPosition: KvCacheBatchPosition,
+        lora = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
             input_ids,
-            position_ids,
-            cu_seqlen_prefill,
-            kv_cache,
-            block_tables,
-            slots,
-            input_lengths,
-            max_s,
+            kvCachePool,
+            prefillBatchPosition,
+            decodeBatchPosition
         )
-        if lm_head_indices is not None:
-            hidden_states = hidden_states[lm_head_indices]
         logits, speculative_logits = self.lm_head(hidden_states)
         return logits, speculative_logits

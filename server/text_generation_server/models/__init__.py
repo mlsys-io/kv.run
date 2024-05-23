@@ -342,7 +342,7 @@ def get_model(
             if lora_ids:
                 for it in lora_ids.split(','):
                     loraids[it.split(':')[0]] = it.split(':')[1]
-            return FlashinferLM(model_id, loraids)
+            return FlashinferLM(model_type, model_id, loraids)
         elif FLASH_ATTENTION:
             return FlashLlama(
                 model_id,
@@ -364,7 +364,13 @@ def get_model(
                 trust_remote_code=trust_remote_code,
             )
     if model_type == "gemma":
-        if FLASH_ATTENTION:
+        if FLASHINFER_AVAILABLE:
+            loraids = {}
+            if lora_ids:
+                for it in lora_ids.split(','):
+                    loraids[it.split(':')[0]] = it.split(':')[1]
+            return FlashinferLM(model_type, model_id, loraids)
+        elif FLASH_ATTENTION:
             return FlashGemma(
                 model_id,
                 revision,
