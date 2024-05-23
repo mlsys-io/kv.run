@@ -16,8 +16,7 @@ from text_generation_server.utils.layers import (
     TensorParallelColumnLinear,
     TensorParallelEmbedding,
     SpeculativeHead,
-    get_linear,
-    FastRMSNorm,
+    get_linear
 )
 
 
@@ -249,11 +248,17 @@ class GemmaConfig(PretrainedConfig):
             **kwargs,
         )
 
-class GemmaFastRMSNorm(FastRMSNorm):
-    @classmethod
-    def load(cls, prefix, weights, eps=1e-6):
+class GemmaRMSNorm(nn.Module):
+    def __init__(self, prefix, weights, eps=1e-6):
         weight = weights.get_tensor(f"{prefix}.weight") + 1
-        return cls(weight, eps)
+        self.weight = nn.Parameter(weight)
+        self.variance_epsilon = eps
+        
+    def forward(self, hidden_states, residual=None):
+        if residual is not None:
+            hidden_states += residual
+        residual = hidden_states
+        return rms_norm(hidden_states, self.weight, self.variance_epsilon), residual
 
 def load_attention(config, prefix, weights):
     if config.num_attention_heads != config.num_key_value_heads:
@@ -475,10 +480,10 @@ class FlashGemmaLayer(nn.Module):
         )
         self.mlp = GemmaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
 
-        self.input_layernorm = GemmaFastRMSNorm.load(
+        self.input_layernorm = GemmaRMSNorm(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = GemmaFastRMSNorm.load(
+        self.post_attention_layernorm = GemmaRMSNorm(
             prefix=f"{prefix}.post_attention_layernorm",
             weights=weights,
             eps=config.rms_norm_eps,
@@ -500,7 +505,6 @@ class FlashGemmaLayer(nn.Module):
             decodeBatchPosition
         )
 
-        # faster post attention rms norm
         normed_attn_res_output, attn_res = self.post_attention_layernorm(
             attn_output, res
         )
@@ -533,7 +537,7 @@ class FlashGemmaModel(torch.nn.Module):
                 for layer_id in range(config.num_hidden_layers)
             ]
         )
-        self.norm = GemmaFastRMSNorm.load(
+        self.norm = GemmaRMSNorm(
             prefix="model.norm", weights=weights, eps=config.rms_norm_eps
         )
 
