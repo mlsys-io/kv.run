@@ -250,6 +250,7 @@ class GemmaConfig(PretrainedConfig):
 
 class GemmaRMSNorm(nn.Module):
     def __init__(self, prefix, weights, eps=1e-6):
+        super().__init__()
         weight = weights.get_tensor(f"{prefix}.weight") + 1
         self.weight = nn.Parameter(weight)
         self.variance_epsilon = eps
@@ -344,9 +345,10 @@ class FlashGemmaAttention(nn.Module):
         workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device)
         prefillTotalSeqLen = prefillBatchPosition.total_seq_len
         if prefillTotalSeqLen > 0:
-            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
-            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
-            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            # need to revisit if contiguous conversion is the best way
+            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
+            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
             
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
@@ -387,9 +389,9 @@ class FlashGemmaAttention(nn.Module):
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
         if decodeTotalSeqLen > 0:
-            q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim)
-            k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
-            v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+            q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
+            k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
 
             flashinfer.append_paged_kv_cache(
                 k,
