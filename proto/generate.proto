@@ -21,8 +21,6 @@ service TextGenerationService {
     rpc Health (HealthRequest) returns (HealthResponse);
     /// Model control
     rpc AdapterControl(AdapterControlRequest) returns (AdapterControlResponse);
-    /// Generate token
-    rpc GenerateToken (GenerateTokenRequest) returns (GenerateTokenResponse);
 }
 
 message AdapterControlRequest {
@@ -33,24 +31,6 @@ message AdapterControlRequest {
 
 message AdapterControlResponse {
     string status = 1;
-}
-
-message GenerateTokenRequest {
-    /// Batch
-    Batch batch = 1;
-}
-
-message GenerateTokenResponse {
-    /// Generation
-    repeated Generation generations = 1;
-    /// Next batch (cached)
-    optional CachedBatch batch = 2;
-    /// Forward elapsed time in nanoseconds
-    uint64 forward_ns = 3;
-    /// Decode elapsed time in nanoseconds
-    uint64 decode_ns = 4;
-    /// Total elapsed time in nanoseconds
-    uint64 total_ns = 5;
 }
 
 message HealthRequest {}

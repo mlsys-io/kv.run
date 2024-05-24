@@ -198,34 +198,6 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             self.model.remove_lora_adapters(request.lora_ids.split(','))
             return generate_pb2.AdapterControlResponse(status= "success")
 
-    async def GenerateToken(self, request, contexts):
-        start = time.time_ns()
-        if (
-                self.model.batch_type == IdeficsCausalLMBatch
-        ):  # Hack, i would rather use kwargs in the `from_pb` call
-            batch = self.model.batch_type.from_pb(
-                request.batch,
-                self.model.tokenizer,
-                self.model.processor,
-                self.model.dtype,
-                self.model.device,
-            )
-        else:
-            batch = self.model.batch_type.from_pb(
-                request.batch, self.model.tokenizer, self.model.dtype, self.model.device
-            )
-
-        generations, next_batch, timings = self.model.generate_token(batch)
-        self.cache.set(next_batch)
-
-        return generate_pb2.PrefillResponse(
-            generations=[generation.to_pb() for generation in generations],
-            batch=next_batch.to_pb() if next_batch else None,
-            forward_ns=timings[0],
-            decode_ns=timings[1],
-            total_ns=time.time_ns() - start,
-        )
-
 def serve(
     model_id: str,
     revision: Optional[str],
