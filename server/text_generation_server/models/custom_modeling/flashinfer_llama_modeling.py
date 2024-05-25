@@ -16,8 +16,8 @@ from punica_kernels import (
     add_lora_sgmv_custom_cutlass as add_lora,
     rms_norm,
 )
-from text_generation_server.utils.lora_utils import BatchedLoraWeight, LoraWeight
-from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+from utils.lora_utils import BatchedModelLoraWeight
+from utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
@@ -25,101 +25,6 @@ class FlashinferBatch:
         self.kv_page_indptr = kv_page_indptr
         self.kv_page_indices = kv_page_indices
         self.kv_last_page_len = kv_last_page_len
-
-class LlamaLoraWeight:
-    def __init__(
-        self,
-        config: LlamaConfig,
-        lora_rank: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        self.q = LoraWeight(
-            config.num_hidden_layers,
-            config.hidden_size,
-            config.hidden_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-        is_llama3 = ('llama3' in config.name_or_path.replace('-', '').lower())
-        self.k = LoraWeight(
-            config.num_hidden_layers,
-            config.hidden_size,
-            1024 if is_llama3 else config.hidden_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-        self.v = LoraWeight(
-            config.num_hidden_layers,
-            config.hidden_size,
-            1024 if is_llama3 else config.hidden_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-        self.o = LoraWeight(
-            config.num_hidden_layers,
-            config.hidden_size,
-            config.hidden_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-        self.gate = LoraWeight(
-            config.num_hidden_layers,
-            config.hidden_size,
-            config.intermediate_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-        self.up = LoraWeight(
-            config.num_hidden_layers,
-            config.hidden_size,
-            config.intermediate_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-        self.down = LoraWeight(
-            config.num_hidden_layers,
-            config.intermediate_size,
-            config.hidden_size,
-            lora_rank,
-            dtype,
-            device,
-        )
-
-    def copy_from_tensors(self, ts: dict[str, torch.Tensor]):
-        self.q.copy_from_tensor(ts["q.A"], ts["q.B"])
-        self.k.copy_from_tensor(ts["k.A"], ts["k.B"])
-        self.v.copy_from_tensor(ts["v.A"], ts["v.B"])
-        self.o.copy_from_tensor(ts["o.A"], ts["o.B"])
-        self.gate.copy_from_tensor(ts["gate.A"], ts["gate.B"])
-        self.up.copy_from_tensor(ts["up.A"], ts["up.B"])
-        self.down.copy_from_tensor(ts["down.A"], ts["down.B"])
-
-
-class BatchedLlamaLoraWeight:
-    def __init__(self, weights: list[LlamaLoraWeight], lens: list[int]):
-        assert len(weights) == len(lens)
-        device = weights[0].q.wa.device
-        self.q = BatchedLoraWeight([w.q for w in weights])
-        self.k = BatchedLoraWeight([w.k for w in weights])
-        self.v = BatchedLoraWeight([w.v for w in weights])
-        self.o = BatchedLoraWeight([w.o for w in weights])
-        self.gate = BatchedLoraWeight([w.gate for w in weights])
-        self.up = BatchedLoraWeight([w.up for w in weights])
-        self.down = BatchedLoraWeight([w.down for w in weights])
-        self.segment = torch.cumsum(
-            torch.tensor([0] + lens, dtype=torch.int32, device=device),
-            dim=0,
-            dtype=torch.int32,
-        )
-        self.rank = weights[0].q.lora_rank
-
 
 class LlamaAttention(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
@@ -156,7 +61,7 @@ class LlamaAttention(nn.Module):
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedLlamaLoraWeight | None,
+        lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         torch.cuda.nvtx.range_push("qkv_proj")
         q_proj = self.q_proj(hidden_states)
@@ -318,7 +223,7 @@ class LlamaMlp(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        lora: BatchedLlamaLoraWeight | None,
+        lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         with torch.cuda.nvtx.range("gate_proj"):
             gate = self.gate_proj(x)
@@ -397,7 +302,7 @@ class LlamaDecoderLayer(nn.Module):
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedLlamaLoraWeight = None,
+        lora: BatchedModelLoraWeight = None,
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -462,7 +367,7 @@ class LlamaModel(LlamaPreTrainedModel):
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedLlamaLoraWeight = None,
+        lora: BatchedModelLoraWeight = None,
     ) -> torch.Tensor:
         torch.cuda.nvtx.range_push("embed")
         hidden_states = self.embed_tokens(input_ids)
@@ -493,7 +398,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedLlamaLoraWeight = None,
+        lora: BatchedModelLoraWeight = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         torch.cuda.nvtx.range_push("LlamaForCausalLM")
         hidden_states = self.model(input_ids, kvCachePool, prefillBatchPosition, decodeBatchPosition, lora)

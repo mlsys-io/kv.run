@@ -1,7 +1,26 @@
 from collections.abc import Sequence
+from typing import Dict, List
 
+import peft
 import torch
-import re
+from huggingface_hub import hf_hub_download
+from loguru import logger
+
+class ModelConfigForLora:
+    def __init__(
+        self,
+        num_hidden_layers: int,
+        hidden_size: int,
+        intermediate_size: int,
+        name_or_path: str,
+    ):
+        self.num_hidden_layers = num_hidden_layers
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.name_or_path = name_or_path
+ 
+    def isLlama3(self):
+        return 'llama3' in self.name_or_path.replace('-', '').lower()
 
 class LoraWeight:
     def __init__(
@@ -57,7 +76,6 @@ class LoraWeight:
     def lora_rank(self) -> int:
         return self.wa.size(1)
 
-
 class BatchedLoraWeight:
     def __init__(self, weights: Sequence[LoraWeight]):
         assert len(weights) > 0
@@ -69,43 +87,212 @@ class BatchedLoraWeight:
             [w.wb.data_ptr() for w in weights], dtype=torch.int64, device=device
         )
 
-def convert_lora_weight(peft_weight_path):
-    weights = torch.load(
-        peft_weight_path, map_location=torch.device("cpu"), weights_only=True
-    )
-    projs = set()
-    num_layers = 0
-    rank = 0
-    tmp = {}
-    for key, value in weights.items():
-        layer, proj, ab = re.findall(
-            r"\.(\d+)\..*\.(\w+)_proj\.lora_(A|B)\.weight$", key
-        )[0]
-        ab = ab.upper()
-        layer = int(layer)
-        projs.add(proj)
-        # PyTorch Linear layer is column-major
-        if ab == "A":
-            assert value.size(0) < value.size(1)
-            r = value.size(0)
-        elif ab == "B":
-            assert value.size(0) > value.size(1)
-            r = value.size(1)
-        else:
-            raise KeyError(f"Unknown weight key: {key}")
-        if rank != 0:
-            assert r == rank
-        else:
-            rank = r
-        num_layers = max(num_layers, layer + 1)
-        tmp[(layer, proj, ab)] = value
+class ModelLoraWeight:
+    def __init__(
+        self,
+        modelConfig: ModelConfigForLora,
+        lora_rank: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        self.q = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.hidden_size,
+            modelConfig.hidden_size,
+            lora_rank,
+            dtype,
+            device,
+        )
+        self.k = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.hidden_size,
+            1024 if modelConfig.isLlama3() else modelConfig.hidden_size,
+            lora_rank,
+            dtype,
+            device,
+        )
+        self.v = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.hidden_size,
+            1024 if modelConfig.isLlama3() else modelConfig.hidden_size,
+            lora_rank,
+            dtype,
+            device,
+        )
+        self.o = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.hidden_size,
+            modelConfig.hidden_size,
+            lora_rank,
+            dtype,
+            device,
+        )
+        self.gate = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.hidden_size,
+            modelConfig.intermediate_size,
+            lora_rank,
+            dtype,
+            device,
+        )
+        self.up = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.hidden_size,
+            modelConfig.intermediate_size,
+            lora_rank,
+            dtype,
+            device,
+        )
+        self.down = LoraWeight(
+            modelConfig.num_hidden_layers,
+            modelConfig.intermediate_size,
+            modelConfig.hidden_size,
+            lora_rank,
+            dtype,
+            device,
+        )
 
-    out = {}
-    for proj in projs:
-        for ab in "AB":
-            tensors = []
-            for layer in range(num_layers):
-                tensors.append(tmp[(layer, proj, ab)])
-            out[f"{proj}.{ab}"] = torch.stack(tensors)
-
-    return out
+    def copy_from_tensors(self, ts: dict[str, torch.Tensor]):
+        self.q.copy_from_tensor(ts["q.A"], ts["q.B"])
+        self.k.copy_from_tensor(ts["k.A"], ts["k.B"])
+        self.v.copy_from_tensor(ts["v.A"], ts["v.B"])
+        self.o.copy_from_tensor(ts["o.A"], ts["o.B"])
+        self.gate.copy_from_tensor(ts["gate.A"], ts["gate.B"])
+        self.up.copy_from_tensor(ts["up.A"], ts["up.B"])
+        self.down.copy_from_tensor(ts["down.A"], ts["down.B"])
+  
+class BatchedModelLoraWeight:
+    def __init__(self, weights: List[ModelLoraWeight], lens: List[int]):
+        assert len(weights) == len(lens)
+        device = weights[0].q.wa.device
+        self.q = BatchedLoraWeight([w.q for w in weights])
+        self.k = BatchedLoraWeight([w.k for w in weights])
+        self.v = BatchedLoraWeight([w.v for w in weights])
+        self.o = BatchedLoraWeight([w.o for w in weights])
+        self.gate = BatchedLoraWeight([w.gate for w in weights])
+        self.up = BatchedLoraWeight([w.up for w in weights])
+        self.down = BatchedLoraWeight([w.down for w in weights])
+        self.segment = torch.cumsum(
+            torch.tensor([0] + lens, dtype=torch.int32, device=device),
+            dim=0,
+            dtype=torch.int32,
+        )
+        self.rank = weights[0].q.lora_rank
+        
+class ModelLoraManager:
+    def __init__(self, model_config: ModelConfigForLora, dtype, device: torch.device):
+        self.lora_weights = {}
+        self.defalut_rank = 16
+        self.lora_weights["empty"] = ModelLoraWeight(
+                model_config, self.defalut_rank, dtype, device
+            )
+        
+    def set_lora_weights(
+            self,
+            lora_id_path_dict: Dict[str, str],
+            model_config: ModelConfigForLora,
+            device: torch.device,
+            dtype=torch.float16,
+            ):
+        for lora_id, lora_path in lora_id_path_dict.items():
+            if lora_id not in self.lora_weights:
+                try:
+                    model_path = hf_hub_download(lora_path, filename='adapter_model.bin')
+                except:
+                    from safetensors.torch import load_file
+                    model_path = hf_hub_download(lora_path, filename='adapter_model.safetensors')
+                    tmp = load_file(model_path, device="cpu")
+                    model_path = model_path.replace('.safetensors', '.bin')
+                    torch.save(tmp, model_path)
+                raw_weights = torch.load(model_path, map_location=device, weights_only=True)
+                config_path = hf_hub_download(lora_path, filename='adapter_config.json')
+                lora_rank = peft.config.PeftConfigMixin.from_json_file(config_path)['r']
+                lora_weight = ModelLoraWeight(model_config, lora_rank*2, dtype, device) \
+                    if lora_rank < 16 \
+                    else ModelLoraWeight(model_config, lora_rank, dtype, device)
+                converted_weights = self.__convert_weight(raw_weights, lora_rank)
+                lora_weight.copy_from_tensors(converted_weights)
+                del converted_weights
+                self.lora_weights[lora_id] = lora_weight
+                logger.info(f'{lora_id} loaded!')
+                
+    def remove_lora_weights(self, lora_ids: List[str] = None):
+        if (not lora_ids) or (lora_ids == '') or (lora_ids == 'all'):
+            lora_ids = self.lora_weights.keys()
+        for lora_id in lora_ids:
+            if lora_id != 'empty' and lora_id in self.lora_weights:
+                del self.lora_weights[lora_id]
+                logger.info(f'{lora_id} removed!')
+                
+    def get_lora_batched_weights(self, lora_ids: List[str]) -> BatchedModelLoraWeight:
+        return BatchedModelLoraWeight([self.lora_weights[lora_id] for lora_id in lora_ids])
+                
+    @property
+    def lora_weights(self) -> Dict[str, ModelLoraWeight]:
+        return self.lora_weights
+                
+    def __convert_weight(self, weights, rank):
+        qA, qB, kA, kB, vA, vB, oA, oB = [], [], [], [], [], [], [], []
+        gateA, gateB, upA, upB, downA, downB = [], [], [], [], [], []
+        for key in weights.keys():
+            if 'q_proj' in key:
+                if 'A' in key:
+                    qA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    qB.append(weights[key].unsqueeze(0))
+            if 'k_proj' in key:
+                if 'A' in key:
+                    kA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    kB.append(weights[key].unsqueeze(0))
+            if 'v_proj' in key:
+                if 'A' in key:
+                    vA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    vB.append(weights[key].unsqueeze(0))
+            if 'o_proj' in key:
+                if 'A' in key:
+                    oA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    oB.append(weights[key].unsqueeze(0))
+            if 'gate_proj' in key:
+                if 'A' in key:
+                    gateA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    gateB.append(weights[key].unsqueeze(0))
+            if 'up_proj' in key:
+                if 'A' in key:
+                    upA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    upB.append(weights[key].unsqueeze(0))
+            if 'down_proj' in key:
+                if 'A' in key:
+                    downA.append(weights[key].unsqueeze(0))
+                if 'B' in key:
+                    downB.append(weights[key].unsqueeze(0))
+        weights = {
+            'q.A': torch.cat(qA, dim=0) if qA else None,
+            'q.B': torch.cat(qB, dim=0) if qB else None,
+            'k.A': torch.cat(kA, dim=0) if kA else None,
+            'k.B': torch.cat(kB, dim=0) if kB else None,
+            'v.A': torch.cat(vA, dim=0) if vA else None,
+            'v.B': torch.cat(vB, dim=0) if vB else None,
+            'o.A': torch.cat(oA, dim=0) if oA else None,
+            'o.B': torch.cat(oB, dim=0) if oB else None,
+            'gate.A': torch.cat(gateA, dim=0) if gateA else None,
+            'gate.B': torch.cat(gateB, dim=0) if gateB else None,
+            'up.A': torch.cat(upA, dim=0) if upA else None,
+            'up.B': torch.cat(upB, dim=0) if upB else None,
+            'down.A': torch.cat(downA, dim=0) if downA else None,
+            'down.B': torch.cat(downB, dim=0) if downB else None,
+        }
+        if rank == 8:
+            for key in weights.keys():
+                if weights[key] is not None:
+                    if 'A' in key:
+                        complement = torch.zeros_like(weights[key])
+                        weights[key] = torch.cat([weights[key], complement], dim=1)
+                    if 'B' in key:
+                        complement = torch.zeros_like(weights[key])
+                        weights[key] = torch.cat([weights[key], complement], dim=2)
+        return weights

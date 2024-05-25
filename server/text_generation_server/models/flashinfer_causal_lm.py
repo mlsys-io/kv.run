@@ -5,16 +5,16 @@ import torch
 import torch.distributed
 from typing import Any, TypedDict, Optional
 from transformers.models.llama.modeling_llama import LlamaConfig
-from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
-from .custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM, LlamaLoraWeight, BatchedLlamaLoraWeight
+from utils.lora_utils import ModelLoraManager, ModelConfigForLora
+from utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
+from .custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM
 from .custom_modeling.flashinfer_gemma_modeling import (
     GemmaTokenizerFast,
     FlashGemmaForCausalLM,
     GemmaConfig,
 )
 from transformers import PreTrainedTokenizerBase
-import peft, transformers
-from huggingface_hub import hf_hub_download
+import transformers
 from text_generation_server.pb import generate_pb2
 import json
 
@@ -43,72 +43,6 @@ from loguru import logger
 tracer = trace.get_tracer(__name__)
 
 from .causal_lm import CausalLMBatch
-
-def weight_convert(weights, rank):
-    qA, qB, kA, kB, vA, vB, oA, oB = [], [], [], [], [], [], [], []
-    gateA, gateB, upA, upB, downA, downB = [], [], [], [], [], []
-    for key in weights.keys():
-        if 'q_proj' in key:
-            if 'A' in key:
-                qA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                qB.append(weights[key].unsqueeze(0))
-        if 'k_proj' in key:
-            if 'A' in key:
-                kA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                kB.append(weights[key].unsqueeze(0))
-        if 'v_proj' in key:
-            if 'A' in key:
-                vA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                vB.append(weights[key].unsqueeze(0))
-        if 'o_proj' in key:
-            if 'A' in key:
-                oA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                oB.append(weights[key].unsqueeze(0))
-        if 'gate_proj' in key:
-            if 'A' in key:
-                gateA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                gateB.append(weights[key].unsqueeze(0))
-        if 'up_proj' in key:
-            if 'A' in key:
-                upA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                upB.append(weights[key].unsqueeze(0))
-        if 'down_proj' in key:
-            if 'A' in key:
-                downA.append(weights[key].unsqueeze(0))
-            if 'B' in key:
-                downB.append(weights[key].unsqueeze(0))
-    weights = {
-        'q.A': torch.cat(qA, dim=0) if qA else None,
-        'q.B': torch.cat(qB, dim=0) if qB else None,
-        'k.A': torch.cat(kA, dim=0) if kA else None,
-        'k.B': torch.cat(kB, dim=0) if kB else None,
-        'v.A': torch.cat(vA, dim=0) if vA else None,
-        'v.B': torch.cat(vB, dim=0) if vB else None,
-        'o.A': torch.cat(oA, dim=0) if oA else None,
-        'o.B': torch.cat(oB, dim=0) if oB else None,
-        'gate.A': torch.cat(gateA, dim=0) if gateA else None,
-        'gate.B': torch.cat(gateB, dim=0) if gateB else None,
-        'up.A': torch.cat(upA, dim=0) if upA else None,
-        'up.B': torch.cat(upB, dim=0) if upB else None,
-        'down.A': torch.cat(downA, dim=0) if downA else None,
-        'down.B': torch.cat(downB, dim=0) if downB else None,
-    }
-    if rank == 8:
-        for key in weights.keys():
-            if weights[key] is not None:
-                if 'A' in key:
-                    complement = torch.zeros_like(weights[key])
-                    weights[key] = torch.cat([weights[key], complement], dim=1)
-                if 'B' in key:
-                    complement = torch.zeros_like(weights[key])
-                    weights[key] = torch.cat([weights[key], complement], dim=2)
-    return weights
 
 class TextGenerationChunk(TypedDict):
     index: int
@@ -296,7 +230,7 @@ class FlashinferLM(Model):
         self,
         model_type: str,
         model_id: str = None,
-        lora_ids: Dict = None,
+        lora_id_path_dict: Dict[str, str] = None,
         revision: Optional[str] = None,
         quantize: Optional[str] = None,
         use_medusa: Optional[str] = None,
@@ -317,6 +251,7 @@ class FlashinferLM(Model):
             dtype = torch.float32 if dtype is None else dtype
 
         self.device = device
+        self.dtype = dtype
 
         if model_type == "llama":
             tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -421,19 +356,15 @@ class FlashinferLM(Model):
         )
                 
         self.modelKvCache = ModelKvCache(kvCachePool)
-
-        self.lora_weights = {}
-        self.defalut_rank = 16
-        self.lora_weights["empty"] = LlamaLoraWeight(
-                self.model_config, self.defalut_rank, dtype, device
-            )
+        self.model_config_for_lora = ModelConfigForLora(
+            num_hidden_layers=self.model_config.num_hidden_layers,
+            hidden_size=self.model_config.hidden_size,
+            intermediate_size=self.model_config.intermediate_size,
+            name_or_path=self.model_config.name_or_path,
+        )
         
-        self.init_lora(
-            lora_ids,
-            self.model_config,
-            device=device,
-            )
-
+        self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype, device)
+        self.loraManager.set_lora_weights(lora_id_path_dict, self.model_config_for_lora or {}, device, dtype)
         self.reqctx: dict[int, RequestContext] = {}
 
         super(FlashinferLM, self).__init__(
@@ -444,55 +375,19 @@ class FlashinferLM(Model):
             device=device,
         )
 
-    def load_lora_adapters(self, lora_ids):
-        self.init_lora(
-            lora_ids,
-            self.model_config,
-            device=self.device
-            )
+    def load_lora_adapters(self, lora_id_path_dict: Dict[str, str]):
+        self.loraManager.set_lora_weights(
+            lora_id_path_dict,
+            self.model_config_for_lora,
+            device=self.device,
+            dtype = self.dtype,
+        )
 
     def remove_lora_adapters(self, lora_ids: list[str] = None):
-        if (not lora_ids) or (lora_ids == '') or (lora_ids == 'all'):
-            lora_ids = list(self.lora_weights)
-        for lora_id in lora_ids:
-            if lora_id != 'empty' and lora_id in self.lora_weights:
-                del self.lora_weights[lora_id]
-                logger.info(f'{lora_id} removed!')
+        self.loraManager.remove_lora_weights(lora_ids)
 
     def get_lora_adapters(self):
-        return list(self.lora_weights)
-
-    def init_lora(
-            self,
-            lora_ids: Dict,
-            model_config: LlamaConfig,
-            device: torch.device,
-            dtype=torch.float16,
-            ):
-        if lora_ids is None:
-            return
-        for lora_id in lora_ids:
-            if lora_id not in self.lora_weights:
-                try:
-                    model_path = hf_hub_download(lora_ids[lora_id], filename='adapter_model.bin')
-                except:
-                    from safetensors.torch import load_file
-                    model_path = hf_hub_download(lora_ids[lora_id], filename='adapter_model.safetensors')
-                    tmp = load_file(model_path, device="cpu")
-                    model_path = model_path.replace('.safetensors', '.bin')
-                    torch.save(tmp, model_path)
-                tmp = torch.load(model_path, map_location=device, weights_only=True)
-                config_path = hf_hub_download(lora_ids[lora_id], filename='adapter_config.json')
-                lora_rank = peft.config.PeftConfigMixin.from_json_file(config_path)['r']
-                if lora_rank < 16:
-                    lora_weight = LlamaLoraWeight(model_config, lora_rank*2, dtype, device)
-                else:
-                    lora_weight = LlamaLoraWeight(model_config, lora_rank, dtype, device)
-                tmp = weight_convert(tmp,lora_rank)
-                lora_weight.copy_from_tensors(tmp)
-                del tmp
-                self.lora_weights[lora_id] = lora_weight
-                logger.info(f'{lora_id} loaded!')
+        return list(self.loraManager.lora_weights)
 
     def has_request(self):
         return len(self.reqctx)>0
@@ -583,12 +478,10 @@ class FlashinferLM(Model):
         
         prefillBatchPosition = batchKvCache.getKvCacheBatchPosition(prefill_reqIds, isPrefill=True)
         decodeBatchPosition = batchKvCache.getKvCacheBatchPosition(decode_reqIds, isPrefill=False)
-        lora = BatchedLlamaLoraWeight(
-            [self.lora_weights[id] for id in lora_ids], lora_lens
-        )
 
         # Forward pass
-        raw_logits, _ = self.model(input_ids, self.modelKvCache.kvCachePool, prefillBatchPosition, decodeBatchPosition, lora)
+        raw_logits, _ = self.model(input_ids, self.modelKvCache.kvCachePool, prefillBatchPosition, decodeBatchPosition, \
+                                   self.loraManager.get_lora_batched_weights(lora_ids, lora_lens))
 
         start_decode = time.time_ns()
 

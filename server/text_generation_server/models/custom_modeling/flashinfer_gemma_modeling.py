@@ -4,6 +4,8 @@ import torch.distributed
 import os
 from shutil import copyfile
 
+from utils.lora_utils import BatchedModelLoraWeight
+from utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
@@ -19,15 +21,11 @@ from text_generation_server.utils.layers import (
     get_linear
 )
 
-
-import math
 import flashinfer
 from punica_kernels import (
     add_lora_sgmv_custom_cutlass as add_lora,
     rms_norm,
 )
-from text_generation_server.utils.lora_utils import BatchedLoraWeight, LoraWeight
-from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
@@ -589,7 +587,7 @@ class FlashGemmaForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora = None,
+        lora: BatchedModelLoraWeight = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
             input_ids,
