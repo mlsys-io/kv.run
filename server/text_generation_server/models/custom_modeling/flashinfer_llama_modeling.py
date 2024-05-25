@@ -16,8 +16,8 @@ from punica_kernels import (
     add_lora_sgmv_custom_cutlass as add_lora,
     rms_norm,
 )
-from utils.lora_utils import BatchedModelLoraWeight
-from utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
+from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):

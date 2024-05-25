@@ -41,20 +41,20 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             ignore_eos_token=True))
     return request
 
-test = 'gemma'
-#test = 'llama-3'
-#test = 'llama-2'
+# test = 'gemma'
+test = 'llama-3'
+# test = 'llama-2'
 
 if test == 'llama-2':
     # Load model
     service = FlashinferLM(model_type="llama", model_id="meta-llama/Llama-2-7b-hf",
-              lora_ids={'llama2-gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'})
+              lora_id_path_dict={'llama2-gsm8k':'abcdabcd987/gsm8k-llama2-7b-lora-16'})
     # Create an input batch of two queries
     requests = [make_input('llama2-gsm8k', 'base', id=0), make_input('llama2-gsm8k', 'lora', id=1)]
 elif test == 'llama-3':
     # Load model
     service = FlashinferLM(model_type="llama", model_id="tjluyao/llama-3-8b",
-              lora_ids={'llama3-math':'tjluyao/llama-3-8b-math',
+              lora_id_path_dict={'llama3-math':'tjluyao/llama-3-8b-math',
                         'llama3-zh': 'tjluyao/llama-3-8b-zh'})
     # Test load lora adapters
     print(service.get_lora_adapters())

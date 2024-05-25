@@ -5,8 +5,8 @@ import torch
 import torch.distributed
 from typing import Any, TypedDict, Optional
 from transformers.models.llama.modeling_llama import LlamaConfig
-from utils.lora_utils import ModelLoraManager, ModelConfigForLora
-from utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
+from text_generation_server.utils.lora_utils import ModelLoraManager, ModelConfigForLora
+from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
 from .custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM
 from .custom_modeling.flashinfer_gemma_modeling import (
     GemmaTokenizerFast,
@@ -412,7 +412,7 @@ class FlashinferLM(Model):
                 parameters = batch.requests[r].parameters
                 stop = batch.requests[r].stopping_parameters
 
-                if lora_id not in self.lora_weights:
+                if lora_id not in self.loraManager.lora_weights:
                     raise ValueError("Cannot find lora weights", lora_id)
 
                 self.reqctx[id] = RequestContext(

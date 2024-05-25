@@ -4,8 +4,8 @@ import torch.distributed
 import os
 from shutil import copyfile
 
-from utils.lora_utils import BatchedModelLoraWeight
-from utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
+from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig

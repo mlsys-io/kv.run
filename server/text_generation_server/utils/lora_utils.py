@@ -181,7 +181,7 @@ class BatchedModelLoraWeight:
         
 class ModelLoraManager:
     def __init__(self, model_config: ModelConfigForLora, dtype, device: torch.device):
-        self.lora_weights = {}
+        self.lora_weights: Dict[str, ModelLoraWeight] = {}
         self.defalut_rank = 16
         self.lora_weights["empty"] = ModelLoraWeight(
                 model_config, self.defalut_rank, dtype, device
@@ -218,18 +218,14 @@ class ModelLoraManager:
                 
     def remove_lora_weights(self, lora_ids: List[str] = None):
         if (not lora_ids) or (lora_ids == '') or (lora_ids == 'all'):
-            lora_ids = self.lora_weights.keys()
+            lora_ids = list(self.lora_weights.keys())
         for lora_id in lora_ids:
             if lora_id != 'empty' and lora_id in self.lora_weights:
                 del self.lora_weights[lora_id]
                 logger.info(f'{lora_id} removed!')
                 
-    def get_lora_batched_weights(self, lora_ids: List[str]) -> BatchedModelLoraWeight:
-        return BatchedModelLoraWeight([self.lora_weights[lora_id] for lora_id in lora_ids])
-                
-    @property
-    def lora_weights(self) -> Dict[str, ModelLoraWeight]:
-        return self.lora_weights
+    def get_lora_batched_weights(self, lora_ids: List[str], lora_lens: List[int]) -> BatchedModelLoraWeight:
+        return BatchedModelLoraWeight([self.lora_weights[lora_id] for lora_id in lora_ids], lora_lens)
                 
     def __convert_weight(self, weights, rank):
         qA, qB, kA, kB, vA, vB, oA, oB = [], [], [], [], [], [], [], []
