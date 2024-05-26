@@ -362,7 +362,6 @@ class FlashinferLM(Model):
             intermediate_size=self.model_config.intermediate_size,
             num_qo_heads = self.model_config.num_attention_heads,
             num_kv_heads = self.model_config.num_key_value_heads,
-            name_or_path=self.model_config.name_or_path,
         )
         
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype, device)

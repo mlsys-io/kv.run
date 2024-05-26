@@ -14,17 +14,13 @@ class ModelConfigForLora:
         intermediate_size: int,
         num_qo_heads: int,
         num_kv_heads: int,
-        name_or_path: str,
     ):
         self.num_hidden_layers = num_hidden_layers
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_qo_heads = num_qo_heads
-        self.num_kv_heads = num_kv_heads
-        self.name_or_path = name_or_path
- 
-    def isLlama3(self):
-        return 'llama3' in self.name_or_path.replace('-', '').lower()
+        self.num_kv_heads = num_kv_heads 
+
 
 class LoraWeight:
     def __init__(
@@ -111,7 +107,7 @@ class ModelLoraWeight:
         self.k = LoraWeight(
             modelConfig.num_hidden_layers,
             modelConfig.hidden_size,
-            1024 if modelConfig.isLlama3() else (modelConfig.hidden_size // num_kv_group),
+            modelConfig.hidden_size // num_kv_group,
             lora_rank,
             dtype,
             device,
@@ -119,7 +115,7 @@ class ModelLoraWeight:
         self.v = LoraWeight(
             modelConfig.num_hidden_layers,
             modelConfig.hidden_size,
-            1024 if modelConfig.isLlama3() else (modelConfig.hidden_size // num_kv_group),
+            modelConfig.hidden_size // num_kv_group,
             lora_rank,
             dtype,
             device,
