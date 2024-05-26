@@ -41,8 +41,8 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             ignore_eos_token=True))
     return request
 
-# test = 'gemma'
-test = 'llama-3'
+test = 'gemma'
+# test = 'llama-3'
 # test = 'llama-2'
 
 if test == 'llama-2':
@@ -69,8 +69,8 @@ elif test == 'llama-3':
     # Create an input batch of two queries
     requests = [make_input('llama3-zh', 'lora', id=0), make_input('llama3-oaast', 'lora', id=1)]
 elif test == "gemma":
-    requests = [make_input("llama2-gsm8k", "base", id=0), make_input("llama2-gsm8k", "base", id=1)]
-    service = FlashinferLM(model_type="gemma", model_id="google/gemma-2b")
+    requests = [make_input("gemma-2b-lora-maths-orca", "base", id=0), make_input("gemma-2b-lora-maths-orca", "lora", id=1)]
+    service = FlashinferLM(model_type="gemma", model_id="google/gemma-2b", lora_id_path_dict={'gemma-2b-lora-maths-orca':'monsterapi/gemma-2b-lora-maths-orca-200k'})
     # Quantized version
     # service = FlashinferLM(model_type="gemma", model_id="TechxGenus/gemma-2b-GPTQ", quantize='gptq')
 

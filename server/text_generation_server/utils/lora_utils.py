@@ -12,11 +12,15 @@ class ModelConfigForLora:
         num_hidden_layers: int,
         hidden_size: int,
         intermediate_size: int,
+        num_qo_heads: int,
+        num_kv_heads: int,
         name_or_path: str,
     ):
         self.num_hidden_layers = num_hidden_layers
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
+        self.num_qo_heads = num_qo_heads
+        self.num_kv_heads = num_kv_heads
         self.name_or_path = name_or_path
  
     def isLlama3(self):
@@ -95,6 +99,7 @@ class ModelLoraWeight:
         dtype: torch.dtype,
         device: torch.device,
     ):
+        num_kv_group = modelConfig.num_qo_heads // modelConfig.num_kv_heads
         self.q = LoraWeight(
             modelConfig.num_hidden_layers,
             modelConfig.hidden_size,
@@ -106,7 +111,7 @@ class ModelLoraWeight:
         self.k = LoraWeight(
             modelConfig.num_hidden_layers,
             modelConfig.hidden_size,
-            1024 if modelConfig.isLlama3() else modelConfig.hidden_size,
+            1024 if modelConfig.isLlama3() else (modelConfig.hidden_size // num_kv_group),
             lora_rank,
             dtype,
             device,
@@ -114,7 +119,7 @@ class ModelLoraWeight:
         self.v = LoraWeight(
             modelConfig.num_hidden_layers,
             modelConfig.hidden_size,
-            1024 if modelConfig.isLlama3() else modelConfig.hidden_size,
+            1024 if modelConfig.isLlama3() else (modelConfig.hidden_size // num_kv_group),
             lora_rank,
             dtype,
             device,
