@@ -337,6 +337,10 @@ class FlashGemmaAttention(nn.Module):
             ],
             dim=1,
         )
+        
+        q_proj = q_proj.contiguous()
+        k_proj = k_proj.contiguous()
+        v_proj = v_proj.contiguous()
 
         if lora:
             add_lora(
@@ -372,9 +376,9 @@ class FlashGemmaAttention(nn.Module):
         prefillTotalSeqLen = prefillBatchPosition.total_seq_len
         if prefillTotalSeqLen > 0:
             # need to revisit if contiguous conversion is the best way
-            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
-            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
+            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
             
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
@@ -498,7 +502,7 @@ class GemmaMLP(nn.Module):
     def forward(self, hidden_states: torch.Tensor, lora: BatchedModelLoraWeight | None):
         gate_up_states = self.gate_up_proj(hidden_states)
         gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
-        gate = gate_up_states[:, 0]
+        gate = gate_up_states[:, 0].contiguous()
         if lora:
             add_lora(
                 gate,
@@ -510,7 +514,7 @@ class GemmaMLP(nn.Module):
                 lora.rank,
             )
         gate = self.act(gate)
-        up = gate_up_states[:, 1]
+        up = gate_up_states[:, 1].contiguous()
         if lora:
             add_lora(
                 up,

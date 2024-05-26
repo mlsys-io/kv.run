@@ -218,7 +218,7 @@ DEMO["llama2-viggo"] = DemoSpec(
 """,
 )
 
-DEMO["gemma-2b-lora-maths-orca"] = DemoSpec(
+DEMO["gemma-2b-math"] = DemoSpec(
     weight_url="https://huggingface.co/monsterapi/gemma-2b-lora-maths-orca-200k/blob/main/adapter_model.safetensors",
     system="You are a helpful assistant.",
     lora_template="<|begin_of_text|><|start_header_id|>{system}<|end_header_id|>\n{question}\n",
