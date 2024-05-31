@@ -229,7 +229,7 @@ struct Args {
     max_stop_sequences: usize,
 
     /// This is the maximum allowed value for clients to set `top_n_tokens`.
-    /// `top_n_tokens is used to return information about the the `n` most likely
+    /// `top_n_tokens` is used to return information about the the `n` most likely
     /// tokens at each generation step, instead of just the sampled token. This
     /// information can be used for downstream tasks like for classification or
     /// ranking.
@@ -495,14 +495,17 @@ fn shard_manager(
     let mut shard_args = vec![
         "serve".to_string(),
         model_id,
-        "--lora-ids".to_string(),
-        lora_ids,
         "--uds-path".to_string(),
         uds_path,
         "--logger-level".to_string(),
         log_level.to_string().to_uppercase(),
         "--json-output".to_string(),
     ];
+
+    if lora_ids != "empty".to_string() {
+        shard_args.push("--lora-ids".to_string());
+        shard_args.push(lora_ids.clone());
+    }
 
     // Activate trust remote code
     if trust_remote_code {
@@ -1035,15 +1038,6 @@ fn download_lora_adapters(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
         envs.push(("HUGGING_FACE_HUB_TOKEN".into(), api_token.into()))
     };
 
-    // If args.weights_cache_override is some, pass it to the download process
-    // Useful when running inside a HuggingFace Inference Endpoint
-    if let Some(weights_cache_override) = &args.weights_cache_override {
-        envs.push((
-            "WEIGHTS_CACHE_OVERRIDE".into(),
-            weights_cache_override.into(),
-        ));
-    };
-
     // Start process
     tracing::info!("Starting LoRA adapter download process.");
     let mut download_process = match Command::new("text-generation-server")
@@ -1408,6 +1402,16 @@ fn terminate(process_name: &str, mut process: Child, timeout: Duration) -> io::R
 }
 
 fn main() -> Result<(), LauncherError> {
+    match Command::new("ldconfig").spawn() {
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                "Unable to refresh ldconfig cache. Skipping (useless in most cases). Details {:?}",
+                err
+            )
+        }
+    }
+
     // Pattern match configuration
     let args: Args = Args::parse();
 
@@ -1631,7 +1635,9 @@ fn main() -> Result<(), LauncherError> {
     download_convert_model(&args, running.clone())?;
 
     // Download LoRA adapters
-    download_lora_adapters(&args, running.clone())?;
+    if args.lora_ids != "empty".to_string() {
+        download_lora_adapters(&args, running.clone())?;
+    }
 
     if !running.load(Ordering::SeqCst) {
         // Launcher was asked to stop

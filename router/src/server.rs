@@ -14,6 +14,7 @@ use crate::{
     ChatCompletionDelta, ChatCompletionLogprob, ChatCompletionLogprobs, ChatCompletionTopLogprob,
     ChatRequest, CompatGenerateRequest, Completion, CompletionComplete, CompletionCompleteChunk,
     CompletionRequest, DeltaToolCall, Function, Tool, VertexRequest, VertexResponse,
+    LoRAAdapterControlRequest,
 };
 use crate::{FunctionDefinition, ToolCall, ToolType};
 use async_stream::__private::AsyncStream;
@@ -31,9 +32,16 @@ use futures::TryStreamExt;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use serde_json::Value;
 use std::convert::Infallible;
+use std::{env, io, thread};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Lines};
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread::sleep;
+use std::time::Duration;
+use hf_hub::{Cache, Repo};
 use text_generation_client::{ShardInfo, ShardedClient};
 use tokenizers::Tokenizer;
 use tokio::select;
@@ -44,6 +52,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info_span, instrument, Instrument};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use serde::Deserialize;
 
 /// Generate tokens if `stream == false` or a stream of token if `stream == true`
 #[utoipa::path(
@@ -1335,7 +1345,8 @@ async fn tokenize(
             .iter()
             .zip(encoding.get_offsets())
             .map(|(&id, &(start, stop))| {
-                let text: String = input.chars().skip(start).take(stop - start).collect();
+                let text: String =
+                    String::from_utf8_lossy(&input.as_bytes()[start..stop]).to_string();
                 SimpleToken {
                     id,
                     text,
@@ -1365,6 +1376,99 @@ responses((status = 200, description = "Prometheus Metrics", body = String))
 )]
 async fn metrics(prom_handle: Extension<PrometheusHandle>) -> String {
     prom_handle.render()
+}
+
+/// Tokenize inputs
+#[utoipa::path(
+    post,
+    tag = "Text Generation Inference",
+    path = "/lora_adapter_control",
+    request_body = LoRAAdapterControlRequest,
+    responses(
+    (status = 200, description = "LoRA Adapter Control Response", body = LoRAAdapterControlResponse),
+    (status = 400, description = "TGI server not found", body = ErrorResponse,
+    example = json ! ({"error": "TGI server not found"})),
+    (status = 404, description = "No model path found", body = ErrorResponse,
+    example = json ! ({"error": "No model path found"})),
+    )
+)]
+#[instrument(skip_all)]
+async fn download_lora_adapter(
+    Extension(infer): Extension<Infer>,
+    Json(req): Json<LoRAAdapterControlRequest>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+
+    let mut download_args = vec![
+        "download-lora-adapters".to_string(),
+        req.lora_id.to_string(),
+    ];
+
+    // Copy current process env
+    let mut envs: Vec<(OsString, OsString)> = env::vars_os().collect();
+
+    // Enable hf transfer for insane download speeds
+    let enable_hf_transfer = env::var("HF_HUB_ENABLE_HF_TRANSFER").unwrap_or("1".to_string());
+    envs.push((
+        "HF_HUB_ENABLE_HF_TRANSFER".into(),
+        enable_hf_transfer.into(),
+    ));
+
+    // Parse Inference API token
+    if let Some(token) = req.hf_api_token {
+        envs.push(("HUGGING_FACE_HUB_TOKEN".into(), token.into()));
+    }
+
+    // Start process
+    tracing::info!("Starting LoRA adapter download process.");
+    let mut download_process = match Command::new("text-generation-server")
+        .args(download_args)
+        .env_clear()
+        .envs(envs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+    {
+        Ok(p) => p,
+        Err(err) => return Err((StatusCode::BAD_REQUEST,
+                                Json(ErrorResponse {
+                                    error: "TGI server not found.".to_string(),
+                                    error_type: "TGI server not found".to_string(),
+                                })))
+    };
+
+    let download_stderr = BufReader::new(download_process.stderr.take().unwrap());
+
+    // We read stderr in another thread as it seems that lines() can block in some cases
+    let (err_sender, err_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in download_stderr.lines().map_while(Result::ok) {
+            err_sender.send(line).unwrap_or(());
+        }
+    });
+
+    loop {
+        if let Some(status) = download_process.try_wait().unwrap() {
+            if status.success() {
+                tracing::info!("Successfully downloaded weights.");
+                break;
+            }
+
+            let mut err = String::new();
+            while let Ok(line) = err_receiver.recv_timeout(Duration::from_millis(10)) {
+                err = err + "\n" + &line;
+            }
+
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No model path found or authorization failed.".to_string(),
+                    error_type: "download error".to_string(),
+                })))
+        }
+        sleep(Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1632,11 +1736,15 @@ pub async fn run(
     let compute_type =
         ComputeType(std::env::var("COMPUTE_TYPE").unwrap_or("gpu+optimized".to_string()));
 
+    let lora_control_route = Router::new()
+        .route("/download_lora_adapter", post(download_lora_adapter));
+
     // Combine routes and layers
     let mut app = Router::new()
         .merge(swagger_ui)
         .merge(base_routes)
-        .merge(aws_sagemaker_route);
+        .merge(aws_sagemaker_route)
+        .merge(lora_control_route);
 
     #[cfg(feature = "google")]
     {
@@ -1726,6 +1834,8 @@ pub async fn run(
     }
     Ok(())
 }
+
+
 
 /// Shutdown signal handler
 async fn shutdown_signal() {

@@ -41,6 +41,12 @@ pub(crate) struct VertexResponse {
     pub predictions: Vec<String>,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct LoRAAdapterControlRequest {
+    pub lora_id: String,
+    pub hf_api_token: Option<String>
+}
+
 /// Hub type
 #[derive(Clone, Debug, Deserialize)]
 pub struct HubModelInfo {
