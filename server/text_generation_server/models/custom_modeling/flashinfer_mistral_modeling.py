@@ -20,7 +20,7 @@ from punica_kernels import (
     rms_norm,
 )
 
-from text_generation_server.utils.lora_utils import BatchedLoraWeight, LoraWeight
+from text_generation_server.utils.lora_utils import BatchedLoraWeight, LoraWeight, BatchedModelLoraWeight
 from text_generation_server.utils.cache_manager_flashinfer import KvCacheBatchPosition, KvCachePool
 
 # from transformers.activations import ACT2FN
@@ -200,9 +200,13 @@ class MistralAttention(torch.nn.Module):
         hidden_states: torch.Tensor,
         kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition
+        decodeBatchPosition: KvCacheBatchPosition,
+        lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         qkv = self.query_key_value(hidden_states)
+
+        # qkv = qkv.to('cuda')
+
         q_proj, k_proj, v_proj = qkv.split(
             [
                 self.head_size * self.num_heads,
@@ -211,6 +215,42 @@ class MistralAttention(torch.nn.Module):
             ],
             dim=1,
         )
+
+        q_proj = q_proj.contiguous()
+        k_proj = k_proj.contiguous()
+        v_proj = v_proj.contiguous()
+        
+        # print(f"q proj {q_proj}")
+        # print(f"lora rank: {lora.rank}")
+
+        if lora:
+            add_lora(
+                q_proj,
+                hidden_states,
+                lora.q.wa_ptr,
+                lora.q.wb_ptr,
+                lora.segment,
+                self.layer_idx,
+                lora.rank,
+            )
+            add_lora(
+                k_proj,
+                hidden_states,
+                lora.k.wa_ptr,
+                lora.k.wb_ptr,
+                lora.segment,
+                self.layer_idx,
+                lora.rank,
+            )
+            add_lora(
+                v_proj,
+                hidden_states,
+                lora.v.wa_ptr,
+                lora.v.wb_ptr,
+                lora.segment,
+                self.layer_idx,
+                lora.rank,
+            )
 
         stack_attn_output = []
         workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device)
@@ -309,9 +349,10 @@ class MistralAttention(torch.nn.Module):
 
 
 class MistralMLP(nn.Module):
-    def __init__(self, prefix, config, weights):
+    def __init__(self, prefix, config, weights, layer_idx: int):
         super().__init__()
         act = config.hidden_act
+        self.layer_idx = layer_idx
         self.act = (
             ACT2FN[act]
             if "gelu" not in act
@@ -340,9 +381,46 @@ class MistralMLP(nn.Module):
             config.intermediate_size // weights.process_group.size()
         )
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, lora: BatchedModelLoraWeight | None):
         gate_up_states = self.gate_up_proj(hidden_states)
         gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
+        gate = gate_up_states[:, 0].contiguous()
+        if lora:
+            add_lora(
+                gate,
+                hidden_states,
+                lora.gate.wa_ptr,
+                lora.gate.wb_ptr,
+                lora.segment,
+                self.layer_idx,
+                lora.rank,
+            )
+
+        gate = self.act(gate)
+        up = gate_up_states[:, 1].contiguous()
+        if lora:
+            add_lora(
+                up,
+                hidden_states,
+                lora.up.wa_ptr,
+                lora.up.wb_ptr,
+                lora.segment,
+                self.layer_idx,
+                lora.rank,
+            )       
+        t = gate * up
+        down = self.down_proj(t)
+        if lora:
+            add_lora(
+                down,
+                hidden_states,
+                lora.down.wa_ptr,
+                lora.down.wb_ptr,
+                lora.segment,
+                self.layer_idx,
+                lora.rank,
+            )        
+        return down
         return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
 
 
@@ -353,7 +431,7 @@ class MistralLayer(nn.Module):
         self.self_attn = MistralAttention(
             prefix=f"{prefix}.self_attn", config=config, weights=weights, layer_idx=layer_id
         )
-        self.mlp = MistralMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
+        self.mlp = MistralMLP(prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx = layer_id)
 
         self.input_layernorm = FastRMSNorm.load(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
@@ -370,7 +448,8 @@ class MistralLayer(nn.Module):
         residual: torch.Tensor,
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition
+        decodeBatchPosition: KvCacheBatchPosition,
+        lora: BatchedModelLoraWeight | None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
 
@@ -379,7 +458,8 @@ class MistralLayer(nn.Module):
             normed_hidden_states,
             kvCachePool,
             prefillBatchPosition,
-            decodeBatchPosition
+            decodeBatchPosition,
+            lora
         )
 
         # faster post attention rms norm
@@ -387,7 +467,7 @@ class MistralLayer(nn.Module):
             attn_output, res
         )
 
-        mlp_output = self.mlp(normed_attn_res_output)
+        mlp_output = self.mlp(normed_attn_res_output, lora)
 
         return mlp_output, attn_res
 
@@ -431,7 +511,8 @@ class FlashMistralModel(torch.nn.Module):
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition
+        decodeBatchPosition: KvCacheBatchPosition,
+        lora: BatchedModelLoraWeight | None
     ):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -441,7 +522,8 @@ class FlashMistralModel(torch.nn.Module):
                 residual,
                 kvCachePool,
                 prefillBatchPosition,
-                decodeBatchPosition
+                decodeBatchPosition,
+                lora
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -487,13 +569,14 @@ class FlashMistralForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora = None,
+        lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,
             kvCachePool,
             prefillBatchPosition,
-            decodeBatchPosition
+            decodeBatchPosition,
+            lora
         )
         logits = self.lm_head(hidden_states)
         return logits
