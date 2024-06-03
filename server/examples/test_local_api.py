@@ -47,6 +47,7 @@ test = 'gemma'
 # test = 'llama-3'
 # test = 'llama-2'
 # test = 'mistral'
+# test = 'qwen2'
 
 if test == 'llama-2':
     # Load model
@@ -88,7 +89,12 @@ elif test == "gemma":
 elif test == "mistral":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
                 make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLM(model_type="mistral", model_id="mistralai/Mistral-7B-v0.3")   
+    service = FlashinferLM(model_type="mistral", model_id="mistralai/Mistral-7B-v0.3")
+elif test == "qwen2":
+    requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事"),
+                make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'lora', id=1, promptOverride="什么是深度学习？")]
+    
+    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-7B-Chat', lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'])
 
 print(service.get_lora_adapters())
 tokenizer = service.tokenizer

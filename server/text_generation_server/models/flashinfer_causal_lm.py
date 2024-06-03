@@ -14,6 +14,7 @@ from .custom_modeling.flashinfer_gemma_modeling import (
     GemmaConfig,
 )
 from .custom_modeling.flashinfer_mistral_modeling import MistralConfig, FlashMistralForCausalLM
+from .custom_modeling.flashinfer_qwen2_modeling import Qwen2Config, FlashQwen2ForCausalLM
 from transformers import PreTrainedTokenizerBase
 import transformers
 from text_generation_server.pb import generate_pb2
@@ -327,6 +328,31 @@ class FlashinferLM(Model):
             model = FlashMistralForCausalLM(None, mistralConfig, weights)
             tokenizer = AutoTokenizer.from_pretrained(model_id)
             model.config = mistralConfig
+        elif model_type == "qwen2":
+            process_group, rank, world_size = initialize_torch_distributed()
+            if torch.cuda.is_available():
+                device = torch.device(f"cuda:{rank}")
+                dtype = torch.bfloat16 if dtype is None else dtype
+            else:
+                raise NotImplementedError("FlashQwen2 is only available on GPU")
+
+            qwenConfig = Qwen2Config.from_pretrained(
+                model_id, revision=revision, trust_remote_code=trust_remote_code
+            )
+            
+            qwenConfig.quantize = None
+            qwenConfig.use_medusa = False
+
+            torch.distributed.barrier(group=process_group)
+
+            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
+            weights = Weights(filenames, device, dtype, process_group=process_group)
+            if qwenConfig.quantize in ["gptq", "awq"]:
+                weights._set_gptq_params(model_id, revision)
+
+            model = FlashQwen2ForCausalLM(qwenConfig, weights)
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model.config = qwenConfig
         else:
             raise NotImplementedError(f"Flashinfer is not implemented for: {model_type}")     
         
