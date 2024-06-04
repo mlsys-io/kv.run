@@ -279,7 +279,7 @@ DEMO["monsterapi/gemma-2b-lora-maths-orca-200k"] = DemoSpec(
 )
 
 DEMO["REILX/Qwen1.5-7B-Chat-750Mb-lora"] = DemoSpec(
-    weight_url="https://huggingface.co/REILX/Qwen1.5-7B-Chat-750Mb-lora/blob/main/adapter_model.safetensors"
+    weight_url="https://huggingface.co/REILX/Qwen1.5-7B-Chat-750Mb-lora/blob/main/adapter_model.safetensors",
     system="You are a helpful assistant.",
     lora_template="<start_of_turn>user\n{question}<end_of_turn>\n<start_of_turn>model",
     base_template="<start_of_turn>user\n{question}<end_of_turn>\n<start_of_turn>model",

@@ -270,7 +270,7 @@ def load_attention(config, prefix, weights):
             prefixes=[f"{prefix}.q_proj", f"{prefix}.k_proj", f"{prefix}.v_proj"],
             dim=0,
             weights=weights,
-            bias=False,
+            bias=True,
         )
 
 
@@ -328,11 +328,7 @@ class FlashQwen2Attention(nn.Module):
             weights=weights,
             bias=False,
         )
-        # manually concatenate qkv project bias
-        self.bias = torch.cat((weights.get_tensor(f"{prefix}.q_proj.bias"),
-                        weights.get_tensor(f"{prefix}.k_proj.bias"),
-                        weights.get_tensor(f"{prefix}.v_proj.bias")), dim=0)
-
+        
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
@@ -344,7 +340,7 @@ class FlashQwen2Attention(nn.Module):
         decodeBatchPosition: KvCacheBatchPosition,
         lora: BatchedModelLoraWeight | None
     ):
-        qkv = self.qkv_proj(hidden_states) + self.bias
+        qkv = self.qkv_proj(hidden_states)
 
         q_proj, k_proj, v_proj = qkv.split(
             [

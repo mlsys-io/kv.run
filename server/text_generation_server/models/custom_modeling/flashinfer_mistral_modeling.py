@@ -30,7 +30,6 @@ from typing import Optional, List, Tuple
 from tokenizers import processors
 from transformers.utils import logging
 
-from text_generation_server.utils import paged_attention, flash_attn
 from text_generation_server.layers import (
     TensorParallelRowLinear,
     TensorParallelColumnLinear,
