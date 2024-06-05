@@ -131,17 +131,13 @@ display_results = {}
 
 # Iterative generation: each step generates a token for each input in the batch
 while True:
-    # When calling iterative text generation, we may add new inputs (use pb_batch like above)
-    # or use an empty batch (use EmptyFlashinferBatch)
     generations, _, _ = service.generate_token(FlashinferBatch.Empty(batch.id))
-    # Stop if all input generations are done
-    if not generations:
-        break
     for gen in generations:
-        if gen.request_id in display_results:
-            display_results[gen.request_id].append(gen.tokens.texts[0])
-        else:
-            display_results[gen.request_id] = [gen.tokens.texts[0]]
+        if gen.generated_text:
+            display_results[gen.request_id] = ['Prompt: ' + tokenizer.decode(gen.prefill_tokens.token_ids) +  '\nAnswer: ' + gen.generated_text.text]
+    # Stop if all input generations are done
+    if all([g.generated_text for g in generations]):
+        break
 
 for id in display_results:
     print(str(id) + '='*30)
