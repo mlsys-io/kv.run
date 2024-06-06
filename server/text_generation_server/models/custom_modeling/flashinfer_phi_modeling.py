@@ -137,7 +137,7 @@ class FlashPhiAttention(torch.nn.Module):
         self.num_qo_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_dim = self.hidden_size // self.num_qo_heads
-
+        self.head_padded_dim = self._find_padded_head_dim(self.head_dim)
         self.softmax_scale = self.head_dim**-0.5
         self.rotary_dim = int(config.partial_rotary_factor * self.head_dim)
         if self.num_heads % weights.process_group.size() != 0:
@@ -219,9 +219,12 @@ class FlashPhiAttention(torch.nn.Module):
         prefillTotalSeqLen = prefillBatchPosition.total_seq_len
         if prefillTotalSeqLen > 0:
             # need to revisit if contiguous conversion is the best way
-            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
-            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
-            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            q_raw = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
+            k_raw = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            v_raw = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+            q = torch.nn.functional.pad(q_raw, (0, self.head_padded_dim - self.head_dim))
+            k = torch.nn.functional.pad(k_raw, (0, self.head_padded_dim - self.head_dim))
+            v = torch.nn.functional.pad(v_raw, (0, self.head_padded_dim - self.head_dim))
             
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
@@ -248,7 +251,7 @@ class FlashPhiAttention(torch.nn.Module):
                 kv_last_page_len,
                 self.num_qo_heads,
                 self.num_kv_heads,
-                self.head_dim,
+                self.head_padded_dim,
             )
             
             attn_output_prefill = prefill_wrapper.forward(
@@ -256,15 +259,19 @@ class FlashPhiAttention(torch.nn.Module):
                 kvCachePool.cache_data[self.layer_idx], 
                 causal=True, 
                 pos_encoding_mode="ROPE_LLAMA" # this may need change
-            ).view(prefillTotalSeqLen, self.hidden_size)
+            )[:, :, :self.head_dim].view(prefillTotalSeqLen, self.hidden_size)
             prefill_wrapper.end_forward()
             stack_attn_output.append(attn_output_prefill)
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
         if decodeTotalSeqLen > 0:
-            q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
-            k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            q_raw = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
+            k_raw = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            v_raw = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            
+            q = torch.nn.functional.pad(q_raw, (0, self.head_padded_dim - self.head_dim))
+            k = torch.nn.functional.pad(k_raw, (0, self.head_padded_dim - self.head_dim))
+            v = torch.nn.functional.pad(v_raw, (0, self.head_padded_dim - self.head_dim))
 
             flashinfer.append_paged_kv_cache(
                 k,
@@ -285,7 +292,7 @@ class FlashPhiAttention(torch.nn.Module):
                 decodeBatchPosition.kv_last_page_len,
                 self.num_qo_heads,
                 self.num_kv_heads,
-                self.head_dim,
+                self.head_padded_dim,
                 kvCachePool.page_len,
                 pos_encoding_mode="ROPE_LLAMA"
             )
@@ -294,7 +301,7 @@ class FlashPhiAttention(torch.nn.Module):
                 q, 
                 kvCachePool.cache_data[self.layer_idx], 
                 pos_encoding_mode="ROPE_LLAMA"
-            ).view(decodeTotalSeqLen, self.hidden_size)
+            )[:, :, :self.head_dim].view(decodeTotalSeqLen, self.hidden_size)
 
             decode_wrapper.end_forward()
             stack_attn_output.append(attn_output_decode)
@@ -307,6 +314,13 @@ class FlashPhiAttention(torch.nn.Module):
         # output projection
         o = self.dense(attn_outputs)
         return o
+    
+    def _find_padded_head_dim(self, head_dim):
+        flashInferDimensions = [64, 128, 256]
+        for dim in flashInferDimensions:
+            if head_dim <= dim:
+                return dim
+        raise ValueError("The head dimension is too large for FlashInfer")
 
 class PhiMLP(nn.Module):
     def __init__(self, prefix, config, weights, layer_idx: int):

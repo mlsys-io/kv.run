@@ -444,7 +444,7 @@ class FlashinferLM(Model):
             max_pages=num_pages_to_allocate,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
-            head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
+            head_dim=self._find_padded_head_dim(self.model_config.hidden_size // self.model_config.num_attention_heads),
             page_len=PAGE_LEN,
             dtype=dtype,
             device=device
@@ -470,6 +470,13 @@ class FlashinferLM(Model):
             dtype=dtype,
             device=device,
         )
+        
+    def _find_padded_head_dim(self, head_dim):
+        flashInferDimensions = [64, 128, 256]
+        for dim in flashInferDimensions:
+            if head_dim <= dim:
+                return dim
+        raise ValueError("The head dimension is too large for FlashInfer")
 
     def load_lora_adapters(self, lora_ids: List[str]):
         self.loraManager.set_lora_weights(
