@@ -259,7 +259,7 @@ class FlashPhiAttention(torch.nn.Module):
                 kvCachePool.cache_data[self.layer_idx], 
                 causal=True, 
                 pos_encoding_mode="ROPE_LLAMA" # this may need change
-            )[:, :, :self.head_dim].view(prefillTotalSeqLen, self.hidden_size)
+            )[:, :, :self.head_dim].reshape(prefillTotalSeqLen, self.hidden_size)
             prefill_wrapper.end_forward()
             stack_attn_output.append(attn_output_prefill)
 
@@ -301,7 +301,7 @@ class FlashPhiAttention(torch.nn.Module):
                 q, 
                 kvCachePool.cache_data[self.layer_idx], 
                 pos_encoding_mode="ROPE_LLAMA"
-            )[:, :, :self.head_dim].view(decodeTotalSeqLen, self.hidden_size)
+            )[:, :, :self.head_dim].reshape(decodeTotalSeqLen, self.hidden_size)
 
             decode_wrapper.end_forward()
             stack_attn_output.append(attn_output_decode)
@@ -430,7 +430,7 @@ class FlashPhiLayer(nn.Module):
         )
 
         hidden_states = self.resid_dropout(attn_output).add(
-            self.resid_dropout(self.mlp(hidden_states))
+            self.resid_dropout(self.mlp(hidden_states, lora))
         )
 
         return hidden_states, res
