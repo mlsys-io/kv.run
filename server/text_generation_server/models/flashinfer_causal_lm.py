@@ -391,7 +391,8 @@ class FlashinferLM(Model):
                 lm_head = model.lm_head
                 model.lm_head = MedusaModel(config, weights, lm_head)
 
-            torch.distributed.barrier(group=self.process_group)            
+            torch.distributed.barrier(group=self.process_group)
+            model.config = config        
         else:
             raise NotImplementedError(f"Flashinfer is not implemented for: {model_type}")     
         
@@ -460,7 +461,8 @@ class FlashinferLM(Model):
         )
         
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype)
-        self.loraManager.set_lora_weights(lora_ids, self.model_config_for_lora or {}, dtype)
+        if lora_ids:
+            self.loraManager.set_lora_weights(lora_ids, self.model_config_for_lora or {}, dtype)
         self.reqctx: dict[int, RequestContext] = {}
 
         super(FlashinferLM, self).__init__(

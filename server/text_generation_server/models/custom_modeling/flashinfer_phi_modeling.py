@@ -140,13 +140,13 @@ class FlashPhiAttention(torch.nn.Module):
         self.head_padded_dim = self._find_padded_head_dim(self.head_dim)
         self.softmax_scale = self.head_dim**-0.5
         self.rotary_dim = int(config.partial_rotary_factor * self.head_dim)
-        if self.num_heads % weights.process_group.size() != 0:
+        if self.num_qo_heads % weights.process_group.size() != 0:
             raise ValueError(
                 f"`num_heads` must be divisible by `num_shards` (got `num_heads`: {self.num_heads} "
                 f"and `num_shards`: {weights.process_group.size()}"
             )
 
-        self.num_heads = self.num_heads // weights.process_group.size()
+        self.num_qo_heads = self.num_qo_heads // weights.process_group.size()
         self.num_kv_heads = (
             config.num_key_value_heads // weights.process_group.size()
         )
@@ -161,7 +161,7 @@ class FlashPhiAttention(torch.nn.Module):
             bias=True,
         )
         self.layer_idx = layer_idx
-        self.num_groups = self.num_heads // self.num_kv_heads
+        self.num_groups = self.num_qo_heads // self.num_kv_heads
 
     def forward(
         self,
