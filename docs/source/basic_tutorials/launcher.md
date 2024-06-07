@@ -409,6 +409,15 @@ Options:
           [default: 4]
 
 ```
+## LORA_IDS
+```shell
+      --lora-ids <LORA_IDS>
+          Specify LoRA adapters
+          
+          [env: LORA_IDS=]
+          [default: empty]
+
+```
 ## HELP
 ```shell
   -h, --help
