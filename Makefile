@@ -1,3 +1,6 @@
+install-punica-kernel:
+	cd server/punica_kernels && pip install -v --no-build-isolation .
+
 install-server:
 	cd server && make install
 
@@ -17,7 +20,7 @@ install-launcher:
 install-benchmark:
 	cd benchmark && cargo install --path .
 
-install: install-server install-router install-launcher install-custom-kernels
+install: install-server install-router install-launcher install-custom-kernels install-punica-kernel
 
 server-dev:
 	cd server && make run-dev

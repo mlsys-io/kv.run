@@ -45,8 +45,12 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 
 test = 'phi3'
 # test = 'llama-3'
+# test = 'llama-3-70'
 # test = 'llama-2'
 # test = 'mistral'
+# test = 'qwen2'
+# test = 'qwen2-1.8'
+# test = 'qwen2-70'
 
 if test == 'llama-2':
     # Load model
@@ -74,6 +78,14 @@ elif test == 'llama-3':
     requests = [make_input('tjluyao/llama-3-8b-zh', 'lora', id=0),
                 make_input('tjluyao/llama-3-8b-oaast', 'lora', id=1),
                 make_input('tjluyao/llama-3-8b-zh', 'empty', id=2)]
+elif test == 'llama-3-70':
+    # Load model
+    service = FlashinferLM(model_type="llama", model_id="TechxGenus/Meta-Llama-3-70B-Instruct-AWQ",
+                           lora_ids=['Dogge/llama-3-70B-instruct-uncensored-lora'], quantize='AWQ')
+    # service = FlashinferLM(model_type="llama", model_id="TechxGenus/Meta-Llama-3-70B-Instruct-GPTQ",
+    #                        lora_ids=['Dogge/llama-3-70B-instruct-uncensored-lora'], quantize='GPTQ')
+    # Create an input batch of two queries
+    requests = [make_input('Dogge/llama-3-70B-instruct-uncensored-lora', 'lora', id=0)]
 elif test == "gemma":    
     requests = [make_input("tjluyao/gemma-2b-it-math", "base", id=0),
                 make_input("tjluyao/gemma-2b-it-math", "lora", id=1),
@@ -88,6 +100,24 @@ elif test == "gemma":
 elif test == "mistral":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
                 make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
+    service = FlashinferLM(model_type="mistral", model_id="mistralai/Mistral-7B-v0.3")
+elif test == "qwen2":
+    requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事"),
+                make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'lora', id=1, promptOverride="什么是深度学习？")]
+    
+    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-7B-Chat', lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'])
+elif test == "qwen2-1.8":
+    # Todo: Add qwen1.5 1.8b chat lora adapter / Output Repetition Problem
+    requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事")]
+
+    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-1.8B-Chat',
+                           lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'])
+elif test == "qwen2-70":
+    # Todo: Add qwen1.5 72b chat lora adapter
+    requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事")]
+    
+    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-72B-Chat-GPTQ-Int4',
+                           lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'], quantize='gptq')
     service = FlashinferLM(model_type="mistral", model_id="mistralai/Mistral-7B-v0.3")  
 elif test == "phi":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),

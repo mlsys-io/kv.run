@@ -95,6 +95,8 @@ class CompletionRequest(BaseModel):
     top_p: Optional[float] = None
     # Stop generating tokens if a member of `stop` is generated
     stop: Optional[List[str]] = None
+    # LoRA id
+    lora_id: Optional[str] = None
 
 
 class CompletionComplete(BaseModel):
@@ -158,6 +160,8 @@ class ChatRequest(BaseModel):
     tool_choice: Optional[str] = None
     # Stop generating tokens if a member of `stop` is generated
     stop: Optional[List[str]] = None
+    # LoRA id
+    lora_id: Optional[str] = None
 
 
 class ChatCompletionComplete(BaseModel):
@@ -326,6 +330,8 @@ class Request(BaseModel):
     parameters: Optional[Parameters] = None
     # Whether to stream output tokens
     stream: bool = False
+    # LoRA id
+    lora_id: Optional[str] = None
 
     @field_validator("inputs")
     def valid_input(cls, v):

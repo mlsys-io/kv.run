@@ -84,6 +84,7 @@ class Client:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         stop: Optional[List[str]] = None,
+        lora_id: Optional[str] = None
     ):
         """
         Given a prompt, generate a response synchronously
@@ -123,6 +124,7 @@ class Client:
             temperature=temperature,
             top_p=top_p,
             stop=stop,
+            lora_id=lora_id
         )
         if not stream:
             resp = requests.post(
@@ -180,6 +182,7 @@ class Client:
         tool_prompt: Optional[str] = None,
         tool_choice: Optional[str] = None,
         stop: Optional[List[str]] = None,
+        lora_id: Optional[str] = None
     ):
         """
         Given a list of messages, generate a response asynchronously
@@ -245,6 +248,7 @@ class Client:
             tool_prompt=tool_prompt,
             tool_choice=tool_choice,
             stop=stop,
+            lora_id=lora_id
         )
         if not stream:
             resp = requests.post(
@@ -303,6 +307,7 @@ class Client:
         decoder_input_details: bool = False,
         top_n_tokens: Optional[int] = None,
         grammar: Optional[Grammar] = None,
+        lora_id: Optional[str] = None
     ) -> Response:
         """
         Given a prompt, generate the following text
@@ -375,7 +380,7 @@ class Client:
             top_n_tokens=top_n_tokens,
             grammar=grammar,
         )
-        request = Request(inputs=prompt, stream=False, parameters=parameters)
+        request = Request(inputs=prompt, stream=False, parameters=parameters, lora_id=lora_id)
 
         resp = requests.post(
             self.base_url,
@@ -407,6 +412,7 @@ class Client:
         watermark: bool = False,
         top_n_tokens: Optional[int] = None,
         grammar: Optional[Grammar] = None,
+        lora_id: Optional[str] = None
     ) -> Iterator[StreamResponse]:
         """
         Given a prompt, generate the following stream of tokens
@@ -475,7 +481,7 @@ class Client:
             top_n_tokens=top_n_tokens,
             grammar=grammar,
         )
-        request = Request(inputs=prompt, stream=True, parameters=parameters)
+        request = Request(inputs=prompt, stream=True, parameters=parameters, lora_id=lora_id)
 
         resp = requests.post(
             self.base_url,
@@ -508,6 +514,27 @@ class Client:
                     # If we failed to parse the payload, then it is an error payload
                     raise parse_error(resp.status_code, json_payload)
                 yield response
+
+    def download_lora_adapter(
+            self,
+            lora_id: str,
+            hf_api_token: Optional[str] = None
+        ):
+        req = {}
+        req["lora_id"] = lora_id
+        req["hf_api_token"] = hf_api_token
+        resp = requests.post(
+            f"{self.base_url}/download_lora_adapter",
+            json=req,
+            headers=self.headers,
+            cookies=self.cookies,
+            timeout=self.timeout,
+            stream=True,
+        )
+
+        if resp.status_code != 200:
+            raise parse_error(resp.status_code, resp.json())
+        return resp
 
 
 class AsyncClient:
@@ -567,6 +594,7 @@ class AsyncClient:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         stop: Optional[List[str]] = None,
+        lora_id: Optional[str] = None
     ) -> Union[Completion, AsyncIterator[CompletionComplete]]:
         """
         Given a prompt, generate a response asynchronously
@@ -606,6 +634,7 @@ class AsyncClient:
             temperature=temperature,
             top_p=top_p,
             stop=stop,
+            lora_id=lora_id
         )
         if not stream:
             return await self._completion_single_response(request)
@@ -662,6 +691,7 @@ class AsyncClient:
         tool_prompt: Optional[str] = None,
         tool_choice: Optional[str] = None,
         stop: Optional[List[str]] = None,
+        lora_id: Optional[str] = None
     ) -> Union[ChatComplete, AsyncIterator[ChatCompletionChunk]]:
         """
         Given a list of messages, generate a response asynchronously
@@ -727,6 +757,7 @@ class AsyncClient:
             tool_prompt=tool_prompt,
             tool_choice=tool_choice,
             stop=stop,
+            lora_id=lora_id
         )
         if not stream:
             return await self._chat_single_response(request)
@@ -784,6 +815,7 @@ class AsyncClient:
         decoder_input_details: bool = False,
         top_n_tokens: Optional[int] = None,
         grammar: Optional[Grammar] = None,
+        lora_id: Optional[str] = None
     ) -> Response:
         """
         Given a prompt, generate the following text asynchronously
@@ -857,7 +889,7 @@ class AsyncClient:
             top_n_tokens=top_n_tokens,
             grammar=grammar,
         )
-        request = Request(inputs=prompt, stream=False, parameters=parameters)
+        request = Request(inputs=prompt, stream=False, parameters=parameters, lora_id=lora_id)
 
         async with ClientSession(
             headers=self.headers, cookies=self.cookies, timeout=self.timeout
@@ -887,6 +919,7 @@ class AsyncClient:
         watermark: bool = False,
         top_n_tokens: Optional[int] = None,
         grammar: Optional[Grammar] = None,
+        lora_id: Optional[str] = None
     ) -> AsyncIterator[StreamResponse]:
         """
         Given a prompt, generate the following stream of tokens asynchronously
@@ -955,7 +988,7 @@ class AsyncClient:
             top_n_tokens=top_n_tokens,
             grammar=grammar,
         )
-        request = Request(inputs=prompt, stream=True, parameters=parameters)
+        request = Request(inputs=prompt, stream=True, parameters=parameters, lora_id=lora_id)
 
         async with ClientSession(
             headers=self.headers, cookies=self.cookies, timeout=self.timeout

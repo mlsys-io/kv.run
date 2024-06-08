@@ -246,7 +246,7 @@ class Weights:
     def get_multi_weights_col(self, prefixes: List[str], quantize: str, dim: int):
         if quantize == "exl2":
             raise ValueError("get_multi_weights_col is not supported for exl2")
-        elif quantize in ["gptq", "awq"]:
+        elif quantize in ["gptq", "awq", "GPTQ", "AWQ"]:
             try:
                 qweight = torch.cat(
                     [self.get_sharded(f"{p}.qweight", dim=1) for p in prefixes], dim=1

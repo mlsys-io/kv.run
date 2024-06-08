@@ -47,14 +47,14 @@ pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3
 
 # Install Flash and Paged Attention
 cd server 
-make install-flash-attention & make install-vllm-cuda
+make install-flash-attention && make install-vllm-cuda
 ```
 You can debug/edit code in the build folder. When done, use python copy_back.py to copy changes back to the original src folder.
 
 ## Usages
 #### Local API tests
 ```shell
-cd server/examples & python test_local_api.py
+cd server/examples && python test_local_api.py
 ```
 #### Local UI demo
 (Inherited from [Punica](https://github.com/punica-ai/punica))
@@ -79,9 +79,14 @@ The supported quantization methods include:
 For AWQ and EETQ quantization, you need to build their specific kernels: 
 ```shell
 # AWQ
-cd server & make install-awq
+cd server && make install-awq
+git clone https://github.com/casper-hansen/AutoAWQ && cd AutoAWQ
+pip install -e .
 # EETQ
-cd server & make install-eetq
+cd server && make install-eetq
+# GTPQ
+git clone https://github.com/PanQiWei/AutoGPTQ.git && cd AutoGPTQ
+pip install -vvv --no-build-isolation -e .
 ```
 
 ## Model support matrix
