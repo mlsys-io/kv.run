@@ -493,8 +493,8 @@ class FlashPhiModel(torch.nn.Module):
         lora: BatchedModelLoraWeight | None
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        position_ids_prefill, max_seq_len_prefill = self._getPositionIdsAndMaxSeqLen(prefillBatchPosition.seq_indptr)
-        position_ids_decode, max_seq_len_decode = self._getPositionIdsAndMaxSeqLen(decodeBatchPosition.seq_indptr)
+        position_ids_prefill, max_seq_len_prefill = self._getPositionIdsAndMaxSeqLen(prefillBatchPosition.seq_indptr, hidden_states.device)
+        position_ids_decode, max_seq_len_decode = self._getPositionIdsAndMaxSeqLen(decodeBatchPosition.seq_indptr, hidden_states.device)
         position_ids = torch.cat([position_ids_prefill, position_ids_decode])
         max_seq_len = max(max_seq_len_prefill, max_seq_len_decode)
               
@@ -517,9 +517,11 @@ class FlashPhiModel(torch.nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
     
-    def _getPositionIdsAndMaxSeqLen(self, seq_indptr: torch.Tensor) -> Tuple[torch.Tensor, int]:
+    def _getPositionIdsAndMaxSeqLen(self, seq_indptr: torch.Tensor, device) -> Tuple[torch.Tensor, int]:
         seq_lens = torch.diff(seq_indptr)
-        position_ids = torch.cat([torch.arange(seq_len, dtype=torch.int32) for seq_len in seq_lens])
+        if seq_lens.numel() == 0:
+            return torch.tensor([], dtype=torch.int32, device=device), 0
+        position_ids = torch.cat([torch.arange(seq_len, dtype=torch.int32, device=device) for seq_len in seq_lens])
         max_seq_len = torch.max(seq_lens).item()
         return position_ids, max_seq_len
 

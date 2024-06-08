@@ -43,7 +43,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     )
     return request
 
-test = 'phi'
+test = 'phi3'
 # test = 'llama-3'
 # test = 'llama-2'
 # test = 'mistral'
@@ -92,7 +92,15 @@ elif test == "mistral":
 elif test == "phi":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLM(model_type="phi", model_id="microsoft/phi-2")  
+    service = FlashinferLM(model_type="phi", model_id="microsoft/phi-2")
+elif test == "phi3":
+    requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
+            make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
+    service = FlashinferLM(model_type="phi3", model_id="microsoft/Phi-3-mini-4k-instruct")
+elif test == "baichuan":
+    requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
+            make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
+    service = FlashinferLM(model_type="baichuan", model_id="baichuan-inc/Baichuan2-7B-Chat")
 
 print(service.get_lora_adapters())
 tokenizer = service.tokenizer

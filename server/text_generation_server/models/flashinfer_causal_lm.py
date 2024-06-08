@@ -259,7 +259,7 @@ class FlashinferLM(Model):
         self.device = device
         self.dtype = dtype
 
-        if model_type == "llama":
+        if model_type == "llama" or model_type == "phi3" or model_type == "baichuan":
             tokenizer = AutoTokenizer.from_pretrained(model_id)
             model = LlamaForCausalLM.from_pretrained(
                 model_id,
