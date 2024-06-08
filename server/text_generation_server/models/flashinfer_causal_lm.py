@@ -4,7 +4,6 @@
 import torch
 import torch.distributed
 from typing import Any, TypedDict, Optional
-from transformers.models.llama.modeling_llama import LlamaConfig
 from text_generation_server.utils.lora_utils import ModelLoraManager, ModelConfigForLora
 from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
 from text_generation_server.models.custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM
@@ -17,7 +16,9 @@ from text_generation_server.models.custom_modeling.flashinfer_phi_modeling impor
     FlashPhiForCausalLM,
     PhiConfig,
 )
-# from .custom_modeling.flashinfer_mistral_modeling import MistralConfig, FlashMistralForCausalLM
+from text_generation_server.models.custom_modeling.flashinfer_mistral_modeling import (
+    MistralConfig, FlashMistralForCausalLM
+)
 from transformers import PreTrainedTokenizerBase, AutoTokenizer
 import transformers
 from text_generation_server.pb import generate_pb2
@@ -433,7 +434,7 @@ class FlashinferLM(Model):
         free_memory = max(
             0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
         )
-        num_pages_to_allocate = 200 #int(free_memory * 0.80 / cache_page_size)
+        num_pages_to_allocate = int(free_memory * 0.80 / cache_page_size)
         print(f"Cache allocation:\n"
             f"  Cache Page Size: {cache_page_size / 1024 / 1024} MB\n"
             f"  Dtype Size: {dtype_size}\n"

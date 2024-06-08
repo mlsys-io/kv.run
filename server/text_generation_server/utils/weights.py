@@ -7,8 +7,8 @@ import torch
 from loguru import logger
 from huggingface_hub import hf_hub_download
 import json
-# from text_generation_server.layers.exl2 import Exl2Weight
-# from text_generation_server.layers.gptq import GPTQWeight
+from text_generation_server.layers.exl2 import Exl2Weight
+from text_generation_server.layers.gptq import GPTQWeight
 from text_generation_server.utils.log import log_once
 
 
