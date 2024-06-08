@@ -35,6 +35,7 @@ class LlamaAttention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.num_kv_groups = self.num_qo_heads // self.num_kv_heads
         self.head_dim = self.hidden_size // self.num_qo_heads
+        self.head_padded_dim = self._find_padded_head_dim(self.head_dim)
         self._scale = 1 / math.sqrt(self.head_dim)
         self.layer_idx = layer_idx
 
@@ -108,6 +109,11 @@ class LlamaAttention(nn.Module):
             k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
             v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
             
+            if self.head_padded_dim > self.head_dim:
+                q = torch.nn.functional.pad(q, (0, self.head_padded_dim - self.head_dim))
+                k = torch.nn.functional.pad(k, (0, self.head_padded_dim - self.head_dim))
+                v = torch.nn.functional.pad(v, (0, self.head_padded_dim - self.head_dim))
+            
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
             kv_page_indptr = prefillBatchPosition.kv_page_indptr.clone()
@@ -141,7 +147,13 @@ class LlamaAttention(nn.Module):
                 kvCachePool.cache_data[self.layer_idx], 
                 causal=True, 
                 pos_encoding_mode="ROPE_LLAMA"
-            ).view(prefillTotalSeqLen, self.hidden_size)
+            )
+            
+            if self.head_padded_dim > self.head_dim:
+                attn_output_prefill = attn_output_prefill[:, :, :self.head_dim].reshape(prefillTotalSeqLen, self.hidden_size)
+            else:
+                attn_output_prefill = attn_output_prefill.view(prefillTotalSeqLen, self.hidden_size)
+
             prefill_wrapper.end_forward()
             stack_attn_output.append(attn_output_prefill)
 
@@ -150,6 +162,11 @@ class LlamaAttention(nn.Module):
             q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim)
             k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
             v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+            
+            if self.head_padded_dim > self.head_dim:
+                q = torch.nn.functional.pad(q, (0, self.head_padded_dim - self.head_dim))
+                k = torch.nn.functional.pad(k, (0, self.head_padded_dim - self.head_dim))
+                v = torch.nn.functional.pad(v, (0, self.head_padded_dim - self.head_dim))
 
             flashinfer.append_paged_kv_cache(
                 k,
@@ -179,7 +196,12 @@ class LlamaAttention(nn.Module):
                 q, 
                 kvCachePool.cache_data[self.layer_idx], 
                 pos_encoding_mode="ROPE_LLAMA"
-            ).view(decodeTotalSeqLen, self.hidden_size)
+            )
+            
+            if self.head_padded_dim > self.head_dim:
+                attn_output_decode = attn_output_decode[:, :, :self.head_dim].reshape(decodeTotalSeqLen, self.hidden_size)
+            else:
+                attn_output_decode = attn_output_decode.view(decodeTotalSeqLen, self.hidden_size)
 
             decode_wrapper.end_forward()
             stack_attn_output.append(attn_output_decode)
@@ -207,6 +229,13 @@ class LlamaAttention(nn.Module):
             torch.cuda.nvtx.range_pop()
 
         return o
+
+    def _find_padded_head_dim(self, head_dim):
+        flashInferDimensions = [64, 128, 256]
+        for dim in flashInferDimensions:
+            if head_dim <= dim:
+                return dim
+        raise ValueError("The head dimension is too large for FlashInfer")
 
 
 class LlamaMlp(nn.Module):
