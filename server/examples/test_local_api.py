@@ -1,6 +1,13 @@
 from text_generation_server.pb import generate_pb2
 import torch
-from text_generation_server.models.flashinfer_causal_lm import FlashinferLM, FlashinferBatch
+from text_generation_server.models import (
+    FlashinferLlama,
+    FlashinferGemma,
+    FlashinferMistral,
+    FlashinferPhi,
+    FlashinferQwen2,
+    FlashinferBatch
+)
 import random, json
 from test_cases import DEMO, LoraSpec
 
@@ -54,14 +61,14 @@ test = 'phi3'
 
 if test == 'llama-2':
     # Load model
-    service = FlashinferLM(model_type="llama", model_id="meta-llama/Llama-2-7b-hf",
+    service = FlashinferLlama(model_id="meta-llama/Llama-2-7b-hf",
                            lora_ids=['abcdabcd987/gsm8k-llama2-7b-lora-16'])
     # Create an input batch of two queries
     requests = [make_input('abcdabcd987/gsm8k-llama2-7b-lora-16', 'base', id=0, promptOverride= "Give me a breif introduction to Byznatine Fault Tolerance and why it is important?"),
                 make_input('abcdabcd987/gsm8k-llama2-7b-lora-16', 'lora', id=1, promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?")]
 elif test == 'llama-3':
     # Load model
-    service = FlashinferLM(model_type="llama", model_id="tjluyao/llama-3-8b",
+    service = FlashinferLlama(model_id="tjluyao/llama-3-8b",
               lora_ids=['tjluyao/llama-3-8b-math',
                         'tjluyao/llama-3-8b-zh'])
     # Test load lora adapters
@@ -80,9 +87,9 @@ elif test == 'llama-3':
                 make_input('tjluyao/llama-3-8b-zh', 'empty', id=2)]
 elif test == 'llama-3-70':
     # Load model
-    service = FlashinferLM(model_type="llama", model_id="TechxGenus/Meta-Llama-3-70B-Instruct-AWQ",
+    service = FlashinferLlama(model_id="TechxGenus/Meta-Llama-3-70B-Instruct-AWQ",
                            lora_ids=['Dogge/llama-3-70B-instruct-uncensored-lora'], quantize='AWQ')
-    # service = FlashinferLM(model_type="llama", model_id="TechxGenus/Meta-Llama-3-70B-Instruct-GPTQ",
+    # service = FlashinferLlama(model_id="TechxGenus/Meta-Llama-3-70B-Instruct-GPTQ",
     #                        lora_ids=['Dogge/llama-3-70B-instruct-uncensored-lora'], quantize='GPTQ')
     # Create an input batch of two queries
     requests = [make_input('Dogge/llama-3-70B-instruct-uncensored-lora', 'lora', id=0)]
@@ -90,47 +97,47 @@ elif test == "gemma":
     requests = [make_input("tjluyao/gemma-2b-it-math", "base", id=0),
                 make_input("tjluyao/gemma-2b-it-math", "lora", id=1),
                 make_input("monsterapi/gemma-2b-lora-maths-orca-200k", "lora", id=2)]
-    service = FlashinferLM(model_type="gemma", model_id="google/gemma-2b-it",
+    service = FlashinferGemma(model_id="google/gemma-2b-it",
                            lora_ids=['tjluyao/gemma-2b-it-math',
                                      'monsterapi/gemma-2b-lora-maths-orca-200k'])
-    # service = FlashinferLM(model_type="gemma", model_id="google/gemma-2b", lora_ids=['tjluyao/gemma-2b-math'])
-    # service = FlashinferLM(model_type="gemma", model_id="google/gemma-2b", lora_ids=[])
+    # service = FlashinferGemma(model_id="google/gemma-2b", lora_ids=['tjluyao/gemma-2b-math'])
+    # service = FlashinferGemma(model_id="google/gemma-2b", lora_ids=[])
     # Quantized version
-    # service = FlashinferLM(model_type="gemma", model_id="TechxGenus/gemma-2b-GPTQ", quantize='gptq')
+    # service = FlashinferGemma(model_id="TechxGenus/gemma-2b-GPTQ", quantize='gptq')
 elif test == "mistral":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
                 make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLM(model_type="mistral", model_id="mistralai/Mistral-7B-v0.3")
+    service = FlashinferMistral(model_id="mistralai/Mistral-7B-v0.3")
 elif test == "qwen2":
     requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事"),
                 make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'lora', id=1, promptOverride="什么是深度学习？")]
     
-    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-7B-Chat', lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'])
+    service = FlashinferQwen2(model_id='Qwen/Qwen1.5-7B-Chat', lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'])
 elif test == "qwen2-1.8":
     # Todo: Add qwen1.5 1.8b chat lora adapter / Output Repetition Problem
     requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事")]
 
-    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-1.8B-Chat',
+    service = FlashinferQwen2(model_id='Qwen/Qwen1.5-1.8B-Chat',
                            lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'])
 elif test == "qwen2-70":
     # Todo: Add qwen1.5 72b chat lora adapter
     requests = [make_input('REILX/Qwen1.5-7B-Chat-750Mb-lora', 'base', id=0, promptOverride="给我讲个故事")]
     
-    service = FlashinferLM(model_type="qwen2", model_id='Qwen/Qwen1.5-72B-Chat-GPTQ-Int4',
+    service = FlashinferQwen2(model_id='Qwen/Qwen1.5-72B-Chat-GPTQ-Int4',
                            lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'], quantize='gptq')
-    service = FlashinferLM(model_type="mistral", model_id="mistralai/Mistral-7B-v0.3")  
+    service = FlashinferQwen2(model_id="mistralai/Mistral-7B-v0.3")  
 elif test == "phi":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLM(model_type="phi", model_id="microsoft/phi-2")
+    service = FlashinferPhi(model_id="microsoft/phi-2")
 elif test == "phi3":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLM(model_type="phi3", model_id="microsoft/Phi-3-mini-4k-instruct")
+    service = FlashinferLlama( model_id="microsoft/Phi-3-mini-4k-instruct")
 elif test == "baichuan":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLM(model_type="baichuan", model_id="baichuan-inc/Baichuan2-7B-Chat")
+    service = FlashinferLlama(model_id="baichuan-inc/Baichuan2-7B-Chat")
 
 print(service.get_lora_adapters())
 tokenizer = service.tokenizer

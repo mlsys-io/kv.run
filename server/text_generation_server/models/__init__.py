@@ -12,7 +12,6 @@ from pathlib import Path
 from text_generation_server.utils.speculate import get_speculate, set_speculate
 from text_generation_server.models.model import Model
 from text_generation_server.models.causal_lm import CausalLM
-from text_generation_server.models.flash_causal_lm import FlashCausalLM
 from text_generation_server.models.bloom import BLOOMSharded
 from text_generation_server.models.mpt import MPTSharded
 from text_generation_server.models.seq2seq_lm import Seq2SeqLM
@@ -23,7 +22,6 @@ from text_generation_server.models.santacoder import SantaCoder
 from text_generation_server.models.t5 import T5Sharded
 from text_generation_server.models.gpt_neox import GPTNeoxSharded
 from text_generation_server.models.phi import Phi
-from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
 # in PyTorch 1.12 and later.
@@ -102,6 +100,27 @@ if FLASH_ATTENTION:
     __all__.append(FlashStarcoder2)
     __all__.append(FlashGemma)
     __all__.append(FlashCohere)
+    
+FLASHINFER_AVAILABLE = True
+try:
+    from text_generation_server.models import (
+        FlashinferLlama,
+        FlashinferGemma,
+        FlashinferMistral,
+        FlashinferPhi,
+        FlashinferQwen2 
+    )
+
+except ImportError as e:
+    logger.warning(f"Could not import FlashInfer: {e}")
+    FLASHINFER_AVAILABLE = False
+    
+if FLASHINFER_AVAILABLE:
+    __all__.append(FlashinferLlama)
+    __all__.append(FlashinferGemma)
+    __all__.append(FlashinferMistral)
+    __all__.append(FlashinferPhi)
+    __all__.append(FlashinferQwen2)
 
 MAMBA_AVAILABLE = True
 try:
@@ -112,13 +131,6 @@ except ImportError as e:
 
 if MAMBA_AVAILABLE:
     __all__.append(Mamba)
-    
-FLASHINFER_AVAILABLE = True
-try:
-    import flashinfer
-except ImportError as e:
-    logger.warning(f"Could not import FlashInfer: {e}")
-    FLASHINFER_AVAILABLE = False
 
 class ModelType(enum.Enum):
     IDEFICS2 = {
@@ -553,6 +565,14 @@ def get_model(
             )
 
     elif model_type == PHI:
+        if FLASHINFER_AVAILABLE:
+            return FlashinferPhi(
+                model_type,
+                model_id,
+                lora_ids.split(';') if lora_ids else None,
+                quantize=quantize,
+                dtype=dtype
+            )
         if FLASH_ATTENTION:
             return FlashPhi(
                 model_id,
@@ -589,15 +609,14 @@ def get_model(
 
     elif model_type == LLAMA or model_type == BAICHUAN or model_type == PHI3:
         if FLASHINFER_AVAILABLE:
-            loraids = []
-            if lora_ids:
-                loraids = lora_ids.split(';')
-            return FlashinferLM(
+            return FlashinferLlama(
                 model_type,
                 model_id,
-                loraids,
+                lora_ids.split(';') if lora_ids else None,
                 quantize=quantize,
-                dtype=dtype,)
+                dtype=dtype
+            )
+
         if FLASH_ATTENTION:
             return FlashLlama(
                 model_id,
@@ -619,6 +638,14 @@ def get_model(
                 trust_remote_code=trust_remote_code,
             )
     if model_type == GEMMA:
+        if FLASHINFER_AVAILABLE:
+            return FlashinferGemma(
+                model_type,
+                model_id,
+                lora_ids.split(';') if lora_ids else None,
+                quantize=quantize,
+                dtype=dtype
+            )
         if FLASH_ATTENTION:
             return FlashGemma(
                 model_id,
@@ -719,6 +746,15 @@ def get_model(
                 )
 
     if model_type == MISTRAL:
+        if FLASHINFER_AVAILABLE:
+            return FlashinferMistral(
+                model_type,
+                model_id,
+                lora_ids.split(';') if lora_ids else None,
+                quantize=quantize,
+                dtype=dtype
+            )
+
         sliding_window = config_dict.get("sliding_window", -1)
         if FLASH_ATTENTION:
             return FlashMistral(
@@ -789,6 +825,14 @@ def get_model(
             )
 
     if model_type == QWEN2:
+        if FLASHINFER_AVAILABLE:
+            return FlashinferQwen2(
+                model_type,
+                model_id,
+                lora_ids.split(';') if lora_ids else None,
+                quantize=quantize,
+                dtype=dtype
+            )
         sliding_window = config_dict.get("sliding_window", -1)
         if (sliding_window is None or sliding_window != -1) and SUPPORTS_WINDOWING:
             return FlashQwen2(

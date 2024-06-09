@@ -1,36 +1,18 @@
-# Modified from https://github.com/punica-ai/punica/blob/master/src/punica/models/llama_lora.py
-# Editor: Junyi Shen
-
 import torch
 import torch.distributed
 from typing import Any, TypedDict, Optional
 from text_generation_server.utils.lora_utils import ModelLoraManager, ModelConfigForLora
 from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
-from text_generation_server.models.custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM
-from text_generation_server.models.custom_modeling.flashinfer_gemma_modeling import (
-    GemmaTokenizerFast,
-    FlashGemmaForCausalLM,
-    GemmaConfig,
-)
-from text_generation_server.models.custom_modeling.flashinfer_phi_modeling import (
-    FlashPhiForCausalLM,
-    PhiConfig,
-)
-from text_generation_server.models.custom_modeling.flashinfer_mistral_modeling import (
-    MistralConfig, FlashMistralForCausalLM
-)
-from text_generation_server.models.custom_modeling.flashinfer_qwen2_modeling import (
-    Qwen2Config, FlashQwen2ForCausalLM
-)
-from transformers import PreTrainedTokenizerBase, AutoTokenizer
+
+from transformers import PreTrainedTokenizerBase, PretrainedConfig
 import transformers
 from text_generation_server.pb import generate_pb2
-import json
 
 import time
 from opentelemetry import trace
 from typing import Optional, Tuple, List, Type, Dict
 from text_generation_server.models import Model
+from text_generation_server.models.causal_lm import CausalLMBatch
 from text_generation_server.models.types import (
     Batch,
     Tokens,
@@ -40,17 +22,11 @@ from text_generation_server.models.types import (
 from text_generation_server.utils import (
     NextTokenChooser,
     StoppingCriteria,
-    initialize_torch_distributed,
-    weight_files,
-    Weights,
 )
 from text_generation_server.utils.dist import MEMORY_FRACTION
 from dataclasses import dataclass
 
-from loguru import logger
 tracer = trace.get_tracer(__name__)
-
-from .causal_lm import CausalLMBatch
 
 class TextGenerationChunk(TypedDict):
     index: int
@@ -236,226 +212,45 @@ class RequestContext:
 class FlashinferLM(Model):
     def __init__(
         self,
-        model_type: str,
-        model_id: str = None,
+        model: torch.nn.Module,
+        tokenizer: PreTrainedTokenizerBase,
+        config: PretrainedConfig,
+        dtype: torch.dtype,
+        device: torch.device,
         lora_ids: List[str] = None,
-        revision: Optional[str] = None,
-        quantize: Optional[str] = None,
-        speculator: Optional[str] = None,
-        use_medusa: Optional[str] = None,
-        dtype: Optional[torch.dtype] = None,
-        trust_remote_code: bool = False
     ):
-        if use_medusa:
-            raise RuntimeError("Medusa decoding is not enabled for AutoModel")
-
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            dtype = torch.float16 if dtype is None else dtype
-        else:
-            if quantize:
-                raise ValueError("quantization is not available on CPU")
-
-            device = torch.device("cpu")
-            dtype = torch.float32 if dtype is None else dtype
-
         self.device = device
         self.dtype = dtype
-
-        if model_type == "llama" or model_type == "phi3" or model_type == "baichuan":
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model = LlamaForCausalLM.from_pretrained(
-                model_id,
-                revision=revision,
-                torch_dtype=dtype,
-                low_cpu_mem_usage=True,
-                device_map=device,
-                trust_remote_code=trust_remote_code,
-            )
-        elif model_type == "gemma":
-            process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.bfloat16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashGemma is only available on GPU")
-
-            gemmaConfig = GemmaConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-            
-            gemmaConfig.quantize = quantize
-            gemmaConfig.use_medusa = False
-
-            torch.distributed.barrier(group=process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=process_group)
-            if gemmaConfig.quantize in ["gptq", "awq"]:
-                weights._set_gptq_params(model_id, revision)
-
-            model = FlashGemmaForCausalLM(gemmaConfig, weights)
-            tokenizer = GemmaTokenizerFast.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=trust_remote_code,
-                use_fast=True,
-                from_slow=False,
-            )
-            model.config = gemmaConfig
-        elif model_type == "mistral":
-            # local_model_dir_mistral = "/gpfsnyu/scratch/yy4108/kv.run/mistral/mistral_model"
-            # local_tokenizer_dir_mistral = "/gpfsnyu/scratch/yy4108/kv.run/mistral/mistral_model"
-            # local_config_dir_mistral = "/gpfsnyu/scratch/yy4108/kv.run/mistral/mistral_model"
-
-            process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.bfloat16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashMistral is only available on GPU")
-
-            mistralConfig = MistralConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-            
-            mistralConfig.quantize = None
-            mistralConfig.use_medusa = False
-
-            torch.distributed.barrier(group=process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=process_group)
-            # if gemmaConfig.quantize in ["gptq", "awq"]:
-            #     weights._set_gptq_params(model_id, revision)
-
-            model = FlashMistralForCausalLM(None, mistralConfig, weights)
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model.config = mistralConfig
-        elif model_type == "phi":
-            self.process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.float16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashPhi is only available on GPU")
-
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=trust_remote_code,
-            )
-
-            config = PhiConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-            config.quantize = quantize
-            config.speculator = speculator
-
-            torch.distributed.barrier(group=self.process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=self.process_group)
-            if config.quantize in ["gptq", "awq"]:
-                weights._set_gptq_params(model_id, revision)
-
-            model = FlashPhiForCausalLM(config, weights)
-            if speculator:
-                from text_generation_server.layers.medusa import MedusaModel
-                from huggingface_hub import hf_hub_download
-                import json
-                import os
-                from pathlib import Path
-
-                is_local_model = (
-                    Path(speculator).exists() and Path(speculator).is_dir()
-                ) or os.getenv("WEIGHTS_CACHE_OVERRIDE", None) is not None
-
-                if not is_local_model:
-                    medusa_config = hf_hub_download(
-                        speculator, revision=revision, filename="config.json"
-                    )
-                    medusa_head = hf_hub_download(
-                        speculator, revision=revision, filename="medusa_lm_head.pt"
-                    )
-                else:
-                    medusa_config = str(Path(speculator) / "config.json")
-                    medusa_head = str(Path(speculator) / "medusa_lm_head.pt")
-
-                with open(medusa_config, "r") as f:
-                    config = json.load(f)
-                medusa_sf = medusa_head[: -len(".pt")] + ".safetensors"
-                weights = Weights(
-                    [medusa_sf], device, dtype, process_group=self.process_group
-                )
-                lm_head = model.lm_head
-                model.lm_head = MedusaModel(config, weights, lm_head)
-
-            torch.distributed.barrier(group=self.process_group)
-            model.config = config        
-        elif model_type == "qwen2":
-            process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.bfloat16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashQwen2 is only available on GPU")
-
-            qwenConfig = Qwen2Config.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-            
-            if quantize is None:
-                qwenConfig.quantize = None
-            else:
-                qwenConfig.quantize = quantize
-            qwenConfig.use_medusa = False
-
-            torch.distributed.barrier(group=process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=process_group)
-            if qwenConfig.quantize in ["gptq", "awq"]:
-                weights._set_gptq_params(model_id, revision)
-
-            model = FlashQwen2ForCausalLM(qwenConfig, weights)
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model.config = qwenConfig
-        else:
-            raise NotImplementedError(f"Flashinfer is not implemented for: {model_type}")     
+        self.model_config = config
         
         if (
             torch.cuda.is_available()
             and torch.cuda.device_count() == 1
-            and quantize != "bitsandbytes"
+            and config.quantize != "bitsandbytes"
         ):
             model = model.cuda()
 
         if tokenizer.pad_token_id is None:
-            if model.config.pad_token_id is not None:
+            if config.pad_token_id is not None:
                 tokenizer.pad_token_id = model.config.pad_token_id
-            elif model.config.eos_token_id is not None:
+            elif config.eos_token_id is not None:
                 tokenizer.pad_token_id = model.config.eos_token_id
             elif tokenizer.eos_token_id is not None:
                 tokenizer.pad_token_id = tokenizer.eos_token_id
             else:
                 tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-        self.model_config = model.config
         
-        # consider moving it into cache manager
+        # TODO: consider moving it into cache manager
         PAGE_LEN = 16
+        head_dim_padded = self._find_padded_head_dim(config.hidden_size // config.num_attention_heads)
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         cache_page_size = (
             2 * 
             PAGE_LEN * 
-            self.model_config.num_hidden_layers * 
-            self.model_config.num_attention_heads * 
-            (self.model_config.hidden_size // self.model_config.num_attention_heads) *
+            config.num_hidden_layers * 
+            config.num_attention_heads * 
+            head_dim_padded *
             dtype_size
         )
         
@@ -477,7 +272,7 @@ class FlashinferLM(Model):
             max_pages=num_pages_to_allocate,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
-            head_dim=self._find_padded_head_dim(self.model_config.hidden_size // self.model_config.num_attention_heads),
+            head_dim=head_dim_padded,
             page_len=PAGE_LEN,
             dtype=dtype,
             device=device
@@ -485,11 +280,11 @@ class FlashinferLM(Model):
                 
         self.modelKvCache = ModelKvCache(kvCachePool)
         self.model_config_for_lora = ModelConfigForLora(
-            num_hidden_layers=self.model_config.num_hidden_layers,
-            hidden_size=self.model_config.hidden_size,
-            intermediate_size=self.model_config.intermediate_size,
-            num_qo_heads = self.model_config.num_attention_heads,
-            num_kv_heads = self.model_config.num_key_value_heads,
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            num_qo_heads = config.num_attention_heads,
+            num_kv_heads = config.num_key_value_heads,
         )
         
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype)
