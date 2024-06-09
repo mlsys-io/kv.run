@@ -2,7 +2,7 @@ import torch
 import torch.distributed
 
 from typing import Optional, List
-from text_generation_server.models import FlashinferLM
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
 from text_generation_server.models.custom_modeling.flashinfer_qwen2_modeling import (
     Qwen2Config, FlashQwen2ForCausalLM
 )

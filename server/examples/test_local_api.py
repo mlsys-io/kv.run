@@ -1,13 +1,11 @@
 from text_generation_server.pb import generate_pb2
 import torch
-from text_generation_server.models import (
-    FlashinferLlama,
-    FlashinferGemma,
-    FlashinferMistral,
-    FlashinferPhi,
-    FlashinferQwen2,
-    FlashinferBatch
-)
+from text_generation_server.models.flashinfer_llama import FlashinferLlama
+from text_generation_server.models.flashinfer_gemma import FlashinferGemma
+from text_generation_server.models.flashinfer_mistral import FlashinferMistral
+from text_generation_server.models.flashinfer_phi import FlashinferPhi
+from text_generation_server.models.flashinfer_qwen2 import FlashinferQwen2
+from text_generation_server.models.flashinfer_causal_lm import FlashinferBatch
 import random, json
 from test_cases import DEMO, LoraSpec
 
@@ -50,7 +48,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     )
     return request
 
-test = 'phi3'
+test = 'phi'
 # test = 'llama-3'
 # test = 'llama-3-70'
 # test = 'llama-2'
@@ -125,7 +123,6 @@ elif test == "qwen2-70":
     
     service = FlashinferQwen2(model_id='Qwen/Qwen1.5-72B-Chat-GPTQ-Int4',
                            lora_ids=['REILX/Qwen1.5-7B-Chat-750Mb-lora'], quantize='gptq')
-    service = FlashinferQwen2(model_id="mistralai/Mistral-7B-v0.3")  
 elif test == "phi":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]

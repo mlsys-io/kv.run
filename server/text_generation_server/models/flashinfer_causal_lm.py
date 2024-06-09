@@ -232,9 +232,9 @@ class FlashinferLM(Model):
 
         if tokenizer.pad_token_id is None:
             if config.pad_token_id is not None:
-                tokenizer.pad_token_id = model.config.pad_token_id
+                tokenizer.pad_token_id = config.pad_token_id
             elif config.eos_token_id is not None:
-                tokenizer.pad_token_id = model.config.eos_token_id
+                tokenizer.pad_token_id = config.eos_token_id
             elif tokenizer.eos_token_id is not None:
                 tokenizer.pad_token_id = tokenizer.eos_token_id
             else:

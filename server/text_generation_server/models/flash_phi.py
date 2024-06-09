@@ -5,7 +5,7 @@ from opentelemetry import trace
 from transformers import AutoConfig, AutoTokenizer
 from typing import Optional
 
-from text_generation_server.models import FlashCausalLM
+from text_generation_server.models.flash_causal_lm import FlashCausalLM
 from text_generation_server.models.custom_modeling.flash_phi_modeling import (
     FlashPhiForCausalLM,
     PhiConfig,

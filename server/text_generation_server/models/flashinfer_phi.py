@@ -1,8 +1,8 @@
 import torch
 import torch.distributed
 from typing import Optional, List
-from text_generation_server.models import FlashCausalLM
-from text_generation_server.models.custom_modeling.flash_phi_modeling import (
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
+from text_generation_server.models.custom_modeling.flashinfer_phi_modeling import (
     FlashPhiForCausalLM,
     PhiConfig,
 )
@@ -14,7 +14,7 @@ from text_generation_server.utils import (
 
 from transformers import AutoConfig, AutoTokenizer
 
-class FlashinferPhi(FlashCausalLM):
+class FlashinferPhi(FlashinferLM):
     def __init__(
         self,
         model_id: str,
@@ -89,6 +89,7 @@ class FlashinferPhi(FlashCausalLM):
         super(FlashinferPhi, self).__init__(
             model=model,
             tokenizer=tokenizer,
+            config=config,
             dtype=dtype,
             device=device,
             lora_ids = lora_ids,

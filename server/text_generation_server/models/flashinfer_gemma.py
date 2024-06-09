@@ -1,7 +1,7 @@
 import torch
 import torch.distributed
 from typing import Optional, List
-from text_generation_server.models import FlashCausalLM
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
 from text_generation_server.models.custom_modeling.flashinfer_gemma_modeling import (
     GemmaTokenizerFast,
     GemmaConfig,
@@ -13,7 +13,7 @@ from text_generation_server.utils import (
     Weights,
 )
 
-class FlashinferGemma(FlashCausalLM):
+class FlashinferGemma(FlashinferLM):
     def __init__(
         self,
         model_id: str,
@@ -54,10 +54,10 @@ class FlashinferGemma(FlashCausalLM):
             from_slow=False,
         )
         
-        model.config = gemmaConfig    
         super(FlashinferGemma, self).__init__(
             model=model,
             tokenizer=tokenizer,
+            config = gemmaConfig,
             dtype=dtype,
             device=device,
             lora_ids = lora_ids,

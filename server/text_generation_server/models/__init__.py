@@ -103,13 +103,11 @@ if FLASH_ATTENTION:
     
 FLASHINFER_AVAILABLE = True
 try:
-    from text_generation_server.models import (
-        FlashinferLlama,
-        FlashinferGemma,
-        FlashinferMistral,
-        FlashinferPhi,
-        FlashinferQwen2 
-    )
+    from text_generation_server.models.flashinfer_llama import FlashinferLlama
+    from text_generation_server.models.flashinfer_gemma import FlashinferGemma
+    from text_generation_server.models.flashinfer_mistral import FlashinferMistral
+    from text_generation_server.models.flashinfer_phi import FlashinferPhi
+    from text_generation_server.models.flashinfer_qwen2 import FlashinferQwen2
 
 except ImportError as e:
     logger.warning(f"Could not import FlashInfer: {e}")
@@ -567,7 +565,6 @@ def get_model(
     elif model_type == PHI:
         if FLASHINFER_AVAILABLE:
             return FlashinferPhi(
-                model_type,
                 model_id,
                 lora_ids.split(';') if lora_ids else None,
                 quantize=quantize,
@@ -610,7 +607,6 @@ def get_model(
     elif model_type == LLAMA or model_type == BAICHUAN or model_type == PHI3:
         if FLASHINFER_AVAILABLE:
             return FlashinferLlama(
-                model_type,
                 model_id,
                 lora_ids.split(';') if lora_ids else None,
                 quantize=quantize,
@@ -640,7 +636,6 @@ def get_model(
     if model_type == GEMMA:
         if FLASHINFER_AVAILABLE:
             return FlashinferGemma(
-                model_type,
                 model_id,
                 lora_ids.split(';') if lora_ids else None,
                 quantize=quantize,
@@ -748,7 +743,6 @@ def get_model(
     if model_type == MISTRAL:
         if FLASHINFER_AVAILABLE:
             return FlashinferMistral(
-                model_type,
                 model_id,
                 lora_ids.split(';') if lora_ids else None,
                 quantize=quantize,
@@ -827,7 +821,6 @@ def get_model(
     if model_type == QWEN2:
         if FLASHINFER_AVAILABLE:
             return FlashinferQwen2(
-                model_type,
                 model_id,
                 lora_ids.split(';') if lora_ids else None,
                 quantize=quantize,

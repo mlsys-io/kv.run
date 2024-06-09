@@ -1,7 +1,7 @@
 import torch
 import torch.distributed
 from typing import Optional, List
-from text_generation_server.models import FlashinferLM
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
 from text_generation_server.models.custom_modeling.flashinfer_mistral_modeling import (
     MistralConfig,
     FlashMistralForCausalLM,
