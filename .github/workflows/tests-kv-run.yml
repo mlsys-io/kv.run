@@ -58,9 +58,6 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.4
         with:
           version: "v0.3.3"
-      - name: sccache stats
-        run: |
-          ${SCCACHE_PATH} --show-stats
       - name: configure sccache
         uses: actions/github-script@v6
         with:
@@ -96,3 +93,6 @@ jobs:
       - name: Run Rust tests
         run: |
           cargo test
+      - name: sccache stats
+        run: |
+          ${SCCACHE_PATH} --show-stats
