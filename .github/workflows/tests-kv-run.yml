@@ -1,8 +1,7 @@
 name: kv.run server tests
 
 on:
-  schedule:
-    - cron: '0 0 * * 1-5'
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/workflows/tests-kv-run.yaml"
