@@ -6,7 +6,7 @@ from transformers.models.llama import LlamaTokenizer
 from typing import Optional, List
 
 from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
-from text_generation_server.models.custom_modeling.flash_llama_modeling import (
+from text_generation_server.models.custom_modeling.flashinfer_llama_modeling import (
     FlashLlamaForCausalLM,
 )
 from text_generation_server.utils import (
@@ -31,6 +31,7 @@ class FlashinferLlama(FlashinferLM):
         else:
             raise NotImplementedError("Flashinfer Llama is only available on Cuda")
 
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
         try:
             tokenizer = LlamaTokenizer.from_pretrained(
                 model_id,
@@ -61,6 +62,7 @@ class FlashinferLlama(FlashinferLM):
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
         config.quantize = quantize
+        config.speculator = None
         torch.distributed.barrier(group=self.process_group)
 
         filenames = weight_files(model_id, revision=revision, extension=".safetensors")

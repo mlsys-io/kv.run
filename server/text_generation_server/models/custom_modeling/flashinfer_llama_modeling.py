@@ -199,7 +199,7 @@ class FlashLlamaLayer(nn.Module):
         self.self_attn = FlashLlamaAttention(
             prefix=f"{prefix}.self_attn", flashinferWrapper=flashinferWrapper, config=config, weights=weights, layer_idx=layer_idx
         )
-        self.mlp = LlamaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
+        self.mlp = LlamaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_idx)
         self.input_layernorm = RMSNorm(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
         )        
@@ -237,7 +237,7 @@ class FlashLlamaLayer(nn.Module):
 
 class FlashLlamaModel(torch.nn.Module):
     def __init__(self, prefix:str, config: LlamaConfig, weights: Weights):
-        super().__init__(config)
+        super().__init__()
         assert config.num_attention_heads % weights.process_group.size() == 0
         assert config.num_key_value_heads % weights.process_group.size() == 0
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
@@ -264,7 +264,9 @@ class FlashLlamaModel(torch.nn.Module):
             ]
         )
         
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(
+            prefix="model.norm", weights=weights, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -291,7 +293,7 @@ class FlashLlamaModel(torch.nn.Module):
 
 class FlashLlamaForCausalLM(torch.nn.Module):
     def __init__(self, prefix: str, config: LlamaConfig, weights: Weights):
-        super().__init__(config)
+        super().__init__()
         
         self.embed_tokens = TensorParallelEmbedding(
             prefix=(
