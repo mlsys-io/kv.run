@@ -322,12 +322,14 @@ class FlashGemmaAttention(nn.Module):
         decodeBatchPosition: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
+        q_dim = self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
+        kv_dim = self.flashinferWrapper.num_key_value_heads * self.flashinferWrapper.head_dim
         qkv = self.qkv_proj(hidden_states)
         q_proj, k_proj, v_proj = qkv.split(
             [
-                self.head_dim * self.num_qo_heads,
-                self.head_dim * self.num_kv_heads,
-                self.head_dim * self.num_kv_heads
+                q_dim,
+                kv_dim,
+                kv_dim
             ],
             dim=1,
         )
@@ -471,10 +473,6 @@ class FlashGemmaModel(torch.nn.Module):
         )
 
         self.gradient_checkpointing = False
-
-        self.head_size = self.layers[0].self_attn.head_dim
-        self.num_heads = self.layers[0].self_attn.num_qo_heads
-        self.num_key_value_heads = self.layers[0].self_attn.num_kv_heads
 
     def forward(
         self,

@@ -4,6 +4,7 @@ import torch
 import flashinfer
 from text_generation_server.utils.cache_manager_flashinfer import KvCacheBatchPosition
 
+FLASH_INFER_SUPPORTED_DIMS = [64, 128, 256]
 class POS_ENCODING_MODE(Enum):
     ROPE_LLAMA = "ROPE_LLAMA"
     ALIBI = "ALIBI"
@@ -16,7 +17,11 @@ class AttentionRotaryParams:
     rope_scale: float = 1.0
     rope_theta: float = 1.0e-4
 
-FLASH_INFER_SUPPORTED_DIMS = [64, 128, 256]
+def find_padded_head_dim(head_dim):
+    for dim in FLASH_INFER_SUPPORTED_DIMS:
+        if head_dim <= dim:
+            return dim
+    raise ValueError("The head dimension is too large for FlashInfer")
 
 class FlashinferAttentionWrapper:
     def __init__(self, num_attention_heads: int, num_key_value_heads: int, hidden_size: int):
@@ -24,7 +29,7 @@ class FlashinferAttentionWrapper:
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = hidden_size // num_attention_heads
-        self.head_padded_dim = self._find_padded_head_dim(self.head_dim)
+        self._head_padded_dim = find_padded_head_dim(self.head_dim)
         self._workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=torch.cuda.current_device())
 
     def computeAttention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cacheData: torch.Tensor, page_len: int,
@@ -50,24 +55,18 @@ class FlashinferAttentionWrapper:
             attn_output_decode = self._unpad_attention(attn_output_decode, decodeTotalSeqLen)
             stack_attn_output.append(attn_output_decode)
         return stack_attn_output[0] if len(stack_attn_output) == 1 else torch.cat(stack_attn_output, dim=0)
-        
-    def _find_padded_head_dim(self, head_dim):
-        for dim in FLASH_INFER_SUPPORTED_DIMS:
-            if head_dim <= dim:
-                return dim
-        raise ValueError("The head dimension is too large for FlashInfer")
     
     def _unpad_attention(self, attn_output, seqLen):
-        if self.head_padded_dim > self.head_dim:
+        if self._head_padded_dim > self.head_dim:
             return attn_output[:, :, :self.head_dim].reshape(seqLen, self.hidden_size)
         else:
             return attn_output.view(seqLen, self.hidden_size)
     
     def _pad_qkv(self, q, k, v):
-        if self.head_padded_dim > self.head_dim:
-            q = torch.nn.functional.pad(q, (0, self.head_padded_dim - self.head_dim))
-            k = torch.nn.functional.pad(k, (0, self.head_padded_dim - self.head_dim))
-            v = torch.nn.functional.pad(v, (0, self.head_padded_dim - self.head_dim))
+        if self._head_padded_dim > self.head_dim:
+            q = torch.nn.functional.pad(q, (0, self._head_padded_dim - self.head_dim))
+            k = torch.nn.functional.pad(k, (0, self._head_padded_dim - self.head_dim))
+            v = torch.nn.functional.pad(v, (0, self._head_padded_dim - self.head_dim))
         return q, k, v
 
     def _batchPrefill(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cacheData: torch.Tensor,
@@ -94,14 +93,14 @@ class FlashinferAttentionWrapper:
             prefillBatchPosition.kv_last_page_len,
             self.num_attention_heads,
             self.num_key_value_heads,
-            self.head_padded_dim,
+            self._head_padded_dim,
         )
         
         attn_output_prefill = prefill_wrapper.forward(
             q,
             cacheData,
             causal=rotaryParams.causal, 
-            pos_encoding_mode=rotaryParams.pos_encoding_mode,
+            pos_encoding_mode=rotaryParams.pos_encoding_mode.value,
             rope_scale=rotaryParams.rope_scale,
             rope_theta=rotaryParams.rope_theta
         )
@@ -123,7 +122,7 @@ class FlashinferAttentionWrapper:
         )
 
         decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            workspaceBuffer=self._workspace_buffer, kv_layout="NHD"
+            workspace_buffer=self._workspace_buffer, kv_layout="NHD"
         )
         decode_wrapper.begin_forward(
             decodeBatchPosition.kv_page_indptr,
@@ -131,16 +130,16 @@ class FlashinferAttentionWrapper:
             decodeBatchPosition.kv_last_page_len,
             self.num_attention_heads,
             self.num_key_value_heads,
-            self.head_padded_dim,
+            self._head_padded_dim,
             page_len,
-            pos_encoding_mode=rotaryParams.pos_encoding_mode,
+            pos_encoding_mode=rotaryParams.pos_encoding_mode.value,
             data_type=cacheData.dtype
         )
         
         attn_output_decode = decode_wrapper.forward(
             q, 
             cacheData, 
-            pos_encoding_mode=rotaryParams.pos_encoding_mode,
+            pos_encoding_mode=rotaryParams.pos_encoding_mode.value,
             rope_scale=rotaryParams.rope_scale,
             rope_theta=rotaryParams.rope_theta
         )

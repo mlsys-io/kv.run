@@ -3,6 +3,7 @@ import torch.distributed
 from typing import Any, TypedDict, Optional
 from text_generation_server.utils.lora_utils import ModelLoraManager, ModelConfigForLora
 from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
+from text_generation_server.layers.flashinfer_attention import find_padded_head_dim
 
 from transformers import PreTrainedTokenizerBase, PretrainedConfig
 import transformers
@@ -243,7 +244,7 @@ class FlashinferLM(Model):
         
         # TODO: consider moving it into cache manager
         PAGE_LEN = 16
-        head_dim_padded = self._find_padded_head_dim(config.hidden_size // config.num_attention_heads)
+        head_dim_padded = find_padded_head_dim(config.hidden_size // config.num_attention_heads)
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         cache_page_size = (
             2 * 

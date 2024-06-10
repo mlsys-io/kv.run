@@ -48,7 +48,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     )
     return request
 
-test = 'phi'
+test = 'gemma'
 # test = 'llama-3'
 # test = 'llama-3-70'
 # test = 'llama-2'
@@ -92,9 +92,9 @@ elif test == 'llama-3-70':
     # Create an input batch of two queries
     requests = [make_input('Dogge/llama-3-70B-instruct-uncensored-lora', 'lora', id=0)]
 elif test == "gemma":    
-    requests = [make_input("tjluyao/gemma-2b-it-math", "base", id=0),
+    requests = [make_input("tjluyao/gemma-2b-it-math", "lora", id=0),
                 make_input("tjluyao/gemma-2b-it-math", "lora", id=1),
-                make_input("monsterapi/gemma-2b-lora-maths-orca-200k", "lora", id=2)]
+                make_input("tjluyao/gemma-2b-it-math", "lora", id=2)]
     service = FlashinferGemma(model_id="google/gemma-2b-it",
                            lora_ids=['tjluyao/gemma-2b-it-math',
                                      'monsterapi/gemma-2b-lora-maths-orca-200k'])

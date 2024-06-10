@@ -27,19 +27,22 @@ class LlamaAttention(nn.Module):
         self.flashinferWrapper = flashinferWrapper
         self.rotaryParams = AttentionRotaryParams(rope_scale=config.rope_scaling, rope_theta=config.rope_theta)
         self.layer_idx = layer_idx
+        
+        q_dim = flashinferWrapper.num_attention_heads * flashinferWrapper.head_dim
+        kv_dim = flashinferWrapper.num_key_value_heads * flashinferWrapper.head_dim
         self.q_proj = nn.Linear(
-            self.hidden_size, self.num_qo_heads * self.head_dim, bias=False
+            flashinferWrapper.hidden_size, q_dim, bias=False
         )
         self.k_proj = nn.Linear(
             config.hidden_size,
-            self.num_kv_heads * self.head_dim, bias=False
+            kv_dim, bias=False
         )
         self.v_proj = nn.Linear(
             config.hidden_size,
-            self.num_kv_heads * self.head_dim, bias=False
+            kv_dim, bias=False
         )
         self.o_proj = nn.Linear(
-            self.num_qo_heads * self.head_dim, self.hidden_size, bias=False
+            q_dim, flashinferWrapper.hidden_size, bias=False
         )
 
     def forward(
@@ -123,7 +126,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # Self Attention
         torch.cuda.nvtx.range_push("LlamaAttention")
-        hidden_states = self.self_attn(hidden_states, kvCachePool, prefillBatchPosition, decodeBatchPosition, lora)
+        hidden_states = self.self_attn(hidden_states, kvCachePool, prefillBatchPosition, decodeBatchPosition, loraWeight)
         torch.cuda.nvtx.range_pop()
         torch.cuda.nvtx.range_push("r")
         hidden_states = residual + hidden_states
