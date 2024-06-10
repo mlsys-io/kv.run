@@ -5,6 +5,9 @@ import peft
 import torch
 from huggingface_hub import hf_hub_download
 from loguru import logger
+from punica_kernels import (
+    add_lora_sgmv_custom_cutlass as add_lora,
+)
 
 class ModelConfigForLora:
     def __init__(
@@ -196,6 +199,80 @@ class BatchedModelLoraWeight:
             dtype=torch.int32,
         )
         self.rank = weights[0].q.lora_rank
+        
+    def apply_lora_weight_attn(self, attn_projected: torch.Tensor, attn_raw: torch.Tensor, layer_idx: int):
+        add_lora(
+            attn_projected,
+            attn_raw,
+            self.o.wa_ptr,
+            self.o.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
+
+    def apply_lora_weight_kvq(self, q_proj: torch.Tensor, k_proj: torch.Tensor, v_proj: torch.Tensor, 
+                     hidden_states: torch.Tensor, layer_idx: int):
+        add_lora(
+            q_proj,
+            hidden_states,
+            self.q.wa_ptr,
+            self.q.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
+        add_lora(
+            k_proj,
+            hidden_states,
+            self.k.wa_ptr,
+            self.k.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
+        add_lora(
+            v_proj,
+            hidden_states,
+            self.v.wa_ptr,
+            self.v.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
+        
+    def apply_lora_weight_gate(self, gate: torch.Tensor, x: torch.Tensor, layer_idx: int):
+        add_lora(
+            gate,
+            x,
+            self.gate.wa_ptr,
+            self.gate.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
+        
+    def apply_lora_weight_up(self, up: torch.Tensor, x: torch.Tensor, layer_idx: int):
+        add_lora(
+            up,
+            x,
+            self.up.wa_ptr,
+            self.up.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
+        
+    def apply_lora_weight_down(self, down: torch.Tensor, x: torch.Tensor, layer_idx: int):
+        add_lora(
+            down,
+            x,
+            self.down.wa_ptr,
+            self.down.wb_ptr,
+            self.segment,
+            layer_idx,
+            self.rank,
+        )
 
 def load_lora_weights(lora_id):
     try:
