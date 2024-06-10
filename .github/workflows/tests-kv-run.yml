@@ -31,8 +31,6 @@ jobs:
 
     env:
       SCCACHE_GHA_ENABLED: "on"
-      RUSTC_WRAPPER: ${SCCACHE_PATH}
-      SCCACHE: 0.3.3
 
     steps:
       - uses: actions/checkout@v2
@@ -57,10 +55,10 @@ jobs:
           sudo rm -rf /usr/local/lib/android # will release about 10 GB if you don't need Android
           sudo rm -rf /usr/share/dotnet # will release about 20GB if you don't need .NET
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.3
+        uses: mozilla-actions/sccache-action@v0.0.4
         with:
           version: "v0.3.3"
-      - name: sccache stats 1
+      - name: sccache stats
         run: |
           ${SCCACHE_PATH} --show-stats
       - name: configure sccache
@@ -71,6 +69,7 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('SCCACHE_GHA_CACHE_TO', 'sccache-${{runner.os}}-${{github.ref_name}}');
             core.exportVariable('SCCACHE_GHA_CACHE_FROM', 'sccache-${{runner.os}}-main,sccache-${{runner.os}}-');
+            core.exportVariable('RUSTC_WRAPPER', ${SCCACHE_PATH});
       - name: cargo registry cache
         uses: actions/cache@v3
         with:
