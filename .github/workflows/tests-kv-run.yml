@@ -31,7 +31,7 @@ jobs:
 
     env:
       SCCACHE_GHA_ENABLED: "on"
-      RUSTC_WRAPPER: /usr/local/bin/sccache
+      RUSTC_WRAPPER: ${SCCACHE_PATH}
       SCCACHE: 0.3.3
 
     steps:
@@ -97,6 +97,3 @@ jobs:
       - name: Run Rust tests
         run: |
           cargo test
-      - name: sccache stats
-        run: |
-          ${SCCACHE_PATH} --show-stats
