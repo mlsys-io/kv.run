@@ -69,7 +69,7 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('SCCACHE_GHA_CACHE_TO', 'sccache-${{runner.os}}-${{github.ref_name}}');
             core.exportVariable('SCCACHE_GHA_CACHE_FROM', 'sccache-${{runner.os}}-main,sccache-${{runner.os}}-');
-            core.exportVariable('RUSTC_WRAPPER', ${SCCACHE_PATH});
+            core.exportVariable('RUSTC_WRAPPER', process.env.SCCACHE_PATH || '');
       - name: cargo registry cache
         uses: actions/cache@v3
         with:
