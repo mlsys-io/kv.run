@@ -58,10 +58,11 @@ jobs:
           sudo rm -rf /usr/share/dotnet # will release about 20GB if you don't need .NET
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.3
-        run: |
-          ${SCCACHE_PATH} --show-stats
         with:
           version: "v0.3.3"
+      - name: sccache stats 1
+        run: |
+          ${SCCACHE_PATH} --show-stats
       - name: configure sccache
         uses: actions/github-script@v6
         with:
