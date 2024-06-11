@@ -15,6 +15,7 @@ from text_generation_server.utils import (
     Weights,
 )
 
+
 class FlashinferLlama(FlashinferLM):
     def __init__(
         self,
@@ -76,7 +77,7 @@ class FlashinferLlama(FlashinferLM):
         super(FlashinferLlama, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            config = config,
+            config=config,
             dtype=dtype,
             device=device,
             lora_ids=lora_ids,
