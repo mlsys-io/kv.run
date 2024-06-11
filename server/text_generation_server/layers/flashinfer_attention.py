@@ -22,10 +22,19 @@ class AttentionRotaryParams:
 
 
 def find_padded_head_dim(head_dim):
-    for dim in FLASH_INFER_SUPPORTED_DIMS:
-        if head_dim <= dim:
-            return dim
-    raise ValueError("The head dimension is too large for FlashInfer")
+    return 256
+    # for dim in FLASH_INFER_SUPPORTED_DIMS:
+    #     if head_dim <= dim:
+    #         return dim
+    # raise ValueError("The head dimension is too large for FlashInfer")
+
+
+def assert_close(a, b):
+    rtol, atol = {
+        torch.float16: (1e-3, 5e-4),
+        torch.bfloat16: (8e-3, 8e-3),
+    }[a.dtype]
+    torch.allclose(a, b, rtol=rtol, atol=atol)
 
 
 class FlashinferAttentionWrapper:
@@ -47,6 +56,7 @@ class FlashinferAttentionWrapper:
         k: torch.Tensor,
         v: torch.Tensor,
         cacheData: torch.Tensor,
+        cacheData_pad: torch.Tensor,
         page_len: int,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
@@ -64,13 +74,20 @@ class FlashinferAttentionWrapper:
             v = v[:prefillTotalSeqLen].view(
                 prefillTotalSeqLen, self.num_key_value_heads, self.head_dim
             )
-            q, k, v = self._pad_qkv(q, k, v)
+
+            q_pad, k_pad, v_pad = self._pad_qkv(q, k, v)
+            attn_output_prefill_pad = self._batchPrefill(
+                q_pad, k_pad, v_pad, cacheData_pad, prefillBatchPosition, rotaryParams
+            )
+            attn_output_prefill_unpad = self._unpad_attention(
+                attn_output_prefill_pad, prefillTotalSeqLen
+            )
+
             attn_output_prefill = self._batchPrefill(
                 q, k, v, cacheData, prefillBatchPosition, rotaryParams
             )
-            attn_output_prefill = self._unpad_attention(
-                attn_output_prefill, prefillTotalSeqLen
-            )
+
+            assert assert_close(attn_output_prefill, attn_output_prefill_unpad)
             stack_attn_output.append(attn_output_prefill)
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
@@ -84,13 +101,25 @@ class FlashinferAttentionWrapper:
             v = v[prefillTotalSeqLen:].view(
                 decodeTotalSeqLen, self.num_key_value_heads, self.head_dim
             )
-            q, k, v = self._pad_qkv(q, k, v)
+            q_pad, k_pad, v_pad = self._pad_qkv(q, k, v)
+            attn_output_decode_pad = self._batchDecode(
+                q_pad,
+                k_pad,
+                v_pad,
+                cacheData_pad,
+                page_len,
+                decodeBatchPosition,
+                rotaryParams,
+            )
+            attn_output_decode_unpad = self._unpad_attention(
+                attn_output_decode_pad, prefillTotalSeqLen
+            )
+
             attn_output_decode = self._batchDecode(
                 q, k, v, cacheData, page_len, decodeBatchPosition, rotaryParams
             )
-            attn_output_decode = self._unpad_attention(
-                attn_output_decode, decodeTotalSeqLen
-            )
+
+            assert assert_close(attn_output_decode, attn_output_decode_unpad)
             stack_attn_output.append(attn_output_decode)
         return (
             stack_attn_output[0]

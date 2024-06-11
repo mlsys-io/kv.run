@@ -268,7 +268,17 @@ class FlashinferLM(Model):
         )
 
         kvCachePool = KvCachePool(
-            max_pages=num_pages_to_allocate,
+            max_pages=100,
+            num_layers=self.model_config.num_hidden_layers,
+            num_heads=self.model_config.num_key_value_heads,
+            head_dim=config.hidden_size // config.num_attention_heads,
+            page_len=PAGE_LEN,
+            dtype=dtype,
+            device=device,
+        )
+
+        kvCachePool_pad = KvCachePool(
+            max_pages=100,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
             head_dim=head_dim_padded,
@@ -277,6 +287,7 @@ class FlashinferLM(Model):
             device=device,
         )
 
+        self.modelKvCache_pad = ModelKvCache(kvCachePool_pad)
         self.modelKvCache = ModelKvCache(kvCachePool)
         self.model_config_for_lora = ModelConfigForLora(
             num_hidden_layers=config.num_hidden_layers,
@@ -384,6 +395,7 @@ class FlashinferLM(Model):
         input_ids = []
         lora_ids, lora_lens = [], []
         batchKvCache = self.modelKvCache.getOrCreate(batch.batch_id)
+        batchKvCache_pad = self.modelKvCache_pad.getOrCreate(batch.batch_id)
         prefill_reqIds = []
         decode_reqIds = []
 
@@ -420,6 +432,7 @@ class FlashinferLM(Model):
         raw_logits, _ = self.model(
             input_ids,
             self.modelKvCache.kvCachePool,
+            self.modelKvCache_pad.kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
             self.loraManager.get_lora_batched_weights(lora_ids, lora_lens),
@@ -462,6 +475,7 @@ class FlashinferLM(Model):
                 )
                 self.reqctx.pop(reqid)
                 batchKvCache.release(reqid)
+                batchKvCache_pad.release(reqid)
             else:
                 generated_text = None
                 all_stop = False
