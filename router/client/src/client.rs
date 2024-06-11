@@ -147,7 +147,7 @@ impl Client {
                 }),
                 prefill_logprobs: true,
                 top_n_tokens: 20,
-                lora_id: None
+                lora_id: None,
             });
             n_tokens += max_input_length;
 

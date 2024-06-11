@@ -44,7 +44,7 @@ pub(crate) struct VertexResponse {
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct LoRAAdapterControlRequest {
     pub lora_id: String,
-    pub hf_api_token: Option<String>
+    pub hf_api_token: Option<String>,
 }
 
 /// Hub type
@@ -348,7 +348,7 @@ fn default_parameters() -> GenerateParameters {
         seed: None,
         top_n_tokens: None,
         grammar: None,
-        lora_id: None
+        lora_id: None,
     }
 }
 
@@ -433,7 +433,7 @@ pub struct CompletionRequest {
     #[serde(default)]
     #[schema(nullable = true, example = "null")]
     pub stop: Option<Vec<String>>,
-    
+
     /// LoRA id
     #[serde(default)]
     #[schema(nullable = true, default = "empty", example = "empty")]

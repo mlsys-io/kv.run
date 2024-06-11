@@ -5,16 +5,16 @@ use crate::infer::{InferError, InferResponse, InferStreamResponse, ToolGrammar};
 use crate::validation::ValidationError;
 use crate::{
     BestOfSequence, Details, ErrorResponse, FinishReason, GenerateParameters, GenerateRequest,
-    GenerateResponse, GrammarType, HubModelInfo, HubTokenizerConfig, Infer, Info, Message,
-    PrefillToken, SimpleToken, StreamDetails, StreamResponse, Token, TokenizeResponse, Usage,
-    Validation, HubProcessorConfig,
+    GenerateResponse, GrammarType, HubModelInfo, HubProcessorConfig, HubTokenizerConfig, Infer,
+    Info, Message, PrefillToken, SimpleToken, StreamDetails, StreamResponse, Token,
+    TokenizeResponse, Usage, Validation,
 };
 use crate::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionChunk, ChatCompletionComplete,
     ChatCompletionDelta, ChatCompletionLogprob, ChatCompletionLogprobs, ChatCompletionTopLogprob,
     ChatRequest, CompatGenerateRequest, Completion, CompletionComplete, CompletionCompleteChunk,
-    CompletionRequest, DeltaToolCall, Function, Tool, VertexRequest, VertexResponse,
-    LoRAAdapterControlRequest,
+    CompletionRequest, DeltaToolCall, Function, LoRAAdapterControlRequest, Tool, VertexRequest,
+    VertexResponse,
 };
 use crate::{FunctionDefinition, ToolCall, ToolType};
 use async_stream::__private::AsyncStream;
@@ -32,16 +32,17 @@ use futures::TryStreamExt;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use serde_json::Value;
 use std::convert::Infallible;
-use std::{env, thread};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
+use std::net::SocketAddr;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
-use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::{env, thread};
 use text_generation_client::{ShardInfo, ShardedClient};
 use tokenizers::Tokenizer;
 use tokio::select;
@@ -52,8 +53,6 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{info_span, instrument, Instrument};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-use std::os::unix::process::CommandExt;
-
 
 /// Generate tokens if `stream == false` or a stream of token if `stream == true`
 #[utoipa::path(
@@ -675,7 +674,7 @@ async fn completions(
                 seed,
                 top_n_tokens: None,
                 grammar: None,
-                lora_id: None
+                lora_id: None,
             },
         })
         .collect();
@@ -1100,7 +1099,7 @@ async fn chat_completions(
             seed,
             top_n_tokens: req.top_logprobs,
             grammar: typed_grammar,
-            lora_id: None
+            lora_id: None,
         },
     };
 
@@ -1397,7 +1396,6 @@ async fn download_lora_adapter(
     Extension(_infer): Extension<Infer>,
     Json(req): Json<LoRAAdapterControlRequest>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-
     let download_args = vec![
         "download-lora-adapters".to_string(),
         req.lora_id.to_string(),
@@ -1430,11 +1428,15 @@ async fn download_lora_adapter(
         .spawn()
     {
         Ok(p) => p,
-        Err(_) => return Err((StatusCode::BAD_REQUEST,
-                                Json(ErrorResponse {
-                                    error: "TGI server not found.".to_string(),
-                                    error_type: "TGI server not found".to_string(),
-                                })))
+        Err(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "TGI server not found.".to_string(),
+                    error_type: "TGI server not found".to_string(),
+                }),
+            ))
+        }
     };
 
     let download_stderr = BufReader::new(download_process.stderr.take().unwrap());
@@ -1464,7 +1466,8 @@ async fn download_lora_adapter(
                 Json(ErrorResponse {
                     error: "No model path found or authorization failed.".to_string(),
                     error_type: "download error".to_string(),
-                })))
+                }),
+            ));
         }
         sleep(Duration::from_millis(100));
     }
@@ -1738,8 +1741,8 @@ pub async fn run(
     let compute_type =
         ComputeType(std::env::var("COMPUTE_TYPE").unwrap_or("gpu+optimized".to_string()));
 
-    let lora_control_route = Router::new()
-        .route("/download_lora_adapter", post(download_lora_adapter));
+    let lora_control_route =
+        Router::new().route("/download_lora_adapter", post(download_lora_adapter));
 
     // Combine routes and layers
     let mut app = Router::new()

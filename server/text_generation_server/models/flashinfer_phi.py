@@ -1,12 +1,8 @@
 import torch
 import torch.distributed
-
-from opentelemetry import trace
-from transformers import AutoConfig, AutoTokenizer
-from typing import Optional
-
-from text_generation_server.models.flash_causal_lm import FlashCausalLM
-from text_generation_server.models.custom_modeling.flash_phi_modeling import (
+from typing import Optional, List
+from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
+from text_generation_server.models.custom_modeling.flashinfer_phi_modeling import (
     FlashPhiForCausalLM,
     PhiConfig,
 )
@@ -16,17 +12,18 @@ from text_generation_server.utils import (
     Weights,
 )
 
-tracer = trace.get_tracer(__name__)
+from transformers import AutoConfig, AutoTokenizer
 
 
-class FlashPhi(FlashCausalLM):
+class FlashinferPhi(FlashinferLM):
     def __init__(
         self,
         model_id: str,
+        lora_ids: List[str] = None,
         revision: Optional[str] = None,
         quantize: Optional[str] = None,
         speculator: Optional[str] = None,
-        dtype: Optional[torch.dtype] = None,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
         trust_remote_code: bool = False,
     ):
         self.process_group, rank, world_size = initialize_torch_distributed()
@@ -90,14 +87,11 @@ class FlashPhi(FlashCausalLM):
             model.lm_head = MedusaModel(config, weights, lm_head)
 
         torch.distributed.barrier(group=self.process_group)
-        super(FlashPhi, self).__init__(
+        super(FlashinferPhi, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            num_layers=len(model.model.layers),
-            num_kv_heads=model.model.num_key_value_heads,
-            head_size=model.model.head_size,
+            config=config,
             dtype=dtype,
             device=device,
-            rank=rank,
-            world_size=world_size,
+            lora_ids=lora_ids,
         )

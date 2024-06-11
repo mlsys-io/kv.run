@@ -55,7 +55,7 @@ impl Health {
                     ignore_eos_token: false,
                 }),
                 top_n_tokens: 0,
-                lora_id: None
+                lora_id: None,
             };
             let batch = Batch {
                 id: BATCH_ID,

@@ -99,8 +99,9 @@ def serve(
         dtype,
         trust_remote_code,
         uds_path,
-        lora_ids
+        lora_ids,
     )
+
 
 @app.command()
 def download_lora_adapters(
@@ -119,8 +120,9 @@ def download_lora_adapters(
         backtrace=True,
         diagnose=False,
     )
-    for lora_id in lora_ids.split(';'):
+    for lora_id in lora_ids.split(";"):
         load_lora_weights(lora_id)
+
 
 @app.command()
 def download_weights(

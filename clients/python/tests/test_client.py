@@ -7,10 +7,15 @@ from text_generation.types import FinishReason, InputToken
 
 def test_generate_lora(llama_7b_url, hf_headers):
     client = Client(llama_7b_url, hf_headers)
-    response = client.generate("test", max_new_tokens=1, decoder_input_details=True, lora_id='abcdabcd987/gsm8k-llama2-7b-lora-16')
+    response = client.generate(
+        "test",
+        max_new_tokens=1,
+        decoder_input_details=True,
+        lora_id="abcdabcd987/gsm8k-llama2-7b-lora-16",
+    )
     assert response.generated_text == "_"
 
-    response = client.download_lora_adapter('abcdabcd987/gsm8k-llama2-7b-lora-16')
+    response = client.download_lora_adapter("abcdabcd987/gsm8k-llama2-7b-lora-16")
     assert response.status_code == 200
 
 

@@ -20,8 +20,15 @@ from punica_kernels import (
     rms_norm,
 )
 
-from text_generation_server.utils.lora_utils import BatchedLoraWeight, LoraWeight, BatchedModelLoraWeight
-from text_generation_server.utils.cache_manager_flashinfer import KvCacheBatchPosition, KvCachePool
+from text_generation_server.utils.lora_utils import (
+    BatchedLoraWeight,
+    LoraWeight,
+    BatchedModelLoraWeight,
+)
+from text_generation_server.utils.cache_manager_flashinfer import (
+    KvCacheBatchPosition,
+    KvCachePool,
+)
 
 # from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
@@ -39,6 +46,7 @@ from text_generation_server.layers import (
 )
 from text_generation_server.layers.rotary import PositionRotaryEmbedding
 from text_generation_server.layers.layernorm import FastRMSNorm
+
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
@@ -181,7 +189,7 @@ class MistralAttention(torch.nn.Module):
         self.query_key_value = load_attention(config, prefix, weights)
 
         self.layer_idx = layer_idx
-        self.config = config 
+        self.config = config
 
         self.o_proj = TensorParallelRowLinear.load(
             config,
@@ -210,7 +218,7 @@ class MistralAttention(torch.nn.Module):
             [
                 self.head_size * self.num_heads,
                 self.head_size * self.num_key_value_heads,
-                self.head_size * self.num_key_value_heads
+                self.head_size * self.num_key_value_heads,
             ],
             dim=1,
         )
@@ -218,7 +226,7 @@ class MistralAttention(torch.nn.Module):
         q_proj = q_proj.contiguous()
         k_proj = k_proj.contiguous()
         v_proj = v_proj.contiguous()
-        
+
         # print(f"q proj {q_proj}")
         # print(f"lora rank: {lora.rank}")
 
@@ -252,12 +260,26 @@ class MistralAttention(torch.nn.Module):
             )
 
         stack_attn_output = []
-        workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device)
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device
+        )
         prefillTotalSeqLen = prefillBatchPosition.total_seq_len
         if prefillTotalSeqLen > 0:
-            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_heads, self.head_size).contiguous()
-            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_key_value_heads, self.head_size).contiguous()
-            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_key_value_heads, self.head_size).contiguous()
+            q = (
+                q_proj[:prefillTotalSeqLen]
+                .view(prefillTotalSeqLen, self.num_heads, self.head_size)
+                .contiguous()
+            )
+            k = (
+                k_proj[:prefillTotalSeqLen]
+                .view(prefillTotalSeqLen, self.num_key_value_heads, self.head_size)
+                .contiguous()
+            )
+            v = (
+                v_proj[:prefillTotalSeqLen]
+                .view(prefillTotalSeqLen, self.num_key_value_heads, self.head_size)
+                .contiguous()
+            )
 
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
@@ -271,7 +293,7 @@ class MistralAttention(torch.nn.Module):
                 kvCachePool.cache_data[self.layer_idx],
                 kv_page_indices,
                 kv_page_indptr,
-                kv_last_page_len
+                kv_last_page_len,
             )
 
             prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
@@ -289,29 +311,41 @@ class MistralAttention(torch.nn.Module):
             )
 
             attn_output_prefill = prefill_wrapper.forward(
-                q, 
+                q,
                 kvCachePool.cache_data[self.layer_idx],
-                causal = True, 
-                pos_encoding_mode= "ROPE_LLAMA"
+                causal=True,
+                pos_encoding_mode="ROPE_LLAMA",
             ).view(prefillTotalSeqLen, self.hidden_size)
 
             prefill_wrapper.end_forward()
-            stack_attn_output.append(attn_output_prefill)  
+            stack_attn_output.append(attn_output_prefill)
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
         if decodeTotalSeqLen > 0:
-            q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_heads, self.head_size).contiguous()
-            k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_key_value_heads, self.head_size).contiguous()
-            v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_key_value_heads, self.head_size).contiguous()
+            q = (
+                q_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_heads, self.head_size)
+                .contiguous()
+            )
+            k = (
+                k_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_key_value_heads, self.head_size)
+                .contiguous()
+            )
+            v = (
+                v_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_key_value_heads, self.head_size)
+                .contiguous()
+            )
 
             flashinfer.append_paged_kv_cache(
-                k, 
-                v, 
-                decodeBatchPosition.seq_indptr, 
+                k,
+                v,
+                decodeBatchPosition.seq_indptr,
                 kvCachePool.cache_data[self.layer_idx],
-                decodeBatchPosition.kv_page_indices,    
+                decodeBatchPosition.kv_page_indices,
                 decodeBatchPosition.kv_page_indptr,
-                decodeBatchPosition.kv_last_page_len
+                decodeBatchPosition.kv_last_page_len,
             )
 
             decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
@@ -319,20 +353,20 @@ class MistralAttention(torch.nn.Module):
             )
 
             decode_wrapper.begin_forward(
-                decodeBatchPosition.kv_page_indptr, 
+                decodeBatchPosition.kv_page_indptr,
                 decodeBatchPosition.kv_page_indices,
-                decodeBatchPosition.kv_last_page_len, 
+                decodeBatchPosition.kv_last_page_len,
                 self.num_heads,
                 self.num_key_value_heads,
                 self.head_size,
-                kvCachePool.page_len, 
-                pos_encoding_mode="ROPE_LLAMA"
+                kvCachePool.page_len,
+                pos_encoding_mode="ROPE_LLAMA",
             )
 
             attn_output_decode = decode_wrapper.forward(
-                q, 
-                kvCachePool.cache_data[self.layer_idx], 
-                pos_encoding_mode="ROPE_LLAMA"
+                q,
+                kvCachePool.cache_data[self.layer_idx],
+                pos_encoding_mode="ROPE_LLAMA",
             ).view(decodeTotalSeqLen, self.hidden_size)
 
             decode_wrapper.end_forward()
@@ -406,7 +440,7 @@ class MistralMLP(nn.Module):
                 lora.segment,
                 self.layer_idx,
                 lora.rank,
-            )       
+            )
         t = gate * up
         down = self.down_proj(t)
         if lora:
@@ -418,7 +452,7 @@ class MistralMLP(nn.Module):
                 lora.segment,
                 self.layer_idx,
                 lora.rank,
-            )        
+            )
         return down
         return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
 
@@ -428,9 +462,14 @@ class MistralLayer(nn.Module):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = MistralAttention(
-            prefix=f"{prefix}.self_attn", config=config, weights=weights, layer_idx=layer_id
+            prefix=f"{prefix}.self_attn",
+            config=config,
+            weights=weights,
+            layer_idx=layer_id,
         )
-        self.mlp = MistralMLP(prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx = layer_id)
+        self.mlp = MistralMLP(
+            prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id
+        )
 
         self.input_layernorm = FastRMSNorm.load(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
@@ -445,7 +484,7 @@ class MistralLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         lora: BatchedModelLoraWeight | None,
@@ -458,7 +497,7 @@ class MistralLayer(nn.Module):
             kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
-            lora
+            lora,
         )
 
         # faster post attention rms norm
@@ -508,10 +547,10 @@ class FlashMistralModel(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -522,7 +561,7 @@ class FlashMistralModel(torch.nn.Module):
                 kvCachePool,
                 prefillBatchPosition,
                 decodeBatchPosition,
-                lora
+                lora,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -571,11 +610,7 @@ class FlashMistralForCausalLM(torch.nn.Module):
         lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids,
-            kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
-            lora
+            input_ids, kvCachePool, prefillBatchPosition, decodeBatchPosition, lora
         )
         logits = self.lm_head(hidden_states)
         return logits

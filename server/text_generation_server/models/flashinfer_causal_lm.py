@@ -1,34 +1,26 @@
-# Modified from https://github.com/punica-ai/punica/blob/master/src/punica/models/llama_lora.py
-# Editor: Junyi Shen
-
 import torch
 import torch.distributed
 from typing import Any, TypedDict, Optional
-from transformers.models.llama.modeling_llama import LlamaConfig
 from text_generation_server.utils.lora_utils import ModelLoraManager, ModelConfigForLora
-from text_generation_server.utils.cache_manager_flashinfer import ModelKvCache, KvCachePool
-from .custom_modeling.flashinfer_llama_modeling import LlamaForCausalLM
-from .custom_modeling.flashinfer_gemma_modeling import (
-    GemmaTokenizerFast,
-    FlashGemmaForCausalLM,
-    GemmaConfig,
+from text_generation_server.utils.cache_manager_flashinfer import (
+    ModelKvCache,
+    KvCachePool,
 )
 from text_generation_server.utils.tokens import (
     StopSequenceCriteria,
     StoppingCriteria,
     FinishReason,
 )
-from .custom_modeling.flashinfer_mistral_modeling import MistralConfig, FlashMistralForCausalLM
-from .custom_modeling.flashinfer_qwen2_modeling import Qwen2Config, FlashQwen2ForCausalLM
-from transformers import PreTrainedTokenizerBase
+from text_generation_server.layers.flashinfer_attention import find_padded_head_dim
+from transformers import PreTrainedTokenizerBase, PretrainedConfig
 import transformers
 from text_generation_server.pb import generate_pb2
-import json
 
 import time
 from opentelemetry import trace
 from typing import Optional, Tuple, List, Type, Dict
 from text_generation_server.models import Model
+from text_generation_server.models.causal_lm import CausalLMBatch
 from text_generation_server.models.types import (
     Batch,
     Tokens,
@@ -38,24 +30,19 @@ from text_generation_server.models.types import (
 from text_generation_server.utils import (
     NextTokenChooser,
     StoppingCriteria,
-    initialize_torch_distributed,
-    weight_files,
-    Weights,
 )
 from text_generation_server.utils.dist import MEMORY_FRACTION
 from dataclasses import dataclass
-from transformers import AutoTokenizer
 
-from loguru import logger
 tracer = trace.get_tracer(__name__)
 
-from .causal_lm import CausalLMBatch
 
 class TextGenerationChunk(TypedDict):
     index: int
     token_id: int
     text: str
     is_stop: bool
+
 
 @dataclass
 class FlashinferBatch(CausalLMBatch):
@@ -84,11 +71,11 @@ class FlashinferBatch(CausalLMBatch):
 
     @classmethod
     def from_pb(
-            cls,
-            pb: generate_pb2.Batch,
-            tokenizer: PreTrainedTokenizerBase = None,
-            dtype: torch.dtype = None,
-            device: torch.device = 'cuda',
+        cls,
+        pb: generate_pb2.Batch,
+        tokenizer: PreTrainedTokenizerBase = None,
+        dtype: torch.dtype = None,
+        device: torch.device = "cuda",
     ) -> "CausalLMBatch":
         input_ids = []
         next_token_choosers = []
@@ -139,6 +126,7 @@ class FlashinferBatch(CausalLMBatch):
             padding_right_offset=None,
             max_tokens=None,
         )
+
 
 class RequestContext:
     def __init__(
@@ -220,162 +208,47 @@ class RequestContext:
 class FlashinferLM(Model):
     def __init__(
             self,
-            model_type: str,
-            model_id: str = None,
+            model: torch.nn.Module,
+            tokenizer: PreTrainedTokenizerBase,
+            config: PretrainedConfig,
+            dtype: torch.dtype,
+            device: torch.device,
             lora_ids: List[str] = None,
-            revision: Optional[str] = None,
-            quantize: Optional[str] = None,
-            speculator: Optional[str] = None,
-            use_medusa: Optional[str] = None,
-            dtype: Optional[torch.dtype] = None,
-            trust_remote_code: bool = False
     ):
-        if use_medusa:
-            raise RuntimeError("Medusa decoding is not enabled for AutoModel")
-
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-            dtype = torch.float16 if dtype is None else dtype
-        else:
-            if quantize:
-                raise ValueError("quantization is not available on CPU")
-
-            device = torch.device("cpu")
-            dtype = torch.float32 if dtype is None else dtype
-
         self.device = device
         self.dtype = dtype
-
-        if model_type == "llama":
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model = LlamaForCausalLM.from_pretrained(
-                model_id,
-                revision=revision,
-                torch_dtype=dtype,
-                low_cpu_mem_usage=True,
-                device_map=device,
-                trust_remote_code=trust_remote_code,
-            )
-        elif model_type == "gemma":
-            process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.bfloat16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashGemma is only available on GPU")
-
-            gemmaConfig = GemmaConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-
-            gemmaConfig.quantize = quantize
-            gemmaConfig.use_medusa = False
-
-            torch.distributed.barrier(group=process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=process_group)
-            if gemmaConfig.quantize in ["gptq", "awq"]:
-                weights._set_gptq_params(model_id, revision)
-
-            model = FlashGemmaForCausalLM(gemmaConfig, weights)
-            tokenizer = GemmaTokenizerFast.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=trust_remote_code,
-                use_fast=True,
-                from_slow=False,
-            )
-            model.config = gemmaConfig
-        elif model_type == "mistral":
-            # local_model_dir_mistral = "/gpfsnyu/scratch/yy4108/kv.run/mistral/mistral_model"
-            # local_tokenizer_dir_mistral = "/gpfsnyu/scratch/yy4108/kv.run/mistral/mistral_model"
-            # local_config_dir_mistral = "/gpfsnyu/scratch/yy4108/kv.run/mistral/mistral_model"
-
-            process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.bfloat16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashMistral is only available on GPU")
-
-            mistralConfig = MistralConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-
-            mistralConfig.quantize = None
-            mistralConfig.use_medusa = False
-
-            torch.distributed.barrier(group=process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=process_group)
-            # if gemmaConfig.quantize in ["gptq", "awq"]:
-            #     weights._set_gptq_params(model_id, revision)
-
-            model = FlashMistralForCausalLM(None, mistralConfig, weights)
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model.config = mistralConfig
-        elif model_type == "qwen2":
-            process_group, rank, world_size = initialize_torch_distributed()
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{rank}")
-                dtype = torch.bfloat16 if dtype is None else dtype
-            else:
-                raise NotImplementedError("FlashQwen2 is only available on GPU")
-
-            qwenConfig = Qwen2Config.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
-            )
-
-            qwenConfig.quantize = quantize
-            qwenConfig.use_medusa = False
-
-            torch.distributed.barrier(group=process_group)
-
-            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-            weights = Weights(filenames, device, dtype, process_group=process_group)
-            if qwenConfig.quantize in ["gptq", "awq"]:
-                weights._set_gptq_params(model_id, revision)
-
-            model = FlashQwen2ForCausalLM(qwenConfig, weights)
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
-            model.config = qwenConfig
-        else:
-            raise NotImplementedError(f"Flashinfer is not implemented for: {model_type}")
+        self.model_config = config
 
         if (
-                torch.cuda.is_available()
-                and torch.cuda.device_count() == 1
-                and quantize != "bitsandbytes"
+            torch.cuda.is_available()
+            and torch.cuda.device_count() == 1
+            and config.quantize != "bitsandbytes"
         ):
             model = model.cuda()
 
         if tokenizer.pad_token_id is None:
-            if model.config.pad_token_id is not None:
-                tokenizer.pad_token_id = model.config.pad_token_id
-            elif model.config.eos_token_id is not None:
-                tokenizer.pad_token_id = model.config.eos_token_id
+            if config.pad_token_id is not None:
+                tokenizer.pad_token_id = config.pad_token_id
+            elif config.eos_token_id is not None:
+                tokenizer.pad_token_id = config.eos_token_id
             elif tokenizer.eos_token_id is not None:
                 tokenizer.pad_token_id = tokenizer.eos_token_id
             else:
                 tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-        self.model_config = model.config
-
-        # consider moving it into cache manager
+        # TODO: consider moving it into cache manager
         PAGE_LEN = 16
+        head_dim_padded = find_padded_head_dim(
+            config.hidden_size // config.num_attention_heads
+        )
         dtype_size = torch.tensor([], dtype=dtype).element_size()
         cache_page_size = (
-                2 *
-                PAGE_LEN *
-                self.model_config.num_hidden_layers *
-                self.model_config.num_attention_heads *
-                (self.model_config.hidden_size // self.model_config.num_attention_heads) *
-                dtype_size
-        )
+            2
+            * PAGE_LEN
+            * config.num_hidden_layers
+            * config.num_attention_heads
+            * head_dim_padded
+            * dtype_size
 
         currentDevice = torch.cuda.current_device()
         total_free_memory, _ = torch.cuda.mem_get_info(currentDevice)
@@ -384,34 +257,39 @@ class FlashinferLM(Model):
             0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
         )
         num_pages_to_allocate = int(free_memory * 0.80 / cache_page_size)
-        print(f"Cache allocation:\n"
-              f"  Cache Page Size: {cache_page_size / 1024 / 1024} MB\n"
-              f"  Dtype Size: {dtype_size}\n"
-              f"  Free Memory: {free_memory / 1024 / 1024 / 1024} GB\n"
-              f"  Total GPU Memory: {total_gpu_memory / 1024 / 1024 / 1024} GB\n"
-              f"  Number of Pages to Allocate: {num_pages_to_allocate}")
+        print(
+            f"Cache allocation:\n"
+            f"  Cache Page Size: {cache_page_size / 1024 / 1024} MB\n"
+            f"  Dtype Size: {dtype_size}\n"
+            f"  Free Memory: {free_memory / 1024 / 1024 / 1024} GB\n"
+            f"  Total GPU Memory: {total_gpu_memory / 1024 / 1024 / 1024} GB\n"
+            f"  Number of Pages to Allocate: {num_pages_to_allocate}"
+        )
 
         kvCachePool = KvCachePool(
             max_pages=num_pages_to_allocate,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
-            head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
+            head_dim=head_dim_padded,
             page_len=PAGE_LEN,
             dtype=dtype,
-            device=device
+            device=device,
         )
 
         self.modelKvCache = ModelKvCache(kvCachePool)
         self.model_config_for_lora = ModelConfigForLora(
-            num_hidden_layers=self.model_config.num_hidden_layers,
-            hidden_size=self.model_config.hidden_size,
-            intermediate_size=self.model_config.intermediate_size,
-            num_qo_heads = self.model_config.num_attention_heads,
-            num_kv_heads = self.model_config.num_key_value_heads,
+            num_hidden_layers=config.num_hidden_layers,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            num_qo_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
         )
 
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype)
-        self.loraManager.set_lora_weights(lora_ids, self.model_config_for_lora or {}, dtype)
+        if lora_ids:
+            self.loraManager.set_lora_weights(
+                lora_ids, self.model_config_for_lora or {}, dtype
+            )
         self.reqctx: dict[int, RequestContext] = {}
 
         super(FlashinferLM, self).__init__(
@@ -422,11 +300,18 @@ class FlashinferLM(Model):
             device=device,
         )
 
+    def _find_padded_head_dim(self, head_dim):
+        flashInferDimensions = [64, 128, 256]
+        for dim in flashInferDimensions:
+            if head_dim <= dim:
+                return dim
+        raise ValueError("The head dimension is too large for FlashInfer")
+
     def load_lora_adapters(self, lora_ids: List[str]):
         self.loraManager.set_lora_weights(
             lora_ids,
             self.model_config_for_lora,
-            dtype = self.dtype,
+            dtype=self.dtype,
         )
 
     def remove_lora_adapters(self, lora_ids: list[str] = None):
@@ -436,7 +321,7 @@ class FlashinferLM(Model):
         return list(self.loraManager.lora_weights_cpu)
 
     def has_request(self):
-        return len(self.reqctx)>0
+        return len(self.reqctx) > 0
 
     @property
     def batch_type(self) -> Type[FlashinferBatch]:
@@ -453,7 +338,7 @@ class FlashinferLM(Model):
             id = batch.requests[r].id
             # Router sends initial request in each iteration
             if id not in self.reqctx:
-                lora_id = batch.requests[r].lora_id or 'empty'
+                lora_id = batch.requests[r].lora_id or "empty"
                 input = batch.input_ids[r]
                 parameters = batch.requests[r].parameters
                 stop = batch.requests[r].stopping_parameters
@@ -480,11 +365,11 @@ class FlashinferLM(Model):
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
     def generate_token(
-            self, batch: FlashinferBatch
-    )-> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
+        self, batch: FlashinferBatch
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
         start = time.time_ns()
 
-        if hasattr(batch, 'requests') and batch.requests:
+        if hasattr(batch, "requests") and batch.requests:
             ids = self.add_request(batch)
 
         if not self.reqctx:
@@ -523,17 +408,30 @@ class FlashinferLM(Model):
             device=self.device,
         )
 
-        prefillBatchPosition = batchKvCache.getKvCacheBatchPosition(prefill_reqIds, isPrefill=True)
-        decodeBatchPosition = batchKvCache.getKvCacheBatchPosition(decode_reqIds, isPrefill=False)
+        prefillBatchPosition = batchKvCache.getKvCacheBatchPosition(
+            prefill_reqIds, isPrefill=True
+        )
+        decodeBatchPosition = batchKvCache.getKvCacheBatchPosition(
+            decode_reqIds, isPrefill=False
+        )
 
         # Forward pass
-        raw_logits, _ = self.model(input_ids, self.modelKvCache.kvCachePool, prefillBatchPosition, decodeBatchPosition, \
-                                   self.loraManager.get_lora_batched_weights(lora_ids, lora_lens))
+        raw_logits, _ = self.model(
+            input_ids,
+            self.modelKvCache.kvCachePool,
+            prefillBatchPosition,
+            decodeBatchPosition,
+            self.loraManager.get_lora_batched_weights(lora_ids, lora_lens),
+        )
 
         start_decode = time.time_ns()
 
-        prefill_logits = raw_logits[prefillBatchPosition.seq_indptr[1:] - 1] if prefillBatchPosition.total_seq_len > 0 else torch.tensor([], device=self.device)
-        decode_logits = raw_logits[prefillBatchPosition.total_seq_len:]
+        prefill_logits = (
+            raw_logits[prefillBatchPosition.seq_indptr[1:] - 1]
+            if prefillBatchPosition.total_seq_len > 0
+            else torch.tensor([], device=self.device)
+        )
+        decode_logits = raw_logits[prefillBatchPosition.total_seq_len :]
         logits = torch.cat([prefill_logits, decode_logits])
 
         all_stop = True
@@ -583,7 +481,7 @@ class FlashinferLM(Model):
                     [next_token_id],
                     [], # prob
                     [text],
-                    [next_token_id in self.all_special_ids]
+                    [next_token_id in self.all_special_ids],
                 ),
                 generated_text,
                 # top_tokens

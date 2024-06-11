@@ -1,4 +1,7 @@
 install-punica-kernel:
+	pip install wheel setuptools --upgrade
+	git submodule sync
+	git submodule update --init
 	cd server/punica_kernels && pip install -v --no-build-isolation .
 
 install-server:

@@ -10,13 +10,16 @@ import torch.distributed
 
 from text_generation_server.layers.layernorm import FastRMSNorm
 from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
-from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+from text_generation_server.utils.cache_manager_flashinfer import (
+    KvCachePool,
+    KvCacheBatchPosition,
+)
 from text_generation_server.layers import (
     TensorParallelRowLinear,
     TensorParallelColumnLinear,
     TensorParallelEmbedding,
     SpeculativeHead,
-    get_linear
+    get_linear,
 )
 
 from typing import Optional, List, Tuple
@@ -55,6 +58,7 @@ VOCAB_FILES_NAMES = {
 Qwen2Tokenizer = None
 
 MAX_MODEL_INPUT_SIZES = {"qwen/qwen-tokenizer": 32768}
+
 
 class Qwen2Config(PretrainedConfig):
     model_type = "qwen2"
@@ -133,22 +137,30 @@ class Qwen2TokenizerFast(PreTrainedTokenizerFast):
         # following GPT2TokenizerFast, also adding unk_token, bos_token, and eos_token
 
         bos_token = (
-            AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            AddedToken(
+                bos_token, lstrip=False, rstrip=False, special=True, normalized=False
+            )
             if isinstance(bos_token, str)
             else bos_token
         )
         eos_token = (
-            AddedToken(eos_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            AddedToken(
+                eos_token, lstrip=False, rstrip=False, special=True, normalized=False
+            )
             if isinstance(eos_token, str)
             else eos_token
         )
         unk_token = (
-            AddedToken(unk_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            AddedToken(
+                unk_token, lstrip=False, rstrip=False, special=True, normalized=False
+            )
             if isinstance(unk_token, str)
             else unk_token
         )
         pad_token = (
-            AddedToken(pad_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            AddedToken(
+                pad_token, lstrip=False, rstrip=False, special=True, normalized=False
+            )
             if isinstance(pad_token, str)
             else pad_token
         )
@@ -165,7 +177,9 @@ class Qwen2TokenizerFast(PreTrainedTokenizerFast):
         )
 
     # Copied from transformers.models.gpt2.tokenization_gpt2_fast.GPT2TokenizerFast.save_vocabulary
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(
+        self, save_directory: str, filename_prefix: Optional[str] = None
+    ) -> Tuple[str]:
         files = self._tokenizer.model.save(save_directory, name=filename_prefix)
         return tuple(files)
 
@@ -245,7 +259,7 @@ class Qwen2MLP(nn.Module):
                 lora.segment,
                 self.layer_idx,
                 lora.rank,
-            )       
+            )
         t = gate * up
         down = self.down_proj(t)
         if lora:
@@ -257,7 +271,7 @@ class Qwen2MLP(nn.Module):
                 lora.segment,
                 self.layer_idx,
                 lora.rank,
-            )        
+            )
         return down
 
 
@@ -284,9 +298,14 @@ def _load_gqa(config, prefix: str, weights):
     )
 
     # manually concatenate qkv project bias
-    bias = torch.cat((weights.get_tensor(f"{prefix}.q_proj.bias"),
-                      weights.get_tensor(f"{prefix}.k_proj.bias"),
-                      weights.get_tensor(f"{prefix}.v_proj.bias")), dim=0)
+    bias = torch.cat(
+        (
+            weights.get_tensor(f"{prefix}.q_proj.bias"),
+            weights.get_tensor(f"{prefix}.k_proj.bias"),
+            weights.get_tensor(f"{prefix}.v_proj.bias"),
+        ),
+        dim=0,
+    )
 
     if config.quantize not in ["gptq", "awq"]:
         weight = weight.to(dtype=weights.dtype).to(device=weights.device)
@@ -314,9 +333,7 @@ class FlashQwen2Attention(nn.Module):
                 f"and `num_shards`: {weights.process_group.size()}"
             )
         self.num_qo_heads = self.num_heads // weights.process_group.size()
-        self.num_kv_heads = (
-            config.num_key_value_heads // weights.process_group.size()
-        )
+        self.num_kv_heads = config.num_key_value_heads // weights.process_group.size()
         self.config = config
         self.hidden_size = config.hidden_size
         self.head_dim = self.hidden_size // self.num_heads
@@ -328,17 +345,17 @@ class FlashQwen2Attention(nn.Module):
             weights=weights,
             bias=False,
         )
-        
+
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ):
         qkv = self.qkv_proj(hidden_states)
 
@@ -346,11 +363,11 @@ class FlashQwen2Attention(nn.Module):
             [
                 self.head_dim * self.num_qo_heads,
                 self.head_dim * self.num_kv_heads,
-                self.head_dim * self.num_kv_heads
+                self.head_dim * self.num_kv_heads,
             ],
             dim=1,
         )
-        
+
         q_proj = q_proj.contiguous()
         k_proj = k_proj.contiguous()
         v_proj = v_proj.contiguous()
@@ -385,19 +402,33 @@ class FlashQwen2Attention(nn.Module):
             )
 
         stack_attn_output = []
-        workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device)
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device
+        )
         prefillTotalSeqLen = prefillBatchPosition.total_seq_len
         if prefillTotalSeqLen > 0:
             # need to revisit if contiguous conversion is the best way
-            q = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
-            k = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            v = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            
+            q = (
+                q_proj[:prefillTotalSeqLen]
+                .view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
+                .contiguous()
+            )
+            k = (
+                k_proj[:prefillTotalSeqLen]
+                .view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+                .contiguous()
+            )
+            v = (
+                v_proj[:prefillTotalSeqLen]
+                .view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
+                .contiguous()
+            )
+
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
             kv_page_indptr = prefillBatchPosition.kv_page_indptr.clone()
             kv_last_page_len = prefillBatchPosition.kv_last_page_len.clone()
-            
+
             flashinfer.append_paged_kv_cache(
                 k,
                 v,
@@ -405,7 +436,8 @@ class FlashQwen2Attention(nn.Module):
                 kvCachePool.cache_data[self.layer_idx],
                 kv_page_indices,
                 kv_page_indptr,
-                kv_last_page_len)
+                kv_last_page_len,
+            )
 
             prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
                 workspace_buffer, "NHD"
@@ -420,21 +452,33 @@ class FlashQwen2Attention(nn.Module):
                 self.num_kv_heads,
                 self.head_dim,
             )
-            
+
             attn_output_prefill = prefill_wrapper.forward(
-                q, 
-                kvCachePool.cache_data[self.layer_idx], 
-                causal=True, 
-                pos_encoding_mode="ROPE_LLAMA" # this may need change
+                q,
+                kvCachePool.cache_data[self.layer_idx],
+                causal=True,
+                pos_encoding_mode="ROPE_LLAMA",  # this may need change
             ).view(prefillTotalSeqLen, self.hidden_size)
             prefill_wrapper.end_forward()
             stack_attn_output.append(attn_output_prefill)
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
         if decodeTotalSeqLen > 0:
-            q = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
-            k = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            v = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
+            q = (
+                q_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim)
+                .contiguous()
+            )
+            k = (
+                k_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+                .contiguous()
+            )
+            v = (
+                v_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+                .contiguous()
+            )
 
             flashinfer.append_paged_kv_cache(
                 k,
@@ -443,7 +487,7 @@ class FlashQwen2Attention(nn.Module):
                 kvCachePool.cache_data[self.layer_idx],
                 decodeBatchPosition.kv_page_indices,
                 decodeBatchPosition.kv_page_indptr,
-                decodeBatchPosition.kv_last_page_len
+                decodeBatchPosition.kv_last_page_len,
             )
 
             decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
@@ -457,13 +501,13 @@ class FlashQwen2Attention(nn.Module):
                 self.num_kv_heads,
                 self.head_dim,
                 kvCachePool.page_len,
-                pos_encoding_mode="ROPE_LLAMA"
+                pos_encoding_mode="ROPE_LLAMA",
             )
-            
+
             attn_output_decode = decode_wrapper.forward(
-                q, 
-                kvCachePool.cache_data[self.layer_idx], 
-                pos_encoding_mode="ROPE_LLAMA"
+                q,
+                kvCachePool.cache_data[self.layer_idx],
+                pos_encoding_mode="ROPE_LLAMA",
             ).view(decodeTotalSeqLen, self.hidden_size)
 
             decode_wrapper.end_forward()
@@ -485,9 +529,14 @@ class FlashQwen2Layer(nn.Module):
         self.layer_id = layer_id
         prefix = f"model.layers.{layer_id}"
         self.self_attn = FlashQwen2Attention(
-            prefix=f"{prefix}.self_attn", config=config, weights=weights, layer_idx=layer_id
+            prefix=f"{prefix}.self_attn",
+            config=config,
+            weights=weights,
+            layer_idx=layer_id,
         )
-        self.mlp = Qwen2MLP(prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id)
+        self.mlp = Qwen2MLP(
+            prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id
+        )
 
         self.input_layernorm = FastRMSNorm.load(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
@@ -502,10 +551,10 @@ class FlashQwen2Layer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
 
@@ -514,16 +563,14 @@ class FlashQwen2Layer(nn.Module):
             kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
-            lora
+            lora,
         )
 
         normed_attn_res_output, attn_res = self.post_attention_layernorm(
             attn_output, res
         )
 
-
         mlp_output = self.mlp(normed_attn_res_output, lora)
-
 
         return mlp_output, attn_res
 
@@ -564,10 +611,10 @@ class FlashQwen2Model(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -578,7 +625,7 @@ class FlashQwen2Model(torch.nn.Module):
                 kvCachePool,
                 prefillBatchPosition,
                 decodeBatchPosition,
-                lora
+                lora,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -603,14 +650,10 @@ class FlashQwen2ForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
-            input_ids,
-            kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
-            lora
+            input_ids, kvCachePool, prefillBatchPosition, decodeBatchPosition, lora
         )
         logits, speculative_logits = self.lm_head(hidden_states)
         return logits, speculative_logits

@@ -9,27 +9,30 @@ print(model)
 tokenizer = model.tokenizer
 
 prompts = [
-    'How many people are in the image?',
-    'What is the main object in the image?',
-    'What is the mood of the image?',
-    'What is the setting of the image?',
-    'What is the image about?',
+    "How many people are in the image?",
+    "What is the main object in the image?",
+    "What is the mood of the image?",
+    "What is the setting of the image?",
+    "What is the image about?",
 ]
+
 
 def load_img_base64s(img_path):
     with open(img_path, "rb") as image_file:
         img_encoded = base64.b64encode(image_file.read())
         return img_encoded
-    
+
+
 def get_input(prompt):
-    input = 'USER: '+ prompt + ' ASSISTANT: '
+    input = "USER: " + prompt + " ASSISTANT: "
     return input
 
-def make_input(jpg_path, id = 0):
+
+def make_input(jpg_path, id=0):
     prompt = random.choice(prompts)
     request = generate_pb2.Request(
         inputs=get_input(prompt),
-        inputb = load_img_base64s(jpg_path),
+        inputb=load_img_base64s(jpg_path),
         lora_id=None,
         id=id,
         truncate=1024,
@@ -45,16 +48,18 @@ def make_input(jpg_path, id = 0):
             repetition_penalty=1.0,
             frequency_penalty=0.1,
             watermark=True,
-            grammar='',
-            grammar_type=0),
+            grammar="",
+            grammar_type=0,
+        ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=1024,
-            stop_sequences=[],
-            ignore_eos_token=True))
+            max_new_tokens=1024, stop_sequences=[], ignore_eos_token=True
+        ),
+    )
     return request
 
-requests = [make_input('test.jpg') for _ in range(5)]
-batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
+
+requests = [make_input("test.jpg") for _ in range(5)]
+batch = generate_pb2.Batch(id=0, requests=requests, size=len(requests))
 pb_batch = LlavaBatch.from_pb(batch, tokenizer, torch.float16, torch.device("cuda"))
 
 results = []

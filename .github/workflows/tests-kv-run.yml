@@ -1,0 +1,98 @@
+name: kv.run server tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/tests-kv-run.yaml"
+      - "server/**"
+      - "proto/**"
+      - "router/**"
+      - "launcher/**"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+  push:
+    paths:
+      - ".github/workflows/tests-kv-run.yaml"
+      - "server/**"
+      - "proto/**"
+      - "router/**"
+      - "launcher/**"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  run_tests:
+    runs-on: [self-hosted, Linux, X64]
+
+    env:
+      SCCACHE_GHA_ENABLED: "on"
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.10.14
+        env:
+          AGENT_TOOLSDIRECTORY: /opt/hostedtoolache
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          # Released on: 02 May, 2024
+          # https://releases.rs/docs/1.78.0/
+          toolchain: 1.78.0
+          override: true
+          components: rustfmt, clippy
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1
+      - name: Clean unused files
+        run: |
+          sudo rm -rf /usr/local/lib/android # will release about 10 GB if you don't need Android
+          sudo rm -rf /usr/share/dotnet # will release about 20GB if you don't need .NET
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.4
+        with:
+          version: "v0.3.3"
+      - name: configure sccache
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('SCCACHE_GHA_CACHE_TO', 'sccache-${{runner.os}}-${{github.ref_name}}');
+            core.exportVariable('SCCACHE_GHA_CACHE_FROM', 'sccache-${{runner.os}}-main,sccache-${{runner.os}}-');
+            core.exportVariable('RUSTC_WRAPPER', process.env.SCCACHE_PATH || '');
+      - name: cargo registry cache
+        uses: actions/cache@v3
+        with:
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}-
+            cargo-${{ runner.os }}-
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+      - name: Install
+        run: |
+          make install
+      - name: Run server tests
+        run: |
+          pip install pytest
+          export HUGGING_FACE_HUB_TOKEN=${{ secrets.HUGGING_FACE_HUB_TOKEN }}
+          CUDA_VISIBLE_DEVICES=-1 pytest -s -vv server/tests
+      - name: Pre-commit checks
+        run: |
+          pip install pre-commit
+          pre-commit install
+          pre-commit run --all-files
+      - name: Run Rust tests
+        run: |
+          cargo test
+      - name: sccache stats
+        run: |
+          ${SCCACHE_PATH} --show-stats
