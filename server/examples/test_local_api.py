@@ -48,7 +48,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     )
     return request
 
-test = 'phi3'
+test = 'baichuan'
 # test = 'llama-3'
 # test = 'llama-3-70'
 # test = 'llama-2'
@@ -63,7 +63,7 @@ if test == 'llama-2':
                            lora_ids=['abcdabcd987/gsm8k-llama2-7b-lora-16'])
     # Create an input batch of two queries
     requests = [make_input('abcdabcd987/gsm8k-llama2-7b-lora-16', 'base', id=0, promptOverride= "Give me a breif introduction to Byznatine Fault Tolerance and why it is important?"),
-                make_input('abcdabcd987/gsm8k-llama2-7b-lora-16', 'base', id=1, promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?")]
+                make_input('abcdabcd987/gsm8k-llama2-7b-lora-16', 'lora', id=1, promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?")]
 elif test == 'llama-3':
     # Load model
     service = FlashinferLlama(model_id="tjluyao/llama-3-8b",
@@ -130,7 +130,7 @@ elif test == "phi":
 elif test == "phi3":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]
-    service = FlashinferLlama( model_id="microsoft/Phi-3-mini-4k-instruct")
+    service = FlashinferLlama(model_id="microsoft/Phi-3-mini-4k-instruct")
 elif test == "baichuan":
     requests = [make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=0, promptOverride="why is deep learning so popular these days?"),
             make_input("abcdabcd987/gsm8k-llama2-7b-lora-16", "base", id=1, promptOverride="What are the differences between Manhattan and Brooklyn")]

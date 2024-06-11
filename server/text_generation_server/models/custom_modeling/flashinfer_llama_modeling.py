@@ -20,56 +20,33 @@ from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
 from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
 from text_generation_server.layers.flashinfer_attention import FlashinferAttentionWrapper, AttentionRotaryParams
 
-def _load_attention(config: LlamaConfig, prefix: str, weights: Weights):
-    if config.num_attention_heads != config.num_key_value_heads:
-        return _load_gqa(config, prefix, weights)
-    else:
-        if config.model_type == "baichuan":
-            return TensorParallelColumnLinear.load_qkv(
-                config,
-                prefix=f"{prefix}.W_pack",
-                weights=weights,
-                bias=False,
-            )
-        elif config.model_type == "phi3":
-            return TensorParallelColumnLinear.load_qkv(
-                config,
-                prefix=f"{prefix}.qkv_proj",
-                weights=weights,
-                bias=False,
-            )
-        else:
-            return TensorParallelColumnLinear.load_multi(
-                config,
-                prefixes=[f"{prefix}.q_proj", f"{prefix}.k_proj", f"{prefix}.v_proj"],
-                dim=0,
-                weights=weights,
-                bias=False,
-            )
+def _load_attention(config, prefix, weights):
+    # Only defined in granite.
+    bias = getattr(config, "attention_bias", False)
 
-def _load_gqa(config: LlamaConfig, prefix: str, weights: Weights):
-    assert config.hidden_size % config.num_attention_heads == 0
-    assert config.num_attention_heads % weights.process_group.size() == 0
+    # if specific model type, load the correct attention
+    if config.model_type == "phi3":
+        return TensorParallelColumnLinear.load_qkv(
+            config,
+            prefix=f"{prefix}.qkv_proj",
+            weights=weights,
+            bias=bias,
+        )
+    elif config.model_type == "baichuan":
+        return TensorParallelColumnLinear.load_qkv(
+            config,
+            prefix=f"{prefix}.W_pack",
+            weights=weights,
+            bias=bias,
+        )
 
-    weight = weights.get_multi_weights_col(
+    # otherwise, load the default attention based on the number of heads
+    return TensorParallelColumnLinear.load_multi(
+        config,
         prefixes=[f"{prefix}.q_proj", f"{prefix}.k_proj", f"{prefix}.v_proj"],
-        quantize=config.quantize,
         dim=0,
-    )
-
-    if config.quantize not in ["gptq", "awq"]:
-        weight = weight.to(dtype=weights.dtype).to(device=weights.device)
-
-        head_size = config.hidden_size // config.num_attention_heads
-        num_heads = config.num_attention_heads // weights.process_group.size()
-        num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
-        assert list(weight.shape) == [
-            (num_heads + 2 * num_key_value_heads) * head_size,
-            config.hidden_size,
-        ], f"{list(weight.shape)} != {[(num_heads + 2 * config.num_key_value_heads) * head_size, config.hidden_size]}"
-
-    return TensorParallelColumnLinear(
-        get_linear(weight, bias=None, quantize=config.quantize)
+        weights=weights,
+        bias=bias,
     )
 
 class FlashinferBatch:
@@ -183,7 +160,7 @@ class LlamaMLP(nn.Module):
 class RMSNorm(nn.Module):
     def __init__(self, prefix, weights, eps=1e-6):
         super().__init__()
-        weight = weights.get_tensor(f"{prefix}.weight") + 1
+        weight = weights.get_tensor(f"{prefix}.weight")
         self.weight = nn.Parameter(weight)
         self.variance_epsilon = eps
         
@@ -218,7 +195,7 @@ class FlashLlamaLayer(nn.Module):
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
-    ) -> torch.Tensor:
+    ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
         attn_output = self.self_attn(
             normed_hidden_states,
