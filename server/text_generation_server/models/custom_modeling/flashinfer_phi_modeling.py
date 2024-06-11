@@ -22,7 +22,11 @@ from punica_kernels import (
     rms_norm,
 )
 from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
-from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+from text_generation_server.utils.cache_manager_flashinfer import (
+    KvCachePool,
+    KvCacheBatchPosition,
+)
+
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
@@ -111,6 +115,7 @@ def _load_gqa(config, prefix: str, weights):
         get_linear(weight, bias=True, quantize=config.quantize)
     )
 
+
 class PhiLayerNorm(nn.Module):
     def __init__(self, prefix, weights, eps=1e-6):
         super().__init__()
@@ -119,21 +124,16 @@ class PhiLayerNorm(nn.Module):
         self.weight = nn.Parameter(weight)
         self.bias = nn.Parameter(bias)
         self.variance_epsilon = eps
-        
+
     def forward(self, hidden_states, residual=None):
         if residual is not None:
             hidden_states += residual
         residual = hidden_states
         return rms_norm(hidden_states, self.weight, self.variance_epsilon), residual
 
+
 class FlashPhiAttention(torch.nn.Module):
-    def __init__(
-        self,
-        prefix: str,
-        config: PhiConfig,
-        weights,
-        layer_idx: int
-    ):
+    def __init__(self, prefix: str, config: PhiConfig, weights, layer_idx: int):
         super().__init__()
         self.num_qo_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -154,9 +154,7 @@ class FlashPhiAttention(torch.nn.Module):
             )
 
         self.num_qo_heads = self.num_qo_heads // weights.process_group.size()
-        self.num_kv_heads = (
-            config.num_key_value_heads // weights.process_group.size()
-        )
+        self.num_kv_heads = config.num_key_value_heads // weights.process_group.size()
 
         self.query_key_value = load_attention(config, prefix, weights)
 
@@ -172,7 +170,7 @@ class FlashPhiAttention(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         cos: torch.Tensor,
@@ -184,11 +182,11 @@ class FlashPhiAttention(torch.nn.Module):
             [
                 self.head_dim * self.num_qo_heads,
                 self.head_dim * self.num_kv_heads,
-                self.head_dim * self.num_kv_heads
+                self.head_dim * self.num_kv_heads,
             ],
             dim=1,
         )
-        
+
         q_proj = q_proj.contiguous()
         k_proj = k_proj.contiguous()
         v_proj = v_proj.contiguous()
@@ -221,28 +219,45 @@ class FlashPhiAttention(torch.nn.Module):
                 self.layer_idx,
                 lora.rank,
             )
-            
-        self.rotary_emb(q_proj.view(-1, self.num_qo_heads, self.head_dim)[:, :, :self.rotary_dim],
-                        k_proj.view(-1, self.num_kv_heads, self.head_dim)[:, :, :self.rotary_dim],
-                        cos, sin)
+
+        self.rotary_emb(
+            q_proj.view(-1, self.num_qo_heads, self.head_dim)[:, :, : self.rotary_dim],
+            k_proj.view(-1, self.num_kv_heads, self.head_dim)[:, :, : self.rotary_dim],
+            cos,
+            sin,
+        )
 
         stack_attn_output = []
-        workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device)
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device
+        )
         prefillTotalSeqLen = prefillBatchPosition.total_seq_len
         if prefillTotalSeqLen > 0:
             # need to revisit if contiguous conversion is the best way
-            q_raw = q_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_qo_heads, self.head_dim)
-            k_raw = k_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
-            v_raw = v_proj[: prefillTotalSeqLen].view(prefillTotalSeqLen, self.num_kv_heads, self.head_dim)
-            q = torch.nn.functional.pad(q_raw, (0, self.head_padded_dim - self.head_dim))
-            k = torch.nn.functional.pad(k_raw, (0, self.head_padded_dim - self.head_dim))
-            v = torch.nn.functional.pad(v_raw, (0, self.head_padded_dim - self.head_dim))
-            
+            q_raw = q_proj[:prefillTotalSeqLen].view(
+                prefillTotalSeqLen, self.num_qo_heads, self.head_dim
+            )
+            k_raw = k_proj[:prefillTotalSeqLen].view(
+                prefillTotalSeqLen, self.num_kv_heads, self.head_dim
+            )
+            v_raw = v_proj[:prefillTotalSeqLen].view(
+                prefillTotalSeqLen, self.num_kv_heads, self.head_dim
+            )
+            q = torch.nn.functional.pad(
+                q_raw, (0, self.head_padded_dim - self.head_dim)
+            )
+            k = torch.nn.functional.pad(
+                k_raw, (0, self.head_padded_dim - self.head_dim)
+            )
+            v = torch.nn.functional.pad(
+                v_raw, (0, self.head_padded_dim - self.head_dim)
+            )
+
             seq_indptr = prefillBatchPosition.seq_indptr.clone()
             kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
             kv_page_indptr = prefillBatchPosition.kv_page_indptr.clone()
             kv_last_page_len = prefillBatchPosition.kv_last_page_len.clone()
-            
+
             flashinfer.append_paged_kv_cache(
                 k,
                 v,
@@ -250,7 +265,8 @@ class FlashPhiAttention(torch.nn.Module):
                 kvCachePool.cache_data[self.layer_idx],
                 kv_page_indices,
                 kv_page_indptr,
-                kv_last_page_len)
+                kv_last_page_len,
+            )
 
             prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
                 workspace_buffer, "NHD"
@@ -265,25 +281,43 @@ class FlashPhiAttention(torch.nn.Module):
                 self.num_kv_heads,
                 self.head_padded_dim,
             )
-            
+
             attn_output_prefill = prefill_wrapper.forward(
-                q, 
-                kvCachePool.cache_data[self.layer_idx], 
-                causal=True, 
-                pos_encoding_mode="NONE"
-            )[:, :, :self.head_dim].reshape(prefillTotalSeqLen, self.hidden_size)
+                q,
+                kvCachePool.cache_data[self.layer_idx],
+                causal=True,
+                pos_encoding_mode="NONE",
+            )[:, :, : self.head_dim].reshape(prefillTotalSeqLen, self.hidden_size)
             prefill_wrapper.end_forward()
             stack_attn_output.append(attn_output_prefill)
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
         if decodeTotalSeqLen > 0:
-            q_raw = q_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim).contiguous()
-            k_raw = k_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            v_raw = v_proj[prefillTotalSeqLen :].view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim).contiguous()
-            
-            q = torch.nn.functional.pad(q_raw, (0, self.head_padded_dim - self.head_dim))
-            k = torch.nn.functional.pad(k_raw, (0, self.head_padded_dim - self.head_dim))
-            v = torch.nn.functional.pad(v_raw, (0, self.head_padded_dim - self.head_dim))
+            q_raw = (
+                q_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_qo_heads, self.head_dim)
+                .contiguous()
+            )
+            k_raw = (
+                k_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+                .contiguous()
+            )
+            v_raw = (
+                v_proj[prefillTotalSeqLen:]
+                .view(decodeTotalSeqLen, self.num_kv_heads, self.head_dim)
+                .contiguous()
+            )
+
+            q = torch.nn.functional.pad(
+                q_raw, (0, self.head_padded_dim - self.head_dim)
+            )
+            k = torch.nn.functional.pad(
+                k_raw, (0, self.head_padded_dim - self.head_dim)
+            )
+            v = torch.nn.functional.pad(
+                v_raw, (0, self.head_padded_dim - self.head_dim)
+            )
 
             flashinfer.append_paged_kv_cache(
                 k,
@@ -292,7 +326,7 @@ class FlashPhiAttention(torch.nn.Module):
                 kvCachePool.cache_data[self.layer_idx],
                 decodeBatchPosition.kv_page_indices,
                 decodeBatchPosition.kv_page_indptr,
-                decodeBatchPosition.kv_last_page_len
+                decodeBatchPosition.kv_last_page_len,
             )
 
             decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
@@ -306,14 +340,12 @@ class FlashPhiAttention(torch.nn.Module):
                 self.num_kv_heads,
                 self.head_padded_dim,
                 kvCachePool.page_len,
-                pos_encoding_mode="NONE"
+                pos_encoding_mode="NONE",
             )
-            
+
             attn_output_decode = decode_wrapper.forward(
-                q, 
-                kvCachePool.cache_data[self.layer_idx], 
-                pos_encoding_mode="NONE"
-            )[:, :, :self.head_dim].reshape(decodeTotalSeqLen, self.hidden_size)
+                q, kvCachePool.cache_data[self.layer_idx], pos_encoding_mode="NONE"
+            )[:, :, : self.head_dim].reshape(decodeTotalSeqLen, self.hidden_size)
 
             decode_wrapper.end_forward()
             stack_attn_output.append(attn_output_decode)
@@ -326,13 +358,14 @@ class FlashPhiAttention(torch.nn.Module):
         # output projection
         o = self.dense(attn_outputs)
         return o
-    
+
     def _find_padded_head_dim(self, head_dim):
         flashInferDimensions = [64, 128, 256]
         for dim in flashInferDimensions:
             if head_dim <= dim:
                 return dim
         raise ValueError("The head dimension is too large for FlashInfer")
+
 
 class PhiMLP(nn.Module):
     def __init__(self, prefix, config, weights, layer_idx: int):
@@ -376,7 +409,7 @@ class PhiMLP(nn.Module):
                 self.layer_idx,
                 lora.rank,
             )
-            
+
         gate_up_acted = self.act(gate_up_states)
         if lora:
             add_lora(
@@ -388,7 +421,7 @@ class PhiMLP(nn.Module):
                 self.layer_idx,
                 lora.rank,
             )
-            
+
         gate_down_states = self.down_proj(gate_up_acted)
         if lora:
             add_lora(
@@ -400,7 +433,7 @@ class PhiMLP(nn.Module):
                 self.layer_idx,
                 lora.rank,
             )
-        
+
         # NOTE: Llama requires the gate up states to an intermediate size
         # Phi does not and we can avoid the `view` operation
         return gate_down_states
@@ -411,9 +444,14 @@ class FlashPhiLayer(nn.Module):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = FlashPhiAttention(
-            prefix=f"{prefix}.self_attn", config=config, weights=weights, layer_idx=layer_id
+            prefix=f"{prefix}.self_attn",
+            config=config,
+            weights=weights,
+            layer_idx=layer_id,
         )
-        self.mlp = PhiMLP(prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id)
+        self.mlp = PhiMLP(
+            prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id
+        )
         self.input_layernorm = PhiLayerNorm(
             prefix=f"{prefix}.input_layernorm",
             weights=weights,
@@ -425,14 +463,14 @@ class FlashPhiLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ):
-        
+
         hidden_states, res = self.input_layernorm(hidden_states, residual)
         # Self Attention
         attn_output = self.self_attn(
@@ -442,7 +480,7 @@ class FlashPhiLayer(nn.Module):
             decodeBatchPosition,
             cos,
             sin,
-            lora
+            lora,
         )
 
         hidden_states = self.resid_dropout(attn_output).add(
@@ -487,17 +525,21 @@ class FlashPhiModel(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None
+        lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        position_ids_prefill, max_seq_len_prefill = self._getPositionIdsAndMaxSeqLen(prefillBatchPosition.seq_indptr, hidden_states.device)
-        position_ids_decode, max_seq_len_decode = self._getPositionIdsAndMaxSeqLen(decodeBatchPosition.seq_indptr, hidden_states.device)
+        position_ids_prefill, max_seq_len_prefill = self._getPositionIdsAndMaxSeqLen(
+            prefillBatchPosition.seq_indptr, hidden_states.device
+        )
+        position_ids_decode, max_seq_len_decode = self._getPositionIdsAndMaxSeqLen(
+            decodeBatchPosition.seq_indptr, hidden_states.device
+        )
         position_ids = torch.cat([position_ids_prefill, position_ids_decode])
         max_seq_len = max(max_seq_len_prefill, max_seq_len_decode)
-              
+
         cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(
             position_ids, max_seq_len, hidden_states.dtype
         )
@@ -511,17 +553,24 @@ class FlashPhiModel(torch.nn.Module):
                 decodeBatchPosition,
                 cos,
                 sin,
-                lora
+                lora,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-    
-    def _getPositionIdsAndMaxSeqLen(self, seq_indptr: torch.Tensor, device) -> Tuple[torch.Tensor, int]:
+
+    def _getPositionIdsAndMaxSeqLen(
+        self, seq_indptr: torch.Tensor, device
+    ) -> Tuple[torch.Tensor, int]:
         seq_lens = torch.diff(seq_indptr)
         if seq_lens.numel() == 0:
             return torch.tensor([], dtype=torch.int32, device=device), 0
-        position_ids = torch.cat([torch.arange(seq_len, dtype=torch.int32, device=device) for seq_len in seq_lens])
+        position_ids = torch.cat(
+            [
+                torch.arange(seq_len, dtype=torch.int32, device=device)
+                for seq_len in seq_lens
+            ]
+        )
         max_seq_len = torch.max(seq_lens).item()
         return position_ids, max_seq_len
 
@@ -547,11 +596,7 @@ class FlashPhiForCausalLM(torch.nn.Module):
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids,
-            kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
-            lora
+            input_ids, kvCachePool, prefillBatchPosition, decodeBatchPosition, lora
         )
         if lm_head_indices is not None:
             hidden_states = hidden_states[lm_head_indices]

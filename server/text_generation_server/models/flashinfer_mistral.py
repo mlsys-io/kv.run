@@ -14,6 +14,7 @@ from text_generation_server.utils import (
 
 from transformers import AutoTokenizer
 
+
 class FlashinferMistral(FlashinferLM):
     def __init__(
         self,
@@ -24,8 +25,8 @@ class FlashinferMistral(FlashinferLM):
         speculator: Optional[str] = None,
         dtype: Optional[torch.dtype] = torch.bfloat16,
         trust_remote_code: bool = False,
-    ): 
-        
+    ):
+
         process_group, rank, world_size = initialize_torch_distributed()
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{rank}")
@@ -35,7 +36,7 @@ class FlashinferMistral(FlashinferLM):
         mistralConfig = MistralConfig.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
-        
+
         mistralConfig.quantize = quantize
         mistralConfig.speculator = speculator
 
@@ -48,12 +49,12 @@ class FlashinferMistral(FlashinferLM):
 
         model = FlashMistralForCausalLM(None, mistralConfig, weights)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-          
+
         super(FlashinferMistral, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            config = mistralConfig,
+            config=mistralConfig,
             dtype=dtype,
             device=device,
-            lora_ids = lora_ids,
+            lora_ids=lora_ids,
         )

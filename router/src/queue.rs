@@ -283,7 +283,7 @@ impl State {
                 parameters: Some(entry.request.parameters.clone()),
                 stopping_parameters: Some(entry.request.stopping_parameters.clone()),
                 top_n_tokens: entry.request.top_n_tokens,
-                lora_id: Some(entry.request.lora_id.clone())
+                lora_id: Some(entry.request.lora_id.clone()),
             });
             // Set batch_time
             entry.batch_time = Some(Instant::now());
@@ -390,6 +390,7 @@ mod tests {
                     stop_sequences: vec![],
                 },
                 top_n_tokens: 0,
+                lora_id: "empty".to_string(),
             },
             response_tx,
             span: info_span!("entry"),

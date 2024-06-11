@@ -60,7 +60,9 @@ class FlashLlamaAttention(nn.Module):
     def __init__(self, prefix: str, flashinferWrapper: FlashinferAttentionWrapper, config: LlamaConfig, weights, layer_idx: int):
         super().__init__()
         self.flashinferWrapper = flashinferWrapper
-        self.rotaryParams = AttentionRotaryParams(rope_scale=config.rope_scaling, rope_theta=config.rope_theta)
+        self.rotaryParams = AttentionRotaryParams(
+            rope_scale=config.rope_scaling, rope_theta=config.rope_theta
+        )
         self.layer_idx = layer_idx
         self.qkv_proj = _load_attention(config, prefix, weights)
         self.o_proj = TensorParallelRowLinear.load(
@@ -73,7 +75,7 @@ class FlashLlamaAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
@@ -93,10 +95,20 @@ class FlashLlamaAttention(nn.Module):
         k = k_proj.contiguous()
         v = v_proj.contiguous()
         loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
-        attn_outputs_raw = self.flashinferWrapper.computeAttention(q, k, v, kvCachePool.cache_data[self.layer_idx], 
-                                kvCachePool.page_len, prefillBatchPosition, decodeBatchPosition, self.rotaryParams)
+        attn_outputs_raw = self.flashinferWrapper.computeAttention(
+            q,
+            k,
+            v,
+            kvCachePool.cache_data[self.layer_idx],
+            kvCachePool.page_len,
+            prefillBatchPosition,
+            decodeBatchPosition,
+            self.rotaryParams,
+        )
         attn_outputs = self.o_proj(attn_outputs_raw)
-        loraWeight.apply_lora_weight_attn(attn_outputs, attn_outputs_raw, self.layer_idx)
+        loraWeight.apply_lora_weight_attn(
+            attn_outputs, attn_outputs_raw, self.layer_idx
+        )
         return attn_outputs
 
 class LlamaMLP(nn.Module):
@@ -251,7 +263,7 @@ class FlashLlamaModel(torch.nn.Module):
         kvCachePool: KvCachePool, 
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight
+        loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
         residual = None
@@ -288,7 +300,7 @@ class FlashLlamaForCausalLM(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,

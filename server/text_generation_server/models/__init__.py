@@ -100,7 +100,7 @@ if FLASH_ATTENTION:
     __all__.append(FlashStarcoder2)
     __all__.append(FlashGemma)
     __all__.append(FlashCohere)
-    
+
 FLASHINFER_AVAILABLE = True
 try:
     from text_generation_server.models.flashinfer_llama import FlashinferLlama
@@ -112,7 +112,7 @@ try:
 except ImportError as e:
     logger.warning(f"Could not import FlashInfer: {e}")
     FLASHINFER_AVAILABLE = False
-    
+
 if FLASHINFER_AVAILABLE:
     __all__.append(FlashinferLlama)
     __all__.append(FlashinferGemma)
@@ -129,6 +129,7 @@ except ImportError as e:
 
 if MAMBA_AVAILABLE:
     __all__.append(Mamba)
+
 
 class ModelType(enum.Enum):
     IDEFICS2 = {
@@ -566,9 +567,9 @@ def get_model(
         if FLASHINFER_AVAILABLE:
             return FlashinferPhi(
                 model_id,
-                lora_ids.split(';') if lora_ids else None,
+                lora_ids.split(";") if lora_ids else None,
                 quantize=quantize,
-                dtype=dtype
+                dtype=dtype,
             )
         if FLASH_ATTENTION:
             return FlashPhi(
@@ -608,9 +609,9 @@ def get_model(
         if FLASHINFER_AVAILABLE:
             return FlashinferLlama(
                 model_id,
-                lora_ids.split(';') if lora_ids else None,
+                lora_ids.split(";") if lora_ids else None,
                 quantize=quantize,
-                dtype=dtype
+                dtype=dtype,
             )
 
         if FLASH_ATTENTION:
@@ -637,9 +638,9 @@ def get_model(
         if FLASHINFER_AVAILABLE:
             return FlashinferGemma(
                 model_id,
-                lora_ids.split(';') if lora_ids else None,
+                lora_ids.split(";") if lora_ids else None,
                 quantize=quantize,
-                dtype=dtype
+                dtype=dtype,
             )
         if FLASH_ATTENTION:
             return FlashGemma(
@@ -744,9 +745,9 @@ def get_model(
         if FLASHINFER_AVAILABLE:
             return FlashinferMistral(
                 model_id,
-                lora_ids.split(';') if lora_ids else None,
+                lora_ids.split(";") if lora_ids else None,
                 quantize=quantize,
-                dtype=dtype
+                dtype=dtype,
             )
 
         sliding_window = config_dict.get("sliding_window", -1)
@@ -822,9 +823,9 @@ def get_model(
         if FLASHINFER_AVAILABLE:
             return FlashinferQwen2(
                 model_id,
-                lora_ids.split(';') if lora_ids else None,
+                lora_ids.split(";") if lora_ids else None,
                 quantize=quantize,
-                dtype=dtype
+                dtype=dtype,
             )
         sliding_window = config_dict.get("sliding_window", -1)
         if (sliding_window is None or sliding_window != -1) and SUPPORTS_WINDOWING:

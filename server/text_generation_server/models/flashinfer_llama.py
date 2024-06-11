@@ -79,5 +79,5 @@ class FlashinferLlama(FlashinferLM):
             config = config,
             dtype=dtype,
             device=device,
-            lora_ids = lora_ids,
+            lora_ids=lora_ids,
         )

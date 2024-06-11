@@ -485,7 +485,7 @@ fn shard_manager(
     status_sender: mpsc::Sender<ShardStatus>,
     shutdown: Arc<AtomicBool>,
     _shutdown_sender: mpsc::Sender<()>,
-    lora_ids: String
+    lora_ids: String,
 ) {
     // Enter shard-manager tracing span
     let _span = tracing::span!(tracing::Level::INFO, "shard-manager", rank = rank).entered();
@@ -509,7 +509,7 @@ fn shard_manager(
         "--json-output".to_string(),
     ];
 
-    if lora_ids != "empty".to_string() {
+    if lora_ids != *"empty" {
         shard_args.push("--lora-ids".to_string());
         shard_args.push(lora_ids.clone());
     }
@@ -1637,7 +1637,7 @@ fn main() -> Result<(), LauncherError> {
     download_convert_model(&args, running.clone())?;
 
     // Download LoRA adapters
-    if args.lora_ids != "empty".to_string() {
+    if args.lora_ids != *"empty" {
         download_lora_adapters(&args, running.clone())?;
     }
 

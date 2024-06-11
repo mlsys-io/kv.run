@@ -1,15 +1,15 @@
 # kv.run
 (Limited) comparison of popular model serving solutions
 
-| Solution        | Inference backend | Serving backend      | Advanced kernel support                                                                          | Model support              |  
+| Solution        | Inference backend | Serving backend      | Advanced kernel support                                                                          | Model support              |
 |-----------------|-------------------|----------------------|--------------------------------------------------------------------------------------------------|----------------------------|
-| Huggingface TGI | Pytorch           | HF TGI (Rust)        | Paged + Flash attention                                                                          | Language                   | 
+| Huggingface TGI | Pytorch           | HF TGI (Rust)        | Paged + Flash attention                                                                          | Language                   |
 | Deepspeed MII   | PyTorch           | Deepspeed (Python)   | [DeepSpeed-Kernels](https://github.com/microsoft/DeepSpeed-Kernels)                              | Language                   |
 | TensorRT-LLM    | TensorRT-LLM      | TensorRT-LLM (C++)   | [TensorRT XQA](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/blogs/XQA-kernel.md) | Language                   |
 | vLLM            | vLLM              | vLLM (Python)        | Paged + Flash attention                                                                          | Language                   |
 | kv.run          | PyTorch           | HF TGI + more (Rust) | Paged + Flash attention, [FlashInfer](https://github.com/flashinfer-ai/flashinfer)               | Language, diffusion (exp.) |
 
- 
+
 
 ## Installation
 #### Sync submodules
@@ -46,7 +46,7 @@ pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3
 # For other CUDA & torch versions, please check https://docs.flashinfer.ai/installation.html
 
 # Install Flash and Paged Attention
-cd server 
+cd server
 make install-flash-attention && make install-vllm-cuda
 ```
 You can debug/edit code in the build folder. When done, use python copy_back.py to copy changes back to the original src folder.
@@ -70,13 +70,13 @@ Add --quantize [Method] to the command above, for example:
 ```shell
 text-generation-launcher --model-id TechxGenus/gemma-2b-GPTQ --lora-ids tjluyao/gemma-2b-it-math --quantize gptq
 ```
-The supported quantization methods include: 
-- AWQ: 4-bit. Need specific quantized model. 
-- EETQ: 8-bit. Can work for any model. 
+The supported quantization methods include:
+- AWQ: 4-bit. Need specific quantized model.
+- EETQ: 8-bit. Can work for any model.
 - GPTQ: 4-bit. Need specific quantized model.
 - Bitandbytes: 8-bit. Can work for any model.
 
-For AWQ and EETQ quantization, you need to build their specific kernels: 
+For AWQ and EETQ quantization, you need to build their specific kernels:
 ```shell
 # AWQ
 cd server && make install-awq
@@ -92,7 +92,7 @@ pip install -vvv --no-build-isolation -e .
 ## Model support matrix
 Note: L = Language, I = Image
 
-| Model                                                                        | MOE  | Size  | Modality | Quantization | Tensor Parallelism | FlashInfer | Multi-LoRA |   
+| Model                                                                        | MOE  | Size  | Modality | Quantization | Tensor Parallelism | FlashInfer | Multi-LoRA |
 |------------------------------------------------------------------------------|------|-------|----------|--------------|--------------------|------------|------------|
 | [Idefics](https://huggingface.co/HuggingFaceM4/idefics-9b)                   |     | 9B    | L, I ⇒ L |              |                    |            |            |
 | [Idefics 2](https://huggingface.co/HuggingFaceM4/idefics2-8b)                |     | 8B    | L, I ⇒ L |              |                    |            |            |

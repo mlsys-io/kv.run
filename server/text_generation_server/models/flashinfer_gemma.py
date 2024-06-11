@@ -13,6 +13,7 @@ from text_generation_server.utils import (
     Weights,
 )
 
+
 class FlashinferGemma(FlashinferLM):
     def __init__(
         self,
@@ -23,7 +24,7 @@ class FlashinferGemma(FlashinferLM):
         speculator: Optional[str] = None,
         dtype: Optional[torch.dtype] = torch.bfloat16,
         trust_remote_code: bool = False,
-    ): 
+    ):
         process_group, rank, world_size = initialize_torch_distributed()
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{rank}")
@@ -33,7 +34,7 @@ class FlashinferGemma(FlashinferLM):
         gemmaConfig = GemmaConfig.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
-        
+
         gemmaConfig.quantize = quantize
         gemmaConfig.speculator = speculator
         torch.distributed.barrier(group=process_group)
@@ -53,12 +54,12 @@ class FlashinferGemma(FlashinferLM):
             use_fast=True,
             from_slow=False,
         )
-        
+
         super(FlashinferGemma, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            config = gemmaConfig,
+            config=gemmaConfig,
             dtype=dtype,
             device=device,
-            lora_ids = lora_ids,
+            lora_ids=lora_ids,
         )

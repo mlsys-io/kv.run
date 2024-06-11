@@ -387,8 +387,8 @@ impl Validation {
                 let cache = Cache::default();
                 let repo = cache.repo(Repo::model(lid.clone()));
                 match repo.get("adapter_model.bin") {
-                    Some(_) => { lid }
-                    None => return Err(ValidationError::LoRANotLoaded(lid))
+                    Some(_) => lid,
+                    None => return Err(ValidationError::LoRANotLoaded(lid)),
                 }
             }
         };
@@ -401,7 +401,7 @@ impl Validation {
             parameters,
             stopping_parameters,
             top_n_tokens,
-            lora_id: loraid
+            lora_id: loraid,
         })
     }
 
@@ -660,7 +660,7 @@ pub(crate) struct ValidGenerateRequest {
     pub parameters: NextTokenChooserParameters,
     pub stopping_parameters: StoppingCriteriaParameters,
     pub top_n_tokens: u32,
-    pub lora_id: String
+    pub lora_id: String,
 }
 
 #[derive(Error, Debug)]
@@ -726,7 +726,7 @@ pub enum ValidationError {
     #[error("Could not fetch image: {0}")]
     FailedFetchImage(#[from] reqwest::Error),
     #[error("LoRA adaptor {0} not loaded")]
-    LoRANotLoaded(String)
+    LoRANotLoaded(String),
 }
 
 #[cfg(test)]

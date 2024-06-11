@@ -14,6 +14,7 @@ from text_generation_server.utils import (
 
 from transformers import AutoConfig, AutoTokenizer
 
+
 class FlashinferPhi(FlashinferLM):
     def __init__(
         self,
@@ -92,5 +93,5 @@ class FlashinferPhi(FlashinferLM):
             config=config,
             dtype=dtype,
             device=device,
-            lora_ids = lora_ids,
+            lora_ids=lora_ids,
         )

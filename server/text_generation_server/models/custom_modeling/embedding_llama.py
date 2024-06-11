@@ -16,6 +16,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 
+
 class LlamaAttention(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
@@ -44,8 +45,9 @@ class LlamaAttention(nn.Module):
         )
 
         self.max_position_embeddings = config.max_position_embeddings
-        self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
-
+        self.rotary_emb = LlamaRotaryEmbedding(
+            self.head_dim, max_position_embeddings=self.max_position_embeddings
+        )
 
     def forward(
         self,
@@ -106,13 +108,14 @@ class LlamaAttention(nn.Module):
 
         return attn_output
 
+
 class LlamaDecoderLayer(nn.Module):
     def __init__(
-            self, 
-            config: LlamaConfig, 
-            layer_idx: int,
-            use_adapter: bool = False,
-            ):
+        self,
+        config: LlamaConfig,
+        layer_idx: int,
+        use_adapter: bool = False,
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
@@ -123,10 +126,10 @@ class LlamaDecoderLayer(nn.Module):
         )
         if use_adapter:
             from models.lynx.adapter_modeling import Adapter
+
             self.output_adapter = Adapter(input_size=config.hidden_size)
         else:
             self.output_adapter = None
-
 
     def forward(
         self,
@@ -188,9 +191,9 @@ class LlamaModel(LlamaPreTrainedModel):
             config.vocab_size, config.hidden_size, self.padding_idx
         )
 
-        use_adapter = kwargs.get('use_adapter',False)
+        use_adapter = kwargs.get("use_adapter", False)
         if use_adapter:
-            adapter_freq = kwargs.get('adapter_freq',1)
+            adapter_freq = kwargs.get("adapter_freq", 1)
             assert adapter_freq >= 1
             adapter_layers = list(range(0, config.num_hidden_layers, adapter_freq))
             print("### Add adapters to: ", adapter_layers, flush=True)
@@ -267,7 +270,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         input_embeddings: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         torch.cuda.nvtx.range_push("LlamaForCausalLM")
-        hidden_states = self.model(input_ids, blen, prefill_kv, decode_kv, input_embeddings)
+        hidden_states = self.model(
+            input_ids, blen, prefill_kv, decode_kv, input_embeddings
+        )
         torch.cuda.nvtx.range_push("lm_head")
         logits = self.lm_head(hidden_states)
         torch.cuda.nvtx.range_pop()

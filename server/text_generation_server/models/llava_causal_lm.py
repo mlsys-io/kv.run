@@ -25,13 +25,16 @@ from loguru import logger
 from PIL import Image
 from io import BytesIO
 import base64
+
 tracer = trace.get_tracer(__name__)
 
 from .causal_lm import CausalLMBatch
 
+
 @dataclass
 class LlavaBatch(CausalLMBatch):
     imgs = []
+
 
 class LlavaLM(Model):
     def __init__(
@@ -41,7 +44,7 @@ class LlavaLM(Model):
         quantize: Optional[str] = None,
         use_medusa: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
-        trust_remote_code: bool = False
+        trust_remote_code: bool = False,
     ):
         if use_medusa:
             raise RuntimeError("Medusa decoding is not enabled for ThisModel")
@@ -72,7 +75,7 @@ class LlavaLM(Model):
             torch_dtype=dtype,
             low_cpu_mem_usage=True,
             device_map=device,
-            #device_map="auto" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else None,
+            # device_map="auto" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else None,
             load_in_8bit=quantize == "bitsandbytes",
             trust_remote_code=trust_remote_code,
         )
@@ -98,14 +101,15 @@ class LlavaLM(Model):
         self.kvpool = KvPool(
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_attention_heads,
-            head_dim=self.model_config.hidden_size // self.model_config.num_attention_heads,
+            head_dim=self.model_config.hidden_size
+            // self.model_config.num_attention_heads,
             page_len=16,
             dtype=dtype,
             device=device,
         )
         self.cache_pool = {}
 
-        with open(hf_hub_download(self.model_id, filename='config.json')) as f:
+        with open(hf_hub_download(self.model_id, filename="config.json")) as f:
             mm_config = json.loads(f.read())
 
         self.vision_model = self.build_vision_model(mm_config)
@@ -113,7 +117,7 @@ class LlavaLM(Model):
         self.projector = self.build_projector(mm_config)
         self.projector.to(self.device).eval()
         self.id_embedder = self.model.model.embed_tokens
-        self.additional_init_length = 576 # 512 + 64 I guess
+        self.additional_init_length = 576  # 512 + 64 I guess
 
         super(LlavaLM, self).__init__(
             model=self.model,
@@ -126,19 +130,21 @@ class LlavaLM(Model):
 
     def build_vision_model(self, model_config, **kwargs):
         from .llava_models.encoder.encoder import CLIPVisionTower
+
         mm_vision_tower = "openai/clip-vit-large-patch14-336"
         return CLIPVisionTower(mm_vision_tower, args=model_config, **kwargs)
-    
+
     def build_projector(self, model_config, **kwargs):
         from .llava_models.projector.builder import build_vision_projector
+
         projector = build_vision_projector(model_config, **kwargs)
-        model_path = hf_hub_download(self.model_id, filename='mm_projector.bin')
+        model_path = hf_hub_download(self.model_id, filename="mm_projector.bin")
         state_dict = torch.load(model_path)
         new_state_dict = {
-            '0.weight': state_dict['model.mm_projector.0.weight'],
-            '0.bias': state_dict['model.mm_projector.0.bias'],
-            '2.weight': state_dict['model.mm_projector.2.weight'],
-            '2.bias': state_dict['model.mm_projector.2.bias'],
+            "0.weight": state_dict["model.mm_projector.0.weight"],
+            "0.bias": state_dict["model.mm_projector.0.bias"],
+            "2.weight": state_dict["model.mm_projector.2.weight"],
+            "2.bias": state_dict["model.mm_projector.2.bias"],
         }
         projector.load_state_dict(new_state_dict)
         return projector
@@ -153,13 +159,13 @@ class LlavaLM(Model):
         )
 
     @torch.no_grad()
-    def prefill_token(
-        self, batch: LlavaBatch
-    ):
+    def prefill_token(self, batch: LlavaBatch):
         img_features = []
         for r in batch.requests:
-            img = Image.open(r.inputb).convert('RGB')
-            img = self.vision_model.image_processor(img, return_tensors='pt')['pixel_values'].squeeze(0)
+            img = Image.open(r.inputb).convert("RGB")
+            img = self.vision_model.image_processor(img, return_tensors="pt")[
+                "pixel_values"
+            ].squeeze(0)
             img_features.append(self.vision_model(img))
         img_features = torch.stack(img_features, dim=0)
         if self.projector:
@@ -167,35 +173,35 @@ class LlavaLM(Model):
 
         input_ids = torch.tensor(batch.input_ids, dtype=torch.long, device=self.device)
         input_embeddings = self.id_embedder(input_ids).unsqueeze(0)
-        input_embeddings = torch.cat([img_features,input_embeddings], dim=1)
+        input_embeddings = torch.cat([img_features, input_embeddings], dim=1)
         lens = batch.input_lengths + self.additional_init_length
         blen = BatchLenInfo(lens, 0, self.device)
 
-        for r,l in zip(batch.requests,lens):
+        for r, l in zip(batch.requests, lens):
             kv_cache = KvCache(self.kvpool, l)
             self.cache_pool[str(r.id)] = kv_cache
-        
-        prefill_kv = BatchedKvCache([self.cache_pool[str(r.id)] for r in batch.requests])
+
+        prefill_kv = BatchedKvCache(
+            [self.cache_pool[str(r.id)] for r in batch.requests]
+        )
 
         logits, _ = self.model(
-            input_ids = None, 
-            blen = blen, 
-            prefill_kv = prefill_kv, 
-            decode_kv = None, 
-            input_embeddings = input_embeddings,
-            )
+            input_ids=None,
+            blen=blen,
+            prefill_kv=prefill_kv,
+            decode_kv=None,
+            input_embeddings=input_embeddings,
+        )
 
         logits = logits[blen.indptr[1:] - 1]
         logits = logits.unsqueeze(1)
         return logits
-    
+
     @torch.no_grad()
-    def generate_token(
-        self, batch: LlavaBatch
-    ):
+    def generate_token(self, batch: LlavaBatch):
         input_ids, decode_kv = [], []
 
-        for i,(request,ids) in enumerate(zip(batch.requests,batch.input_ids)):
+        for i, (request, ids) in enumerate(zip(batch.requests, batch.input_ids)):
             input_ids.append(ids)
             kv_cache = self.cache_pool[str(request.id)]
             decode_kv.append(kv_cache)
@@ -208,12 +214,16 @@ class LlavaLM(Model):
         logits, _ = self.model(input_ids, blen, None, decode_kv, None)
         logits = logits.unsqueeze(1)
         return logits
-    
+
     def generate(
         self, batch: LlavaBatch
-    )-> Tuple[List[Generation], Optional[LlavaBatch], Tuple[int, int]]:
+    ) -> Tuple[List[Generation], Optional[LlavaBatch], Tuple[int, int]]:
         start = time.time_ns()
-        logits = self.prefill_token(batch) if batch.stopping_criterias[0].current_tokens == 0 else self.generate_token(batch)
+        logits = (
+            self.prefill_token(batch)
+            if batch.stopping_criterias[0].current_tokens == 0
+            else self.generate_token(batch)
+        )
         generations: List[Generation] = []
         stopped = True
 
@@ -222,7 +232,7 @@ class LlavaLM(Model):
         batch_top_token_ids, batch_top_token_logprobs = batch_top_tokens(
             batch.top_n_tokens,
             batch.top_n_tokens_tensor,
-            torch.log_softmax(logits[:, -1,:], -1),
+            torch.log_softmax(logits[:, -1, :], -1),
             accepted_ids,
         )
 
@@ -399,7 +409,8 @@ class LlavaLM(Model):
         forward_ns = start_decode - start
         decode_ns = time.time_ns() - start_decode
         return generations, batch, (forward_ns, decode_ns)
-    
-if __name__ == '__main__':
-    model = LlavaLM(model_id='liuhaotian/llava-v1.5-7b')
+
+
+if __name__ == "__main__":
+    model = LlavaLM(model_id="liuhaotian/llava-v1.5-7b")
     print(model)

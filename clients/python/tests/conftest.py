@@ -11,7 +11,7 @@ def flan_t5_xxl():
 
 @pytest.fixture
 def llama_7b():
-    return "meta-llama/Llama-2-7b-chat-hf"
+    return ""  # "meta-llama/Llama-2-7b-chat-hf"
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def unsupported_model():
 
 @pytest.fixture
 def base_url():
-    return "https://api-inference.huggingface.co/models"
+    return "http://127.0.0.1:3000"  # "https://api-inference.huggingface.co/models"
 
 
 @pytest.fixture

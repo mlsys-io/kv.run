@@ -9,6 +9,7 @@ from punica_kernels import (
     add_lora_sgmv_custom_cutlass as add_lora,
 )
 
+
 class ModelConfigForLora:
     def __init__(
         self,
@@ -22,7 +23,7 @@ class ModelConfigForLora:
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_qo_heads = num_qo_heads
-        self.num_kv_heads = num_kv_heads 
+        self.num_kv_heads = num_kv_heads
 
 
 class LoraWeight:
@@ -84,6 +85,7 @@ class LoraWeight:
     def lora_rank(self) -> int:
         return self.wa.size(1)
 
+
 class BatchedLoraWeight:
     def __init__(self, weights: Sequence[LoraWeight]):
         assert len(weights) > 0
@@ -94,6 +96,7 @@ class BatchedLoraWeight:
         self.wb_ptr = torch.tensor(
             [w.wb.data_ptr() for w in weights], dtype=torch.int64, device=device
         )
+
 
 class ModelLoraWeight:
     def __init__(
@@ -181,7 +184,8 @@ class ModelLoraWeight:
             self.up.copy_from_tensor(ts["up.A"], ts["up.B"])
         if ts.get("down.A") is not None:
             self.down.copy_from_tensor(ts["down.A"], ts["down.B"])
-  
+
+
 class BatchedModelLoraWeight:
     def __init__(self, weights: List[ModelLoraWeight], lens: List[int]):
         assert len(weights) == len(lens)
@@ -199,8 +203,10 @@ class BatchedModelLoraWeight:
             dtype=torch.int32,
         )
         self.rank = weights[0].q.lora_rank
-        
-    def apply_lora_weight_attn(self, attn_projected: torch.Tensor, attn_raw: torch.Tensor, layer_idx: int):
+
+    def apply_lora_weight_attn(
+        self, attn_projected: torch.Tensor, attn_raw: torch.Tensor, layer_idx: int
+    ):
         add_lora(
             attn_projected,
             attn_raw,
@@ -211,8 +217,14 @@ class BatchedModelLoraWeight:
             self.rank,
         )
 
-    def apply_lora_weight_kvq(self, q_proj: torch.Tensor, k_proj: torch.Tensor, v_proj: torch.Tensor, 
-                     hidden_states: torch.Tensor, layer_idx: int):
+    def apply_lora_weight_kvq(
+        self,
+        q_proj: torch.Tensor,
+        k_proj: torch.Tensor,
+        v_proj: torch.Tensor,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+    ):
         add_lora(
             q_proj,
             hidden_states,
@@ -240,8 +252,10 @@ class BatchedModelLoraWeight:
             layer_idx,
             self.rank,
         )
-        
-    def apply_lora_weight_gate(self, gate: torch.Tensor, x: torch.Tensor, layer_idx: int):
+
+    def apply_lora_weight_gate(
+        self, gate: torch.Tensor, x: torch.Tensor, layer_idx: int
+    ):
         add_lora(
             gate,
             x,
@@ -251,7 +265,7 @@ class BatchedModelLoraWeight:
             layer_idx,
             self.rank,
         )
-        
+
     def apply_lora_weight_up(self, up: torch.Tensor, x: torch.Tensor, layer_idx: int):
         add_lora(
             up,
@@ -262,8 +276,10 @@ class BatchedModelLoraWeight:
             layer_idx,
             self.rank,
         )
-        
-    def apply_lora_weight_down(self, down: torch.Tensor, x: torch.Tensor, layer_idx: int):
+
+    def apply_lora_weight_down(
+        self, down: torch.Tensor, x: torch.Tensor, layer_idx: int
+    ):
         add_lora(
             down,
             x,
@@ -274,59 +290,69 @@ class BatchedModelLoraWeight:
             self.rank,
         )
 
+
 def load_lora_weights(lora_id):
     try:
-        model_path = hf_hub_download(lora_id, filename='adapter_model.bin')
+        model_path = hf_hub_download(lora_id, filename="adapter_model.bin")
     except:
         from safetensors.torch import load_file
-        model_path = hf_hub_download(lora_id, filename='adapter_model.safetensors')
+
+        model_path = hf_hub_download(lora_id, filename="adapter_model.safetensors")
         tmp = load_file(model_path, device="cpu")
-        model_path = model_path.replace('.safetensors', '.bin')
+        model_path = model_path.replace(".safetensors", ".bin")
         torch.save(tmp, model_path)
-    config_path = hf_hub_download(lora_id, filename='adapter_config.json')
+    config_path = hf_hub_download(lora_id, filename="adapter_config.json")
     return model_path, config_path
 
+
 class ModelLoraManager:
-    def __init__(self, model_config: ModelConfigForLora, dtype, lora_cap = 32):
+    def __init__(self, model_config: ModelConfigForLora, dtype, lora_cap=32):
         self.lora_weights_gpu: Dict[str, ModelLoraWeight] = {}
-        self.lora_cap = lora_cap + 1 # one for empty
+        self.lora_cap = lora_cap + 1  # one for empty
         self.defalut_rank = 16
         self.lora_weights_cpu = {}
-        self.lora_weights_cpu["empty"] = ModelLoraWeight(model_config, self.defalut_rank, dtype, 'cpu')
-        
+        self.lora_weights_cpu["empty"] = ModelLoraWeight(
+            model_config, self.defalut_rank, dtype, "cpu"
+        )
+
     def set_lora_weights(
-            self,
-            lora_ids: List[str],
-            model_config: ModelConfigForLora,
-            dtype=torch.float16,
-            ):
+        self,
+        lora_ids: List[str],
+        model_config: ModelConfigForLora,
+        dtype=torch.float16,
+    ):
         for lora_id in lora_ids:
             if lora_id not in self.lora_weights_cpu:
                 model_path, config_path = load_lora_weights(lora_id)
-                raw_weights = torch.load(model_path, map_location='cpu', weights_only=True)
-                lora_rank = peft.config.PeftConfigMixin.from_json_file(config_path)['r']
-                lora_weight = ModelLoraWeight(model_config, lora_rank*2, dtype, 'cpu') \
-                              if lora_rank < 16 \
-                              else ModelLoraWeight(model_config, lora_rank, dtype, 'cpu')
+                raw_weights = torch.load(
+                    model_path, map_location="cpu", weights_only=True
+                )
+                lora_rank = peft.config.PeftConfigMixin.from_json_file(config_path)["r"]
+                lora_weight = (
+                    ModelLoraWeight(model_config, lora_rank * 2, dtype, "cpu")
+                    if lora_rank < 16
+                    else ModelLoraWeight(model_config, lora_rank, dtype, "cpu")
+                )
                 converted_weights = self.__convert_weight(raw_weights, lora_rank)
                 lora_weight.copy_from_tensors(converted_weights)
                 del converted_weights
                 self.lora_weights_cpu[lora_id] = lora_weight
-                logger.info(f'{lora_id} loaded in cpu memory!')
+                logger.info(f"{lora_id} loaded in cpu memory!")
 
-                
     def remove_lora_weights(self, lora_ids: List[str] = None):
-        if (not lora_ids) or (lora_ids == '') or (lora_ids == 'all'):
+        if (not lora_ids) or (lora_ids == "") or (lora_ids == "all"):
             lora_ids = list(self.lora_weights_gpu.keys())
         for lora_id in lora_ids:
-            if lora_id != 'empty' and lora_id in self.lora_weights_gpu:
+            if lora_id != "empty" and lora_id in self.lora_weights_gpu:
                 del self.lora_weights_gpu[lora_id]
-                logger.info(f'{lora_id} removed from gpu memory!')
-                
-    def get_lora_batched_weights(self, lora_ids: List[str], lora_lens: List[int]) -> BatchedModelLoraWeight:
-        assert(len(lora_ids) <= self.lora_cap)
+                logger.info(f"{lora_id} removed from gpu memory!")
+
+    def get_lora_batched_weights(
+        self, lora_ids: List[str], lora_lens: List[int]
+    ) -> BatchedModelLoraWeight:
+        assert len(lora_ids) <= self.lora_cap
         for lora_id in lora_ids:
-            assert(lora_id in self.lora_weights_cpu)
+            assert lora_id in self.lora_weights_cpu
         loraweights = []
         for lora_id in lora_ids:
             if lora_id not in self.lora_weights_gpu:
@@ -335,74 +361,76 @@ class ModelLoraManager:
         while len(self.lora_weights_gpu) > self.lora_cap:
             # eviction policy : kick out the first adapter that is not in the current batch
             # todo: use LRU to evict
-            candidate = list(set(list(self.lora_weights_gpu)) - set(lora_ids) - set(['empty']))
+            candidate = list(
+                set(list(self.lora_weights_gpu)) - set(lora_ids) - set(["empty"])
+            )
             self.remove_lora_weights([candidate[0]])
         for lora_id in lora_ids:
             loraweights.append(self.lora_weights_gpu[lora_id])
         return BatchedModelLoraWeight(loraweights, lora_lens)
-                
+
     def __convert_weight(self, weights, rank):
         qA, qB, kA, kB, vA, vB, oA, oB = [], [], [], [], [], [], [], []
         gateA, gateB, upA, upB, downA, downB = [], [], [], [], [], []
         for key in weights.keys():
-            if 'q_proj' in key:
-                if 'A' in key:
+            if "q_proj" in key:
+                if "A" in key:
                     qA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     qB.append(weights[key].unsqueeze(0))
-            if 'k_proj' in key:
-                if 'A' in key:
+            if "k_proj" in key:
+                if "A" in key:
                     kA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     kB.append(weights[key].unsqueeze(0))
-            if 'v_proj' in key:
-                if 'A' in key:
+            if "v_proj" in key:
+                if "A" in key:
                     vA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     vB.append(weights[key].unsqueeze(0))
-            if 'o_proj' in key:
-                if 'A' in key:
+            if "o_proj" in key:
+                if "A" in key:
                     oA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     oB.append(weights[key].unsqueeze(0))
-            if 'gate_proj' in key:
-                if 'A' in key:
+            if "gate_proj" in key:
+                if "A" in key:
                     gateA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     gateB.append(weights[key].unsqueeze(0))
-            if 'up_proj' in key:
-                if 'A' in key:
+            if "up_proj" in key:
+                if "A" in key:
                     upA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     upB.append(weights[key].unsqueeze(0))
-            if 'down_proj' in key:
-                if 'A' in key:
+            if "down_proj" in key:
+                if "A" in key:
                     downA.append(weights[key].unsqueeze(0))
-                if 'B' in key:
+                if "B" in key:
                     downB.append(weights[key].unsqueeze(0))
         weights = {
-            'q.A': torch.cat(qA, dim=0) if qA else None,
-            'q.B': torch.cat(qB, dim=0) if qB else None,
-            'k.A': torch.cat(kA, dim=0) if kA else None,
-            'k.B': torch.cat(kB, dim=0) if kB else None,
-            'v.A': torch.cat(vA, dim=0) if vA else None,
-            'v.B': torch.cat(vB, dim=0) if vB else None,
-            'o.A': torch.cat(oA, dim=0) if oA else None,
-            'o.B': torch.cat(oB, dim=0) if oB else None,
-            'gate.A': torch.cat(gateA, dim=0) if gateA else None,
-            'gate.B': torch.cat(gateB, dim=0) if gateB else None,
-            'up.A': torch.cat(upA, dim=0) if upA else None,
-            'up.B': torch.cat(upB, dim=0) if upB else None,
-            'down.A': torch.cat(downA, dim=0) if downA else None,
-            'down.B': torch.cat(downB, dim=0) if downB else None,
+            "q.A": torch.cat(qA, dim=0) if qA else None,
+            "q.B": torch.cat(qB, dim=0) if qB else None,
+            "k.A": torch.cat(kA, dim=0) if kA else None,
+            "k.B": torch.cat(kB, dim=0) if kB else None,
+            "v.A": torch.cat(vA, dim=0) if vA else None,
+            "v.B": torch.cat(vB, dim=0) if vB else None,
+            "o.A": torch.cat(oA, dim=0) if oA else None,
+            "o.B": torch.cat(oB, dim=0) if oB else None,
+            "gate.A": torch.cat(gateA, dim=0) if gateA else None,
+            "gate.B": torch.cat(gateB, dim=0) if gateB else None,
+            "up.A": torch.cat(upA, dim=0) if upA else None,
+            "up.B": torch.cat(upB, dim=0) if upB else None,
+            "down.A": torch.cat(downA, dim=0) if downA else None,
+            "down.B": torch.cat(downB, dim=0) if downB else None,
         }
         if rank == 8:
             for key in weights.keys():
                 if weights[key] is not None:
-                    if 'A' in key:
+                    if "A" in key:
                         complement = torch.zeros_like(weights[key])
                         weights[key] = torch.cat([weights[key], complement], dim=1)
-                    if 'B' in key:
+                    if "B" in key:
                         complement = torch.zeros_like(weights[key])
                         weights[key] = torch.cat([weights[key], complement], dim=2)
         return weights

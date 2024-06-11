@@ -12,6 +12,7 @@ for name, spec in DEMO.items():
     lora_prompts, base_prompts = spec.generate_prompts()
     lora_specs[name] = LoraSpec(lora_prompts, base_prompts)
 
+
 def make_input(lora_id, lora_or_base):
     if lora_or_base == "lora":
         prompts = lora_specs[lora_id].lora_prompts
@@ -36,55 +37,59 @@ def make_input(lora_id, lora_or_base):
             repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=2048,
-            stop_sequences=[],
-            ignore_eos_token=True),
-        lora_id=lora_id
+            max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
+        ),
+        lora_id=lora_id,
     )
     return request
 
-req1 = make_input('gsm8k', 'base')
-req2 = make_input('gsm8k', 'lora')
+
+req1 = make_input("gsm8k", "base")
+req2 = make_input("gsm8k", "lora")
 requests = [req1, req2]
 
 # Assemble input batch
-pb_batch_with_inputs = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
+pb_batch_with_inputs = generate_pb2.Batch(id=0, requests=requests, size=len(requests))
 pb_batch_empty = generate_pb2.Batch()
 
 with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
 
     # Test adapter loading and offloading
-    stub.AdapterControl(generate_pb2.AdapterControlRequest(
-        lora_ids='all',
-        operation='remove'
-    ))
-    stub.AdapterControl(generate_pb2.AdapterControlRequest(
-        lora_ids='gsm8k:abcdabcd987/gsm8k-llama2-7b-lora-16,sqlctx:abcdabcd987/sqlctx-llama2-7b-lora-16,viggo:abcdabcd987/viggo-llama2-7b-lora-16',
-        operation='load'
-    ))
-    resp = stub.AdapterControl(generate_pb2.AdapterControlRequest(
-        operation='status'
-    ))
+    stub.AdapterControl(
+        generate_pb2.AdapterControlRequest(lora_ids="all", operation="remove")
+    )
+    stub.AdapterControl(
+        generate_pb2.AdapterControlRequest(
+            lora_ids="gsm8k:abcdabcd987/gsm8k-llama2-7b-lora-16,sqlctx:abcdabcd987/sqlctx-llama2-7b-lora-16,viggo:abcdabcd987/viggo-llama2-7b-lora-16",
+            operation="load",
+        )
+    )
+    resp = stub.AdapterControl(generate_pb2.AdapterControlRequest(operation="status"))
     print(resp)
 
     # Info
     print(stub.Info(generate_pb2.InfoRequest()))
     # Warm up
-    wr = generate_pb2.WarmupRequest(batch = pb_batch_with_inputs, max_total_tokens = 2048, max_prefill_tokens = 1024*10, max_input_length = 1024)
+    wr = generate_pb2.WarmupRequest(
+        batch=pb_batch_with_inputs,
+        max_total_tokens=2048,
+        max_prefill_tokens=1024 * 10,
+        max_input_length=1024,
+    )
     stub.Warmup(wr)
     # Prefill
-    pr = generate_pb2.PrefillRequest(batch = pb_batch_empty)
+    pr = generate_pb2.PrefillRequest(batch=pb_batch_empty)
     resp = stub.Prefill(pr)
     gen, cbatch = resp.generations, resp.batch
     # Decode
-    dr = generate_pb2.DecodeRequest(batches = [cbatch])
+    dr = generate_pb2.DecodeRequest(batches=[cbatch])
     resp = stub.Decode(dr)
     gen, cbatch = resp.generations, resp.batch
 
     results = {}
     # Generate token
-    pr = generate_pb2.GenerateTokenRequest(batch = pb_batch_empty)
+    pr = generate_pb2.GenerateTokenRequest(batch=pb_batch_empty)
     while True:
         resp = stub.GenerateToken(pr)
         generations, cbatch = resp.generations, resp.batch
@@ -96,6 +101,6 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
             else:
                 results[gen.request_id] = [gen.tokens.texts[0]]
     for id in results:
-        print(str(id) + '=' * 30)
-        print(''.join(results[id]))
-    print('done')
+        print(str(id) + "=" * 30)
+        print("".join(results[id]))
+    print("done")

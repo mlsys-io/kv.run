@@ -5,7 +5,10 @@ import os
 from shutil import copyfile
 
 from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
-from text_generation_server.utils.cache_manager_flashinfer import KvCachePool, KvCacheBatchPosition
+from text_generation_server.utils.cache_manager_flashinfer import (
+    KvCachePool,
+    KvCacheBatchPosition,
+)
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
@@ -18,15 +21,17 @@ from text_generation_server.layers import (
     TensorParallelColumnLinear,
     TensorParallelEmbedding,
     SpeculativeHead,
-    get_linear
+    get_linear,
 )
 
 from text_generation_server.layers.flashinfer_attention import (
-    FlashinferAttentionWrapper, AttentionRotaryParams
+    FlashinferAttentionWrapper,
+    AttentionRotaryParams,
 )
 from punica_kernels import (
     rms_norm,
 )
+
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
@@ -34,6 +39,7 @@ class FlashinferBatch:
         self.kv_page_indptr = kv_page_indptr
         self.kv_page_indices = kv_page_indices
         self.kv_last_page_len = kv_last_page_len
+
 
 GemmaTokenizer = None
 
@@ -249,18 +255,20 @@ class GemmaConfig(PretrainedConfig):
             **kwargs,
         )
 
+
 class GemmaRMSNorm(nn.Module):
     def __init__(self, prefix, weights, eps=1e-6):
         super().__init__()
         weight = weights.get_tensor(f"{prefix}.weight") + 1
         self.weight = nn.Parameter(weight)
         self.variance_epsilon = eps
-        
+
     def forward(self, hidden_states, residual=None):
         if residual is not None:
             hidden_states += residual
         residual = hidden_states
         return rms_norm(hidden_states, self.weight, self.variance_epsilon), residual
+
 
 def load_attention(config, prefix, weights):
     if config.num_attention_heads != config.num_key_value_heads:
@@ -273,6 +281,7 @@ def load_attention(config, prefix, weights):
             weights=weights,
             bias=False,
         )
+
 
 def _load_gqa(config, prefix: str, weights):
     assert config.num_attention_heads % weights.process_group.size() == 0
@@ -298,13 +307,23 @@ def _load_gqa(config, prefix: str, weights):
         get_linear(weight, bias=None, quantize=config.quantize)
     )
 
+
 class FlashGemmaAttention(nn.Module):
-    def __init__(self, prefix: str, flashinferWrapper: FlashinferAttentionWrapper, config: GemmaConfig, weights, layer_idx: int):
+    def __init__(
+        self,
+        prefix: str,
+        flashinferWrapper: FlashinferAttentionWrapper,
+        config: GemmaConfig,
+        weights,
+        layer_idx: int,
+    ):
         super().__init__()
-        
-        self.flashinferWrapper = flashinferWrapper 
-        self.rotaryParams = AttentionRotaryParams(rope_scale=config.rope_scaling, rope_theta=config.rope_theta)
-       
+
+        self.flashinferWrapper = flashinferWrapper
+        self.rotaryParams = AttentionRotaryParams(
+            rope_scale=config.rope_scaling, rope_theta=config.rope_theta
+        )
+
         self.layer_idx = layer_idx
         self.qkv_proj = load_attention(config, prefix, weights)
         self.o_proj = TensorParallelRowLinear.load(
@@ -317,30 +336,40 @@ class FlashGemmaAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
-        q_dim = self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
-        kv_dim = self.flashinferWrapper.num_key_value_heads * self.flashinferWrapper.head_dim
+        q_dim = (
+            self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
+        )
+        kv_dim = (
+            self.flashinferWrapper.num_key_value_heads * self.flashinferWrapper.head_dim
+        )
         qkv = self.qkv_proj(hidden_states)
         q_proj, k_proj, v_proj = qkv.split(
-            [
-                q_dim,
-                kv_dim,
-                kv_dim
-            ],
+            [q_dim, kv_dim, kv_dim],
             dim=1,
         )
         q = q_proj.contiguous()
         k = k_proj.contiguous()
         v = v_proj.contiguous()
         loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
-        attn_outputs_raw = self.flashinferWrapper.computeAttention(q, k, v, kvCachePool.cache_data[self.layer_idx], 
-                                kvCachePool.page_len, prefillBatchPosition, decodeBatchPosition, self.rotaryParams)
+        attn_outputs_raw = self.flashinferWrapper.computeAttention(
+            q,
+            k,
+            v,
+            kvCachePool.cache_data[self.layer_idx],
+            kvCachePool.page_len,
+            prefillBatchPosition,
+            decodeBatchPosition,
+            self.rotaryParams,
+        )
         attn_outputs = self.o_proj(attn_outputs_raw)
-        loraWeight.apply_lora_weight_attn(attn_outputs, attn_outputs_raw, self.layer_idx)
+        loraWeight.apply_lora_weight_attn(
+            attn_outputs, attn_outputs_raw, self.layer_idx
+        )
         return attn_outputs
 
 
@@ -384,20 +413,29 @@ class GemmaMLP(nn.Module):
         loraWeight.apply_lora_weight_gate(gate, hidden_states, self.layer_idx)
         gate = self.act(gate)
         up = gate_up_states[:, 1].contiguous()
-        loraWeight.apply_lora_weight_up(up, hidden_states, self.layer_idx)     
+        loraWeight.apply_lora_weight_up(up, hidden_states, self.layer_idx)
         t = gate * up
         down = self.down_proj(t)
-        loraWeight.apply_lora_weight_down(down, t, self.layer_idx)      
+        loraWeight.apply_lora_weight_down(down, t, self.layer_idx)
         return down
 
+
 class FlashGemmaLayer(nn.Module):
-    def __init__(self, flashinferWrapper: FlashinferAttentionWrapper, layer_id, config, weights):
+    def __init__(
+        self, flashinferWrapper: FlashinferAttentionWrapper, layer_id, config, weights
+    ):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = FlashGemmaAttention(
-            prefix=f"{prefix}.self_attn", flashinferWrapper=flashinferWrapper, config=config, weights=weights, layer_idx=layer_id
+            prefix=f"{prefix}.self_attn",
+            flashinferWrapper=flashinferWrapper,
+            config=config,
+            weights=weights,
+            layer_idx=layer_id,
         )
-        self.mlp = GemmaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id)
+        self.mlp = GemmaMLP(
+            prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_id
+        )
 
         self.input_layernorm = GemmaRMSNorm(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
@@ -412,10 +450,10 @@ class FlashGemmaLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight
+        loraWeight: BatchedModelLoraWeight,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
         attn_output = self.self_attn(
@@ -423,7 +461,7 @@ class FlashGemmaLayer(nn.Module):
             kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
-            loraWeight
+            loraWeight,
         )
 
         normed_attn_res_output, attn_res = self.post_attention_layernorm(
@@ -447,12 +485,12 @@ class FlashGemmaModel(torch.nn.Module):
             prefix="model.embed_tokens", weights=weights
         )
         self.embed_tokens.weight *= embed_norm
-        
+
         assert config.num_attention_heads % weights.process_group.size() == 0
         assert config.num_key_value_heads % weights.process_group.size() == 0
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
         num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
-        
+
         flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size
         )
@@ -477,10 +515,10 @@ class FlashGemmaModel(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kvCachePool: KvCachePool, 
+        kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight
+        loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -491,7 +529,7 @@ class FlashGemmaModel(torch.nn.Module):
                 kvCachePool,
                 prefillBatchPosition,
                 decodeBatchPosition,
-                loraWeight
+                loraWeight,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -516,14 +554,14 @@ class FlashGemmaForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight
+        loraWeight: BatchedModelLoraWeight,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
             input_ids,
             kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
-            loraWeight
+            loraWeight,
         )
         logits, speculative_logits = self.lm_head(hidden_states)
         return logits, speculative_logits

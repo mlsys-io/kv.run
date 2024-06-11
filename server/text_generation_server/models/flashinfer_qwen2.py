@@ -4,7 +4,8 @@ import torch.distributed
 from typing import Optional, List
 from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
 from text_generation_server.models.custom_modeling.flashinfer_qwen2_modeling import (
-    Qwen2Config, FlashQwen2ForCausalLM
+    Qwen2Config,
+    FlashQwen2ForCausalLM,
 )
 
 from text_generation_server.utils import (
@@ -14,6 +15,7 @@ from text_generation_server.utils import (
 )
 
 from transformers import AutoTokenizer, AutoConfig
+
 
 class FlashinferQwen2(FlashinferLM):
     def __init__(
@@ -36,7 +38,7 @@ class FlashinferQwen2(FlashinferLM):
         qwenConfig = Qwen2Config.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
-        
+
         qwenConfig.quantize = quantize
         qwenConfig.speculator = speculator
 
@@ -52,8 +54,8 @@ class FlashinferQwen2(FlashinferLM):
         super(FlashinferQwen2, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            config = qwenConfig,
+            config=qwenConfig,
             dtype=dtype,
             device=device,
-            lora_ids = lora_ids,
+            lora_ids=lora_ids,
         )

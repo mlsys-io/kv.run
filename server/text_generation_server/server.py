@@ -199,7 +199,7 @@ def serve(
     dtype: Optional[str],
     trust_remote_code: bool,
     uds_path: Path,
-    lora_ids: Optional[str]
+    lora_ids: Optional[str],
 ):
     async def serve_inner(
         model_id: str,
@@ -230,7 +230,7 @@ def serve(
                 speculate,
                 dtype,
                 trust_remote_code,
-                lora_ids
+                lora_ids,
             )
         except Exception:
             logger.exception("Error when initializing model")
