@@ -14,6 +14,8 @@ from text_generation_server.models.flashinfer_causal_lm import FlashinferBatch
 import random, json
 from test_cases import DEMO, LoraSpec
 
+torch.manual_seed(0xABCDABCD987)
+
 # Load demo inputs
 lora_specs = {}
 for name, spec in DEMO.items():
@@ -54,7 +56,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     return request
 
 
-test = "gemma"
+test = "llama-2"
 # test = 'llama-3'
 # test = 'llama-3-70'
 # test = 'llama-2'
