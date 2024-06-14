@@ -43,6 +43,7 @@ ARG PYTORCH_VERSION=2.3.0
 ARG PYTHON_VERSION=3.10
 # Keep in sync with `server/pyproject.toml
 ARG CUDA_VERSION=12.1
+ARG FLASHINFER_URL=https://flashinfer.ai/whl/cu121/torch2.3
 ARG MAMBA_VERSION=24.3.0-0
 ARG CUDA_CHANNEL=nvidia
 ARG INSTALL_CHANNEL=pytorch
@@ -221,7 +222,9 @@ COPY proto proto
 COPY server server
 COPY server/Makefile server/Makefile
 RUN cd server && \
+    make install-punica-kernel && \
     make gen-server && \
+    pip install flashinfer -i ${FLASHINFER_URL} && \
     pip install -r requirements_cuda.txt && \
     pip install ".[bnb, accelerate, quantize, peft, outlines]" --no-cache-dir
 
