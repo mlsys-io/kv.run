@@ -485,6 +485,9 @@ class FlashinferLM(Model):
                 ids.append(id)
         return ids
 
+    def warmup(self, batch: FlashinferBatch):
+        pass
+
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
     def generate_token(
