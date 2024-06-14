@@ -221,10 +221,11 @@ RUN pip install einops --no-cache-dir
 COPY proto proto
 COPY server server
 COPY server/Makefile server/Makefile
+RUN pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3
+RUN pip install wheel setuptools --upgrade && \
+    cd server/punica_kernels && pip install -v --no-build-isolation .
 RUN cd server && \
-    make install-punica-kernel && \
     make gen-server && \
-    pip install flashinfer -i ${FLASHINFER_URL} && \
     pip install -r requirements_cuda.txt && \
     pip install ".[bnb, accelerate, quantize, peft, outlines]" --no-cache-dir
 
