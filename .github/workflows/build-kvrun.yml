@@ -59,8 +59,10 @@ jobs:
           build-args: |
             GIT_SHA=${{ env.GITHUB_SHA }}
             DOCKER_LABEL=sha-${{ env.GITHUB_SHA_SHORT }}
-          tags: ${{ steps.meta.outputs.tags || steps.meta-pr.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels || steps.meta-pr.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
 #  integration-tests:
 #    runs-on: [self-hosted, Linux, X64]
