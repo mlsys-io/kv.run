@@ -50,7 +50,7 @@ jobs:
             type=raw,value=sha-${{ env.GITHUB_SHA_SHORT }}
       - name: Build and push Docker image
         id: build-and-push
-        uses: docker/build-push-action@v5.4
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: Dockerfile_kvrun
