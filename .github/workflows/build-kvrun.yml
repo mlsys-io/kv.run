@@ -42,7 +42,7 @@ jobs:
           flavor: |
             latest=auto
           images: |
-            ghcr.io/mlsys-io/kv.run
+            ghcr.io/${{env.GITHUB_REPOSITORY}}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -61,8 +61,8 @@ jobs:
             DOCKER_LABEL=sha-${{ env.GITHUB_SHA_SHORT }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          #cache-from: type=gha
+          #cache-to: type=gha,mode=max
 
 #  integration-tests:
 #    runs-on: [self-hosted, Linux, X64]
