@@ -35,35 +35,32 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-#      # If main, release or tag
-#      - name: Extract metadata (tags, labels) for Docker
-#        id: meta
-#        uses: docker/metadata-action@v4.3.0
-#        with:
-#          flavor: |
-#            latest=auto
-#          images: |
-#            ghcr.io/huggingface/text-generation-inference
-#          tags: |
-#            type=semver,pattern={{version}}
-#            type=semver,pattern={{major}}.{{minor}}
-#            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-#            type=raw,value=sha-${{ env.GITHUB_SHA_SHORT }}
-#      - name: Build and push Docker image
-#        id: build-and-push
-#        uses: docker/build-push-action@v4
-#        with:
-#          context: .
-#          file: Dockerfile
-#          push: true
-#          platforms: 'linux/amd64'
-#          build-args: |
-#            GIT_SHA=${{ env.GITHUB_SHA }}
-#            DOCKER_LABEL=sha-${{ env.GITHUB_SHA_SHORT }}
-#          tags: ${{ steps.meta.outputs.tags || steps.meta-pr.outputs.tags }}
-#          labels: ${{ steps.meta.outputs.labels || steps.meta-pr.outputs.labels }}
-#          cache-from: type=registry,ref=registry.internal.huggingface.tech/api-inference/community/text-generation-inference:cache,mode=min
-#          cache-to: type=registry,ref=registry.internal.huggingface.tech/api-inference/community/text-generation-inference:cache,mode=min
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4.3.0
+        with:
+          flavor: |
+            latest=auto
+          images: |
+            ghcr.io/mlsys-io/kv.run
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=sha-${{ env.GITHUB_SHA_SHORT }}
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: 'linux/amd64'
+          build-args: |
+            GIT_SHA=${{ env.GITHUB_SHA }}
+            DOCKER_LABEL=sha-${{ env.GITHUB_SHA_SHORT }}
+          tags: ${{ steps.meta.outputs.tags || steps.meta-pr.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels || steps.meta-pr.outputs.labels }}
 
 #  integration-tests:
 #    runs-on: [self-hosted, Linux, X64]

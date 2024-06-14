@@ -43,6 +43,7 @@ ARG PYTORCH_VERSION=2.3.0
 ARG PYTHON_VERSION=3.10
 # Keep in sync with `server/pyproject.toml
 ARG CUDA_VERSION=12.1
+ARG FLASHINFER_URL=https://flashinfer.ai/whl/cu121/torch2.3
 ARG MAMBA_VERSION=24.3.0-0
 ARG CUDA_CHANNEL=nvidia
 ARG INSTALL_CHANNEL=pytorch
@@ -56,6 +57,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         ca-certificates \
         ccache \
         curl \
+        g++ \
         git && \
         rm -rf /var/lib/apt/lists/*
 
@@ -87,6 +89,14 @@ ARG MAX_JOBS=8
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ninja-build cmake \
         && rm -rf /var/lib/apt/lists/*
+
+# Punica kernel builder
+COPY server/punica_kernels punica_kernels
+RUN pip install wheel setuptools --upgrade && \
+    cd punica_kernels && TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX" pip install -v --no-build-isolation .
+RUN pip install flashinfer -i $FLASHINFER_URL
+RUN git clone https://github.com/PanQiWei/AutoGPTQ.git && cd AutoGPTQ && TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX" pip install -vvv --no-build-isolation -e .
+RUN git clone https://github.com/casper-hansen/AutoAWQ && cd AutoAWQ && TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX" pip install -e .
 
 # Build Flash Attention CUDA kernels
 FROM kernel-builder as flash-att-builder
@@ -216,6 +226,11 @@ COPY --from=mamba-builder /usr/src/causal-conv1d/build/lib.linux-x86_64-cpython-
 # Install flash-attention dependencies
 RUN pip install einops --no-cache-dir
 
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        g++ \
+        && rm -rf /var/lib/apt/lists/*
+
 # Install server
 COPY proto proto
 COPY server server
@@ -231,11 +246,6 @@ COPY --from=builder /usr/src/target/release/text-generation-benchmark /usr/local
 COPY --from=builder /usr/src/target/release/text-generation-router /usr/local/bin/text-generation-router
 # Install launcher
 COPY --from=builder /usr/src/target/release/text-generation-launcher /usr/local/bin/text-generation-launcher
-
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential \
-        g++ \
-        && rm -rf /var/lib/apt/lists/*
 
 # AWS Sagemaker compatible image
 FROM base as sagemaker

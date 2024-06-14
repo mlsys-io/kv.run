@@ -86,8 +86,8 @@ if __name__ == "__main__":
                 "csrc/sgmv_flashinfer/sgmv_all.cu",
             ],
             include_dirs=[
-                str(root.resolve() / "../third_party/cutlass/include"),
-                str(root.resolve() / "../third_party/flashinfer/include"),
+                str(root.resolve() / "include/cutlass"),
+                str(root.resolve() / "include/flashinfer"),
             ],
             extra_compile_args={
                 "cxx": ["-O3"],
