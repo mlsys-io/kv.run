@@ -17,6 +17,7 @@ homepage = "https://github.com/huggingface/text-generation-inference"
 [workspace.dependencies]
 tokenizers = { version = "0.19.1", features = ["http"] }
 hf-hub = { version = "0.3.1", features = ["tokio"] }
+bitstream-io = { version = "2.3.0" }
 
 [profile.release]
 debug = 1

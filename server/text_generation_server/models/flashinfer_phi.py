@@ -26,6 +26,7 @@ class FlashinferPhi(FlashinferLM):
         dtype: Optional[torch.dtype] = torch.bfloat16,
         trust_remote_code: bool = False,
     ):
+        dtype = dtype or torch.float16
         self.process_group, rank, world_size = initialize_torch_distributed()
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{rank}")

@@ -141,7 +141,7 @@ class RequestContext:
         top_k: int,
         maxlen: int,
         stop_token_id: int,
-        prefill_logprobs: bool,
+        prefill_logprobs: bool = True,
     ):
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
@@ -374,6 +374,9 @@ class FlashinferLM(Model):
                 ids.append(id)
         return ids
 
+    def warmup(self, batch: FlashinferBatch):
+        pass
+
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
     def generate_token(
@@ -481,7 +484,7 @@ class FlashinferLM(Model):
                 all_stop = False
 
             # Prefill
-            if reqctx.prefill and reqctx.prefill_logprobs:
+            if reqctx.prefill:  # and reqctx.prefill_logprobs:
                 # Remove generated token to only have prefill and add nan for first prompt token
                 prefill_logprobs = []  # todo
                 prefill_token_ids = reqctx.output_ids[: reqctx.prompt_len]
@@ -497,13 +500,15 @@ class FlashinferLM(Model):
                     is_special=[],
                 )
                 reqctx.prefix_offset = reqctx.prompt_len
+            else:
+                reqctx.prefill_tokens = None
 
             generation = Generation(
                 reqid,
                 reqctx.prefill_tokens,
                 Tokens(
                     [next_token_id],
-                    [],  # prob
+                    [0],  # prob
                     [text],
                     [next_token_id in self.all_special_ids],
                 ),

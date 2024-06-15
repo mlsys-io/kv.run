@@ -391,6 +391,11 @@ class Client:
             cookies=self.cookies,
             timeout=self.timeout,
         )
+        if resp.status_code == 404:
+            raise parse_error(
+                resp.status_code,
+                {"error": "Service not found.", "errory_type": "generation"},
+            )
         payload = resp.json()
         if resp.status_code != 200:
             raise parse_error(resp.status_code, payload)
@@ -496,6 +501,11 @@ class Client:
             stream=True,
         )
 
+        if resp.status_code == 404:
+            raise parse_error(
+                resp.status_code,
+                {"error": "Service not found.", "errory_type": "generation"},
+            )
         if resp.status_code != 200:
             raise parse_error(resp.status_code, resp.json())
 
@@ -897,6 +907,12 @@ class AsyncClient:
             headers=self.headers, cookies=self.cookies, timeout=self.timeout
         ) as session:
             async with session.post(self.base_url, json=request.dict()) as resp:
+                if resp.status == 404:
+                    raise parse_error(
+                        resp.status,
+                        {"error": "Service not found.", "errory_type": "generation"},
+                    )
+
                 payload = await resp.json()
 
                 if resp.status != 200:
@@ -998,6 +1014,11 @@ class AsyncClient:
             headers=self.headers, cookies=self.cookies, timeout=self.timeout
         ) as session:
             async with session.post(self.base_url, json=request.dict()) as resp:
+                if resp.status == 404:
+                    raise parse_error(
+                        resp.status,
+                        {"error": "Service not found.", "errory_type": "generation"},
+                    )
                 if resp.status != 200:
                     raise parse_error(resp.status, await resp.json())
 

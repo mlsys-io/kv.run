@@ -2,6 +2,7 @@ from text_generation_server.pb import generate_pb2
 import torch
 from text_generation_server.models.flashinfer_llama import FlashinferLlama
 from text_generation_server.models.flashinfer_gemma import FlashinferGemma
+import sys
 
 try:
     from text_generation_server.models.flashinfer_mistral import FlashinferMistral
@@ -14,7 +15,18 @@ from text_generation_server.models.flashinfer_causal_lm import FlashinferBatch
 import random, json
 from test_cases import DEMO, LoraSpec
 
-torch.manual_seed(0xABCDABCD987)
+if len(sys.argv) == 2:
+    test = sys.argv[1]
+else:
+    # test = "gemma"
+    test = "llama-3"
+    # test = 'llama-3-70'
+    # test = 'llama-2'
+    # test = 'mistral'
+    # test = 'qwen2'
+    # test = 'qwen2-1.8'
+    # test = 'qwen2-70'
+print("Testing " + test)
 
 # Load demo inputs
 lora_specs = {}
@@ -37,6 +49,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 
     request = generate_pb2.Request(
         id=id,
+        cache_id=None,
         inputs=inputs,
         truncate=256,
         prefill_logprobs=True,
@@ -55,15 +68,6 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     )
     return request
 
-
-test = "llama-2"
-# test = 'llama-3'
-# test = 'llama-3-70'
-# test = 'llama-2'
-# test = 'mistral'
-# test = 'qwen2'
-# test = 'qwen2-1.8'
-# test = 'qwen2-70'
 
 if test == "llama-2":
     # Load model

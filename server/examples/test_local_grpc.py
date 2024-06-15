@@ -13,7 +13,7 @@ for name, spec in DEMO.items():
     lora_specs[name] = LoraSpec(lora_prompts, base_prompts)
 
 
-def make_input(lora_id, lora_or_base):
+def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     if lora_or_base == "lora":
         prompts = lora_specs[lora_id].lora_prompts
     elif lora_or_base == "base" or lora_or_base == "empty":
@@ -21,10 +21,11 @@ def make_input(lora_id, lora_or_base):
         lora_id = "empty"
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
-    prompt = random.choice(prompts)
+    prompt = random.choice(prompts) if not promptOverride else promptOverride
     inputs = prompt
 
     request = generate_pb2.Request(
+        id=id,
         inputs=inputs,
         truncate=256,
         prefill_logprobs=True,
@@ -44,9 +45,20 @@ def make_input(lora_id, lora_or_base):
     return request
 
 
-req1 = make_input("gsm8k", "base")
-req2 = make_input("gsm8k", "lora")
-requests = [req1, req2]
+requests = [
+    make_input(
+        "abcdabcd987/gsm8k-llama2-7b-lora-16",
+        "base",
+        id=0,
+        promptOverride="Give me a breif introduction to Byznatine Fault Tolerance and why it is important?",
+    ),
+    make_input(
+        "abcdabcd987/gsm8k-llama2-7b-lora-16",
+        "lora",
+        id=1,
+        promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?",
+    ),
+]
 
 # Assemble input batch
 pb_batch_with_inputs = generate_pb2.Batch(id=0, requests=requests, size=len(requests))
@@ -54,19 +66,6 @@ pb_batch_empty = generate_pb2.Batch()
 
 with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
-
-    # Test adapter loading and offloading
-    stub.AdapterControl(
-        generate_pb2.AdapterControlRequest(lora_ids="all", operation="remove")
-    )
-    stub.AdapterControl(
-        generate_pb2.AdapterControlRequest(
-            lora_ids="gsm8k:abcdabcd987/gsm8k-llama2-7b-lora-16,sqlctx:abcdabcd987/sqlctx-llama2-7b-lora-16,viggo:abcdabcd987/viggo-llama2-7b-lora-16",
-            operation="load",
-        )
-    )
-    resp = stub.AdapterControl(generate_pb2.AdapterControlRequest(operation="status"))
-    print(resp)
 
     # Info
     print(stub.Info(generate_pb2.InfoRequest()))
@@ -86,21 +85,4 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     dr = generate_pb2.DecodeRequest(batches=[cbatch])
     resp = stub.Decode(dr)
     gen, cbatch = resp.generations, resp.batch
-
-    results = {}
-    # Generate token
-    pr = generate_pb2.GenerateTokenRequest(batch=pb_batch_empty)
-    while True:
-        resp = stub.GenerateToken(pr)
-        generations, cbatch = resp.generations, resp.batch
-        if not generations:
-            break
-        for gen in generations:
-            if gen.request_id in results:
-                results[gen.request_id].append(gen.tokens.texts[0])
-            else:
-                results[gen.request_id] = [gen.tokens.texts[0]]
-    for id in results:
-        print(str(id) + "=" * 30)
-        print("".join(results[id]))
     print("done")
