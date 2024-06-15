@@ -1,3 +1,5 @@
+from typing import Tuple
+from text_generation_server.layers.rotary import PositionRotaryEmbedding
 import torch
 from torch import nn
 from transformers.models.llama.modeling_llama import (
@@ -79,6 +81,12 @@ class FlashLlamaAttention(nn.Module):
         self.rotaryParams = AttentionRotaryParams(
             rope_scale=config.rope_scaling, rope_theta=config.rope_theta
         )
+        self.rotary_emb = PositionRotaryEmbedding.static(
+            config=config,
+            dim=flashinferWrapper.head_dim,
+            base=config.rope_theta,
+            device=weights.device,
+        )
         self.layer_idx = layer_idx
         self.qkv_proj = _load_attention(config, prefix, weights)
         self.o_proj = TensorParallelRowLinear.load(
@@ -95,6 +103,8 @@ class FlashLlamaAttention(nn.Module):
         kvCachePool_pad: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
         q_dim = (
@@ -112,6 +122,22 @@ class FlashLlamaAttention(nn.Module):
         k = k_proj.contiguous()
         v = v_proj.contiguous()
         loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
+
+        self.rotary_emb(
+            q_proj.view(
+                -1,
+                self.flashinferWrapper.num_attention_heads,
+                self.flashinferWrapper.head_dim,
+            )[:, :, : self.flashinferWrapper.head_dim],
+            k_proj.view(
+                -1,
+                self.flashinferWrapper.num_key_value_heads,
+                self.flashinferWrapper.head_dim,
+            )[:, :, : self.flashinferWrapper.head_dim],
+            cos,
+            sin,
+        )
+
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
             k,
@@ -241,6 +267,8 @@ class FlashLlamaLayer(nn.Module):
         kvCachePool_pad: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         loraWeight: BatchedModelLoraWeight,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
@@ -250,6 +278,8 @@ class FlashLlamaLayer(nn.Module):
             kvCachePool_pad,
             prefillBatchPosition,
             decodeBatchPosition,
+            cos,
+            sin,
             loraWeight,
         )
 
@@ -304,6 +334,19 @@ class FlashLlamaModel(torch.nn.Module):
         loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
+        position_ids_prefill, max_seq_len_prefill = self._getPositionIdsAndMaxSeqLen(
+            prefillBatchPosition.seq_indptr, hidden_states.device
+        )
+        position_ids_decode, max_seq_len_decode = self._getPositionIdsAndMaxSeqLen(
+            decodeBatchPosition.seq_indptr, hidden_states.device
+        )
+        position_ids = torch.cat([position_ids_prefill, position_ids_decode])
+        max_seq_len = max(max_seq_len_prefill, max_seq_len_decode)
+
+        cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(
+            position_ids, max_seq_len, hidden_states.dtype
+        )
+
         residual = None
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
@@ -313,11 +356,28 @@ class FlashLlamaModel(torch.nn.Module):
                 kvCachePool_pad,
                 prefillBatchPosition,
                 decodeBatchPosition,
+                cos,
+                sin,
                 loraWeight,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
+    def _getPositionIdsAndMaxSeqLen(
+        self, seq_indptr: torch.Tensor, device
+    ) -> Tuple[torch.Tensor, int]:
+        seq_lens = torch.diff(seq_indptr)
+        if seq_lens.numel() == 0:
+            return torch.tensor([], dtype=torch.int32, device=device), 0
+        position_ids = torch.cat(
+            [
+                torch.arange(seq_len, dtype=torch.int32, device=device)
+                for seq_len in seq_lens
+            ]
+        )
+        max_seq_len = torch.max(seq_lens).item()
+        return position_ids, max_seq_len
 
 
 class FlashLlamaForCausalLM(torch.nn.Module):
