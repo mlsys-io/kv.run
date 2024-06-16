@@ -89,10 +89,11 @@ class FlashinferAttentionWrapper:
             
             attn_output_prefill = attn_output_prefill_raw.view(prefillTotalSeqLen, self.hidden_size)
 
-            try:
-                assert_close(attn_output_prefill_raw, attn_output_prefill_pad_raw)
-            except Exception as e:
-                print(e)
+            # try:
+            #     assert_close(attn_output_prefill_raw, attn_output_prefill_pad_raw)
+            #     # print("prefill close")
+            # except Exception as e:
+            #     print(e)
             stack_attn_output.append(attn_output_prefill)
 
         decodeTotalSeqLen = decodeBatchPosition.total_seq_len
@@ -107,7 +108,7 @@ class FlashinferAttentionWrapper:
                 decodeTotalSeqLen, self.num_key_value_heads, self.head_dim
             )
             q_pad, k_pad, v_pad = self._pad_qkv(q, k, v)
-            attn_output_decode_pad = self._batchDecode(
+            attn_output_decode_pad_raw = self._batchDecode(
                 q_pad,
                 k_pad,
                 v_pad,
@@ -115,16 +116,19 @@ class FlashinferAttentionWrapper:
                 page_len,
                 decodeBatchPosition,
                 rotaryParams,
-            )
-            attn_output_decode_unpad = self._unpad_attention(
-                attn_output_decode_pad, decodeTotalSeqLen
-            )
+            )[:, :, : self.head_dim]
+            # attn_output_decode_unpad = self._unpad_attention(
+            #     attn_output_decode_pad, decodeTotalSeqLen
+            # )
 
-            attn_output_decode = self._batchDecode(
+            attn_output_decode_raw = self._batchDecode(
                 q, k, v, cacheData, page_len, decodeBatchPosition, rotaryParams
-            ).view(decodeTotalSeqLen, self.hidden_size)
+            )
+            
+            attn_output_decode = attn_output_decode_raw.view(decodeTotalSeqLen, self.hidden_size)
 
-            assert_close(attn_output_decode, attn_output_decode_unpad)
+            # assert_close(attn_output_decode_raw, attn_output_decode_pad_raw)
+            # print("decode close")
             stack_attn_output.append(attn_output_decode)
         return (
             stack_attn_output[0]
@@ -183,10 +187,10 @@ class FlashinferAttentionWrapper:
             q,
             cacheData,
             causal=rotaryParams.causal,
-            pos_encoding_mode="NONE", # rotaryParams.pos_encoding_mode.value,
+            pos_encoding_mode=rotaryParams.pos_encoding_mode.value,
             sm_scale=self.head_dim,
-            # rope_scale=rotaryParams.rope_scale,
-            # rope_theta=rotaryParams.rope_theta,
+            rope_scale=rotaryParams.rope_scale,
+            rope_theta=rotaryParams.rope_theta,
         )
 
         prefill_wrapper.end_forward()

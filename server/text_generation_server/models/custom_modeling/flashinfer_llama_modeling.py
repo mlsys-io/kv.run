@@ -123,20 +123,20 @@ class FlashLlamaAttention(nn.Module):
         v = v_proj.contiguous()
         loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
 
-        self.rotary_emb(
-            q_proj.view(
-                -1,
-                self.flashinferWrapper.num_attention_heads,
-                self.flashinferWrapper.head_dim,
-            )[:, :, : self.flashinferWrapper.head_dim],
-            k_proj.view(
-                -1,
-                self.flashinferWrapper.num_key_value_heads,
-                self.flashinferWrapper.head_dim,
-            )[:, :, : self.flashinferWrapper.head_dim],
-            cos,
-            sin,
-        )
+        # self.rotary_emb(
+        #     q_proj.view(
+        #         -1,
+        #         self.flashinferWrapper.num_attention_heads,
+        #         self.flashinferWrapper.head_dim,
+        #     )[:, :, : self.flashinferWrapper.head_dim],
+        #     k_proj.view(
+        #         -1,
+        #         self.flashinferWrapper.num_key_value_heads,
+        #         self.flashinferWrapper.head_dim,
+        #     )[:, :, : self.flashinferWrapper.head_dim],
+        #     cos,
+        #     sin,
+        # )
 
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,

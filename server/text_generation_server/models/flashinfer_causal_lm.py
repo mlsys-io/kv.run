@@ -477,8 +477,8 @@ class FlashinferLM(Model):
                     None,
                 )
                 self.reqctx.pop(reqid)
-                batchKvCache.release(reqid)
-                batchKvCache_pad.release(reqid)
+                # batchKvCache.release(reqid)
+                # batchKvCache_pad.release(reqid)
             else:
                 generated_text = None
                 all_stop = False

@@ -49,7 +49,6 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 
     request = generate_pb2.Request(
         id=id,
-        cache_id=None,
         inputs=inputs,
         truncate=256,
         prefill_logprobs=True,
@@ -62,7 +61,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
+            max_new_tokens=120, stop_sequences=[], ignore_eos_token=True
         ),
         lora_id=lora_id,
     )
@@ -273,7 +272,7 @@ while True:
         if gen.generated_text:
             display_results[gen.request_id] = [
                 "Prompt: "
-                + tokenizer.decode(gen.prefill_tokens.token_ids)
+                # + tokenizer.decode(gen.prefill_tokens.token_ids)
                 + "\nAnswer: "
                 + gen.generated_text.text
             ]
