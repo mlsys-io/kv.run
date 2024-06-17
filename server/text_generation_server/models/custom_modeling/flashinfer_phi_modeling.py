@@ -33,6 +33,7 @@ from text_generation_server.layers.layernorm import (
     FastLayerNorm,
 )
 
+
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
         self.seq_indptr = seq_indptr
@@ -147,7 +148,7 @@ class FlashPhiAttention(torch.nn.Module):
         super().__init__()
         self.flashinferWrapper = flashinferWrapper
         self.rotaryParams = AttentionRotaryParams(
-            pos_encoding_mode = POS_ENCODING_MODE.NONE
+            pos_encoding_mode=POS_ENCODING_MODE.NONE
         )
         self.rotary_dim = int(config.partial_rotary_factor * flashinferWrapper.head_dim)
         self.rotary_emb = PositionRotaryEmbedding.static(
@@ -222,6 +223,7 @@ class FlashPhiAttention(torch.nn.Module):
         )
         return attn_outputs
 
+
 class PhiMLP(nn.Module):
     def __init__(self, prefix, config, weights, layer_idx: int):
         super().__init__()
@@ -264,7 +266,13 @@ class PhiMLP(nn.Module):
 
 
 class FlashPhiLayer(nn.Module):
-    def __init__(self, layer_id: str, flashinferWrapper: FlashinferAttentionWrapper, config: PhiConfig, weights):
+    def __init__(
+        self,
+        layer_id: str,
+        flashinferWrapper: FlashinferAttentionWrapper,
+        config: PhiConfig,
+        weights,
+    ):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = FlashPhiAttention(
@@ -319,12 +327,12 @@ class FlashPhiLayer(nn.Module):
 class FlashPhiModel(torch.nn.Module):
     def __init__(self, config: PhiConfig, weights):
         super().__init__()
-        
+
         assert config.num_attention_heads % weights.process_group.size() == 0
         assert config.num_key_value_heads % weights.process_group.size() == 0
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
         num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
-        
+
         flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size
         )
@@ -441,7 +449,11 @@ class FlashPhiForCausalLM(torch.nn.Module):
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids, kvCachePool, prefillBatchPosition, decodeBatchPosition, loraWeight
+            input_ids,
+            kvCachePool,
+            prefillBatchPosition,
+            decodeBatchPosition,
+            loraWeight,
         )
         if lm_head_indices is not None:
             hidden_states = hidden_states[lm_head_indices]

@@ -82,7 +82,7 @@ class FlashLlamaAttention(nn.Module):
         self.rotaryParams = AttentionRotaryParams(
             # rope_scale=config.rope_scaling,
             # rope_theta=config.rope_theta,
-            pos_encoding_mode = POS_ENCODING_MODE.NONE
+            pos_encoding_mode=POS_ENCODING_MODE.NONE
         )
         self.rotary_emb = PositionRotaryEmbedding.static(
             config=config,
