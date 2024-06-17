@@ -78,7 +78,7 @@ if test == "llama-2":
     requests = [
         make_input(
             "abcdabcd987/gsm8k-llama2-7b-lora-16",
-            "lora",
+            "base",
             id=0,
             promptOverride="Give me a breif introduction to Byznatine Fault Tolerance and why it is important?",
         ),
