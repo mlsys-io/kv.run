@@ -52,12 +52,12 @@ requests = [
         id=0,
         promptOverride="Give me a breif introduction to Byznatine Fault Tolerance and why it is important?",
     ),
-    make_input(
-        "abcdabcd987/gsm8k-llama2-7b-lora-16",
-        "lora",
-        id=1,
-        promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?",
-    ),
+    # make_input(
+    #     "abcdabcd987/gsm8k-llama2-7b-lora-16",
+    #     "lora",
+    #     id=1,
+    #     promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?",
+    # ),
 ]
 
 # Assemble input batch
@@ -78,11 +78,35 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     )
     stub.Warmup(wr)
     # Prefill
-    pr = generate_pb2.PrefillRequest(batch=pb_batch_empty)
+    pr = generate_pb2.PrefillRequest(batch=pb_batch_with_inputs)
     resp = stub.Prefill(pr)
     gen, cbatch = resp.generations, resp.batch
     # Decode
-    dr = generate_pb2.DecodeRequest(batches=[cbatch])
-    resp = stub.Decode(dr)
-    gen, cbatch = resp.generations, resp.batch
-    print("done")
+    
+    for i in range(20):
+        if i == 0:
+            dr = generate_pb2.DecodeRequest(batches=[cbatch])
+        else:
+            dr = generate_pb2.DecodeRequest(batches=cbatch)
+        resp = stub.Decode(dr)
+        gen, cbatch = resp.generations, resp.batch
+        print(gen[0].generated_text.text)
+        # if all([g.generated_text for g in generations]):
+        #     break
+    
+    
+    
+# while True:
+#     generations, _, _ = service.generate_token(FlashinferBatch.Empty(batch.id))
+#     for gen in generations:
+#         if gen.prefill_tokens:
+#             display_results[gen.request_id] = [
+#                 "Prompt:\n"
+#                 + tokenizer.decode(gen.prefill_tokens.token_ids)
+#                 + "\nAnswer:\n"
+#             ]
+#         if gen.generated_text:
+#             display_results[gen.request_id] += [gen.generated_text.text]
+#     # Stop if all input generations are done
+#     if all([g.generated_text for g in generations]):
+#         break

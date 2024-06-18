@@ -38,7 +38,7 @@ def serve(
     quantize: Optional[Quantization] = None,
     speculate: Optional[int] = None,
     dtype: Optional[Dtype] = None,
-    trust_remote_code: bool = False,
+    trust_remote_code: bool = True,
     uds_path: Path = "/tmp/text-generation-server",
     logger_level: str = "INFO",
     json_output: bool = False,

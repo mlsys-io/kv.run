@@ -270,7 +270,7 @@ class FlashinferLM(Model):
         kvCachePool = KvCachePool(
             max_pages=num_pages_to_allocate,
             num_layers=self.model_config.num_hidden_layers,
-            num_heads=self.model_config.num_key_value_heads,
+            num_heads=self.model_config.num_attention_heads,
             head_dim=head_dim_padded,
             page_len=PAGE_LEN,
             dtype=dtype,
@@ -283,7 +283,7 @@ class FlashinferLM(Model):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             num_qo_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
+            num_kv_heads=config.num_attention_heads,
         )
 
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype)

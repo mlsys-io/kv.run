@@ -54,7 +54,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
         prefill_logprobs=True,
         top_n_tokens=20,
         parameters=generate_pb2.NextTokenChooserParameters(
-            temperature=0.9,
+            temperature=0.7,
             top_k=10,
             top_p=0.9,
             typical_p=0.9,
@@ -251,7 +251,7 @@ elif test == "baichuan":
             promptOverride="What are the differences between Manhattan and Brooklyn",
         ),
     ]
-    service = FlashinferLlama(model_id="baichuan-inc/Baichuan2-7B-Chat")
+    service = FlashinferLlama(model_id="baichuan-inc/Baichuan2-7B-Chat", trust_remote_code=True)
 
 print(service.get_lora_adapters())
 tokenizer = service.tokenizer

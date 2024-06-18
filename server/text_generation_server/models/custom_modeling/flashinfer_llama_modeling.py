@@ -82,12 +82,12 @@ class FlashLlamaAttention(nn.Module):
         self.rotaryParams = AttentionRotaryParams(
             # rope_scale=config.rope_scaling,
             # rope_theta=config.rope_theta,
-            pos_encoding_mode=POS_ENCODING_MODE.NONE
+            # pos_encoding_mode=POS_ENCODING_MODE.NONE
         )
         self.rotary_emb = PositionRotaryEmbedding.static(
             config=config,
             dim=flashinferWrapper.head_dim,
-            base=config.rope_theta,
+            base=10**4,
             device=weights.device,
         )
         self.layer_idx = layer_idx
@@ -125,20 +125,20 @@ class FlashLlamaAttention(nn.Module):
         v = v_proj.contiguous()
         loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
 
-        self.rotary_emb(
-            q.view(
-                -1,
-                self.flashinferWrapper.num_attention_heads,
-                self.flashinferWrapper.head_dim,
-            ),
-            k.view(
-                -1,
-                self.flashinferWrapper.num_key_value_heads,
-                self.flashinferWrapper.head_dim,
-            ),
-            cos,
-            sin,
-        )
+        # self.rotary_emb(
+        #     q.view(
+        #         -1,
+        #         self.flashinferWrapper.num_attention_heads,
+        #         self.flashinferWrapper.head_dim,
+        #     ),
+        #     k.view(
+        #         -1,
+        #         self.flashinferWrapper.num_key_value_heads,
+        #         self.flashinferWrapper.head_dim,
+        #     ),
+        #     cos,
+        #     sin,
+        # )
 
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
@@ -294,9 +294,9 @@ class FlashLlamaModel(torch.nn.Module):
     def __init__(self, prefix: str, config: LlamaConfig, weights: Weights):
         super().__init__()
         assert config.num_attention_heads % weights.process_group.size() == 0
-        assert config.num_key_value_heads % weights.process_group.size() == 0
+        assert config.num_attention_heads % weights.process_group.size() == 0
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
-        num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
+        num_key_value_heads = config.num_attention_heads // weights.process_group.size()
 
         flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size

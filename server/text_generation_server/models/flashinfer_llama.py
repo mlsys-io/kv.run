@@ -38,16 +38,16 @@ class FlashinferLlama(FlashinferLM):
             tokenizer = LlamaTokenizer.from_pretrained(
                 model_id,
                 revision=revision,
-                padding_side="left",
-                truncation_side="left",
+                # padding_side="left",
+                # truncation_side="left",
                 trust_remote_code=trust_remote_code,
             )
         except Exception:
             tokenizer = AutoTokenizer.from_pretrained(
                 model_id,
                 revision=revision,
-                padding_side="left",
-                truncation_side="left",
+                # padding_side="left",
+                # truncation_side="left",
                 trust_remote_code=trust_remote_code,
             )
         try:

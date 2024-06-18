@@ -606,13 +606,13 @@ def get_model(
             )
 
     elif model_type == LLAMA or model_type == BAICHUAN or model_type == PHI3:
-        if FLASHINFER_AVAILABLE:
-            return FlashinferLlama(
-                model_id,
-                lora_ids.split(";") if lora_ids else None,
-                quantize=quantize,
-                dtype=dtype,
-            )
+        # if FLASHINFER_AVAILABLE:
+        #     return FlashinferLlama(
+        #         model_id,
+        #         lora_ids.split(";") if lora_ids else None,
+        #         quantize=quantize,
+        #         dtype=dtype,
+        #     )
 
         if FLASH_ATTENTION:
             return FlashLlama(
@@ -621,7 +621,7 @@ def get_model(
                 quantize=quantize,
                 speculator=speculator,
                 dtype=dtype,
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=True,
             )
         elif sharded:
             raise NotImplementedError(FLASH_ATT_ERROR_MESSAGE.format("Sharded Llama"))
@@ -632,7 +632,7 @@ def get_model(
                 quantize=quantize,
                 speculator=speculator,
                 dtype=dtype,
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=True,
             )
     if model_type == GEMMA:
         if FLASHINFER_AVAILABLE:
