@@ -50,35 +50,35 @@ FLASH_ATT_ERROR_MESSAGE = "{} requires Flash Attention enabled models."
 FLASH_ATTENTION = True
 
 try:
-    from text_generation_server.models.flash_rw import FlashRWSharded
-    from text_generation_server.models.flash_gpt2 import FlashGPT2
-    from text_generation_server.models.flash_neox import FlashNeoXSharded
+    # from text_generation_server.models.flash_rw import FlashRWSharded
+    # from text_generation_server.models.flash_gpt2 import FlashGPT2
+    # from text_generation_server.models.flash_neox import FlashNeoXSharded
     from text_generation_server.models.flash_llama import (
         FlashLlama,
     )
-    from text_generation_server.models.flash_qwen2 import (
-        FlashQwen2,
-    )
-    from text_generation_server.models.flash_cohere import (
-        FlashCohere,
-    )
-    from text_generation_server.models.flash_gemma import (
-        FlashGemma,
-    )
-    from text_generation_server.models.pali_gemma import (
-        PaliGemma,
-    )
-    from text_generation_server.models.flash_santacoder import (
-        FlashSantacoderSharded,
-    )
-    from text_generation_server.models.idefics import IDEFICSSharded
-    from text_generation_server.models.llava_next import LlavaNext
-    from text_generation_server.models.idefics2 import Idefics2
-    from text_generation_server.models.flash_mistral import FlashMistral
-    from text_generation_server.models.flash_mixtral import FlashMixtral
-    from text_generation_server.models.flash_phi import FlashPhi
-    from text_generation_server.models.flash_starcoder2 import FlashStarcoder2
-    from text_generation_server.models.flash_dbrx import FlashDbrx
+    # from text_generation_server.models.flash_qwen2 import (
+    #     FlashQwen2,
+    # )
+    # from text_generation_server.models.flash_cohere import (
+    #     FlashCohere,
+    # )
+    # from text_generation_server.models.flash_gemma import (
+    #     FlashGemma,
+    # )
+    # from text_generation_server.models.pali_gemma import (
+    #     PaliGemma,
+    # )
+    # from text_generation_server.models.flash_santacoder import (
+    #     FlashSantacoderSharded,
+    # )
+    # from text_generation_server.models.idefics import IDEFICSSharded
+    # from text_generation_server.models.llava_next import LlavaNext
+    # from text_generation_server.models.idefics2 import Idefics2
+    # from text_generation_server.models.flash_mistral import FlashMistral
+    # from text_generation_server.models.flash_mixtral import FlashMixtral
+    # from text_generation_server.models.flash_phi import FlashPhi
+    # from text_generation_server.models.flash_starcoder2 import FlashStarcoder2
+    # from text_generation_server.models.flash_dbrx import FlashDbrx
     from text_generation_server.layers.attention import SUPPORTS_WINDOWING
 except ImportError as e:
     logger.warning(f"Could not import Flash Attention enabled models: {e}")
@@ -86,20 +86,20 @@ except ImportError as e:
     FLASH_ATTENTION = False
 
 if FLASH_ATTENTION:
-    __all__.append(FlashGPT2)
-    __all__.append(FlashNeoXSharded)
-    __all__.append(FlashRWSharded)
-    __all__.append(FlashSantacoderSharded)
+    # __all__.append(FlashGPT2)
+    # __all__.append(FlashNeoXSharded)
+    # __all__.append(FlashRWSharded)
+    # __all__.append(FlashSantacoderSharded)
     __all__.append(FlashLlama)
-    __all__.append(IDEFICSSharded)
-    __all__.append(FlashMistral)
-    __all__.append(FlashMixtral)
-    __all__.append(FlashDbrx)
-    __all__.append(FlashPhi)
-    __all__.append(FlashQwen2)
-    __all__.append(FlashStarcoder2)
-    __all__.append(FlashGemma)
-    __all__.append(FlashCohere)
+    # __all__.append(IDEFICSSharded)
+    # __all__.append(FlashMistral)
+    # __all__.append(FlashMixtral)
+    # __all__.append(FlashDbrx)
+    # __all__.append(FlashPhi)
+    # __all__.append(FlashQwen2)
+    # __all__.append(FlashStarcoder2)
+    # __all__.append(FlashGemma)
+    # __all__.append(FlashCohere)
 
 FLASHINFER_AVAILABLE = True
 try:
@@ -606,13 +606,13 @@ def get_model(
             )
 
     elif model_type == LLAMA or model_type == BAICHUAN or model_type == PHI3:
-        # if FLASHINFER_AVAILABLE:
-        #     return FlashinferLlama(
-        #         model_id,
-        #         lora_ids.split(";") if lora_ids else None,
-        #         quantize=quantize,
-        #         dtype=dtype,
-        #     )
+        if FLASHINFER_AVAILABLE:
+            return FlashinferLlama(
+                model_id,
+                lora_ids.split(";") if lora_ids else None,
+                quantize=quantize,
+                dtype=dtype,
+            )
 
         if FLASH_ATTENTION:
             return FlashLlama(

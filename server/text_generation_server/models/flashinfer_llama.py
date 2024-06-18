@@ -24,7 +24,7 @@ class FlashinferLlama(FlashinferLM):
         revision: Optional[str] = None,
         quantize: Optional[str] = None,
         dtype: Optional[torch.dtype] = torch.float16,
-        trust_remote_code: bool = False,
+        trust_remote_code: bool = True,
     ):
         dtype = dtype or torch.float16
         self.process_group, rank, world_size = initialize_torch_distributed()
@@ -38,21 +38,21 @@ class FlashinferLlama(FlashinferLM):
             tokenizer = LlamaTokenizer.from_pretrained(
                 model_id,
                 revision=revision,
-                # padding_side="left",
-                # truncation_side="left",
+                padding_side="left",
+                truncation_side="left",
                 trust_remote_code=trust_remote_code,
             )
         except Exception:
             tokenizer = AutoTokenizer.from_pretrained(
                 model_id,
                 revision=revision,
-                # padding_side="left",
-                # truncation_side="left",
-                trust_remote_code=trust_remote_code,
+                padding_side="left",
+                truncation_side="left",
+                trust_remote_code=True,
             )
         try:
             generation_config = GenerationConfig.from_pretrained(
-                model_id, revision=revision, trust_remote_code=trust_remote_code
+                model_id, revision=revision, trust_remote_code=True
             )
             if isinstance(generation_config.eos_token_id, (list, set)):
                 # TODO Huge hack
@@ -61,7 +61,7 @@ class FlashinferLlama(FlashinferLM):
             pass
 
         config = AutoConfig.from_pretrained(
-            model_id, revision=revision, trust_remote_code=trust_remote_code
+            model_id, revision=revision, trust_remote_code=True
         )
         config.quantize = quantize
         config.speculator = None

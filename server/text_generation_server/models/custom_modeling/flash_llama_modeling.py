@@ -96,7 +96,7 @@ class FlashLlamaAttention(torch.nn.Module):
         self.rotary_emb = PositionRotaryEmbedding.static(
             config=config,
             dim=self.head_size,
-            base=config.rope_theta,
+            base=10000,
             device=weights.device,
         )
 
@@ -109,7 +109,7 @@ class FlashLlamaAttention(torch.nn.Module):
             )
         self.num_heads = self.num_heads // weights.process_group.size()
         self.num_key_value_heads = (
-            config.num_key_value_heads // weights.process_group.size()
+            config.num_attention_heads // weights.process_group.size()
         )
 
         self.query_key_value = load_attention(config, prefix, weights)

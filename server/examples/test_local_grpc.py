@@ -46,18 +46,18 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 
 
 requests = [
+    # make_input(
+    #     "abcdabcd987/gsm8k-llama2-7b-lora-16",
+    #     "base",
+    #     id=0,
+    #     promptOverride="Give me a breif introduction to Byznatine Fault Tolerance and why it is important?",
+    # ),
     make_input(
         "abcdabcd987/gsm8k-llama2-7b-lora-16",
         "base",
-        id=0,
-        promptOverride="Give me a breif introduction to Byznatine Fault Tolerance and why it is important?",
+        id=1,
+        promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?",
     ),
-    # make_input(
-    #     "abcdabcd987/gsm8k-llama2-7b-lora-16",
-    #     "lora",
-    #     id=1,
-    #     promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?",
-    # ),
 ]
 
 # Assemble input batch
@@ -80,17 +80,18 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     # Prefill
     pr = generate_pb2.PrefillRequest(batch=pb_batch_with_inputs)
     resp = stub.Prefill(pr)
+    # print(resp)
     gen, cbatch = resp.generations, resp.batch
     # Decode
     
-    for i in range(20):
-        if i == 0:
-            dr = generate_pb2.DecodeRequest(batches=[cbatch])
-        else:
-            dr = generate_pb2.DecodeRequest(batches=cbatch)
+    for i in range(200):
+        dr = generate_pb2.DecodeRequest(batches=[cbatch])
         resp = stub.Decode(dr)
-        gen, cbatch = resp.generations, resp.batch
-        print(gen[0].generated_text.text)
+        # print(resp)
+        generations, cbatch = resp.generations, resp.batch
+        # print(generations)
+        for gen in generations:
+            print(gen.tokens.texts)
         # if all([g.generated_text for g in generations]):
         #     break
     
