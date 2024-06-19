@@ -88,30 +88,31 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     print("finished prefill tokens")
     # Decode
     
-    for i in range(200):
+    # for i in range(200):
+    #     dr = generate_pb2.DecodeRequest(batches=[cbatch])
+    #     resp = stub.Decode(dr)
+    #     # print(resp)
+    #     generations, cbatch = resp.generations, resp.batch
+    #     # print(generations)
+    #     for gen in generations:
+    #         print(gen.tokens.texts)
+    #     # if all([g.generated_text for g in generations]):
+    #     #     break
+    
+    
+    
+    while True:
         dr = generate_pb2.DecodeRequest(batches=[cbatch])
         resp = stub.Decode(dr)
-        # print(resp)
         generations, cbatch = resp.generations, resp.batch
-        # print(generations)
+        toExit = False
         for gen in generations:
-            print(gen.tokens.texts)
-        # if all([g.generated_text for g in generations]):
-        #     break
-    
-    
-    
-# while True:
-#     generations, _, _ = service.generate_token(FlashinferBatch.Empty(batch.id))
-#     for gen in generations:
-#         if gen.prefill_tokens:
-#             display_results[gen.request_id] = [
-#                 "Prompt:\n"
-#                 + tokenizer.decode(gen.prefill_tokens.token_ids)
-#                 + "\nAnswer:\n"
-#             ]
-#         if gen.generated_text:
-#             display_results[gen.request_id] += [gen.generated_text.text]
-#     # Stop if all input generations are done
-#     if all([g.generated_text for g in generations]):
-#         break
+            if gen.generated_text.text:
+                print("finished")
+                res = gen.generated_text.text
+                toExit = True
+                
+        if toExit:
+            break
+
+    print(res)

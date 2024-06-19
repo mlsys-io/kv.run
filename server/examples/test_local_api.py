@@ -61,7 +61,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
+            max_new_tokens=2048, stop_sequences=[], ignore_eos_token=False
         ),
         lora_id=lora_id,
     )
@@ -237,12 +237,16 @@ elif test == "phi3":
     ]
     service = FlashinferLlama(model_id="microsoft/Phi-3-mini-4k-instruct")
 elif test == "baichuan":
+    question = {
+        "role": "user",
+        "content": "解释下温故而知新"
+    }
     requests = [
         make_input(
             "abcdabcd987/gsm8k-llama2-7b-lora-16",
             "base",
             id=0,
-            promptOverride="why is deep learning so popular these days?",
+            promptOverride=json.dumps(question), #"什么是深度学习?",
         ),
         # make_input(
         #     "abcdabcd987/gsm8k-llama2-7b-lora-16",
@@ -276,10 +280,10 @@ while True:
                 + "\nAnswer:\n"
             ]
           
-        if gen.tokens:
-            print(gen.tokens.texts)
-        else:
-            print('no token') 
+        # if gen.tokens:
+        #     print(gen.tokens.texts)
+        # else:
+        #     print('no token') 
         if gen.generated_text:
             display_results[gen.request_id] += [gen.generated_text.text]
 
