@@ -192,6 +192,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
 
 def serve(
     model_id: str,
+    use_flashinfer: bool,
     revision: Optional[str],
     sharded: bool,
     quantize: Optional[str],
@@ -224,6 +225,7 @@ def serve(
         try:
             model = get_model(
                 model_id,
+                use_flashinfer,
                 revision,
                 sharded,
                 quantize,

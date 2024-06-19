@@ -138,6 +138,7 @@ class FlashLlamaAttention(torch.nn.Module):
         max_s,
     ):
         qkv = self.query_key_value(hidden_states)
+        torch.save(qkv, '/workspace/kv.run/server/examples/flash_qkv.pt')
         query, kv = qkv.split(
             [
                 self.head_size * self.num_heads,
@@ -180,7 +181,9 @@ class FlashLlamaAttention(torch.nn.Module):
                 input_lengths,
                 max_s,
             )
-
+            
+        attn_res = attn_output.view(-1, self.num_heads * self.head_size)
+        torch.save(attn_res, '/workspace/kv.run/server/examples/flash_attn_res.pt')
         return self.o_proj(attn_output.view(-1, self.num_heads * self.head_size))
 
 
@@ -431,4 +434,5 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         if lm_head_indices is not None:
             hidden_states = hidden_states[lm_head_indices]
         logits, speculative_logits = self.lm_head(hidden_states)
+        torch.save(logits, '/workspace/kv.run/server/examples/flash_prefill.pt')
         return logits, speculative_logits

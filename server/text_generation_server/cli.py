@@ -32,6 +32,7 @@ class Dtype(str, Enum):
 @app.command()
 def serve(
     model_id: str,
+    use_flashinfer: bool,
     lora_ids: Optional[str] = None,
     revision: Optional[str] = None,
     sharded: bool = False,
@@ -92,6 +93,7 @@ def serve(
         )
     server.serve(
         model_id,
+        use_flashinfer,
         revision,
         sharded,
         quantize,

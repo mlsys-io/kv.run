@@ -244,12 +244,12 @@ elif test == "baichuan":
             id=0,
             promptOverride="why is deep learning so popular these days?",
         ),
-        make_input(
-            "abcdabcd987/gsm8k-llama2-7b-lora-16",
-            "base",
-            id=1,
-            promptOverride="What are the differences between Manhattan and Brooklyn",
-        ),
+        # make_input(
+        #     "abcdabcd987/gsm8k-llama2-7b-lora-16",
+        #     "base",
+        #     id=1,
+        #     promptOverride="What are the differences between Manhattan and Brooklyn",
+        # ),
     ]
     service = FlashinferLlama(model_id="baichuan-inc/Baichuan2-7B-Chat", trust_remote_code=True)
 
@@ -275,8 +275,14 @@ while True:
                 + tokenizer.decode(gen.prefill_tokens.token_ids)
                 + "\nAnswer:\n"
             ]
+          
+        if gen.tokens:
+            print(gen.tokens.texts)
+        else:
+            print('no token') 
         if gen.generated_text:
             display_results[gen.request_id] += [gen.generated_text.text]
+
     # Stop if all input generations are done
     if all([g.generated_text for g in generations]):
         break

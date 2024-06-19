@@ -33,23 +33,14 @@ class FlashinferLlama(FlashinferLM):
         else:
             raise NotImplementedError("Flashinfer Llama is only available on Cuda")
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        try:
-            tokenizer = LlamaTokenizer.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=trust_remote_code,
-            )
-        except Exception:
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=True,
-            )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            revision=revision,
+            padding_side="left",
+            truncation_side="left",
+            trust_remote_code=trust_remote_code,
+        )
+
         try:
             generation_config = GenerationConfig.from_pretrained(
                 model_id, revision=revision, trust_remote_code=True

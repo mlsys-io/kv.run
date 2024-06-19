@@ -82,7 +82,7 @@ class FlashLlamaAttention(nn.Module):
         self.rotaryParams = AttentionRotaryParams(
             # rope_scale=config.rope_scaling,
             # rope_theta=config.rope_theta,
-            # pos_encoding_mode=POS_ENCODING_MODE.NONE
+            pos_encoding_mode=POS_ENCODING_MODE.NONE
         )
         self.rotary_emb = PositionRotaryEmbedding.static(
             config=config,
@@ -116,6 +116,7 @@ class FlashLlamaAttention(nn.Module):
             self.flashinferWrapper.num_key_value_heads * self.flashinferWrapper.head_dim
         )
         qkv = self.qkv_proj(hidden_states)
+        # torch.save(qkv, '/workspace/kv.run/server/examples/flashinfer_qkv.pt')
         q_proj, k_proj, v_proj = qkv.split(
             [q_dim, kv_dim, kv_dim],
             dim=1,
@@ -125,20 +126,20 @@ class FlashLlamaAttention(nn.Module):
         v = v_proj.contiguous()
         loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
 
-        # self.rotary_emb(
-        #     q.view(
-        #         -1,
-        #         self.flashinferWrapper.num_attention_heads,
-        #         self.flashinferWrapper.head_dim,
-        #     ),
-        #     k.view(
-        #         -1,
-        #         self.flashinferWrapper.num_key_value_heads,
-        #         self.flashinferWrapper.head_dim,
-        #     ),
-        #     cos,
-        #     sin,
-        # )
+        self.rotary_emb(
+            q.view(
+                -1,
+                self.flashinferWrapper.num_attention_heads,
+                self.flashinferWrapper.head_dim,
+            ),
+            k.view(
+                -1,
+                self.flashinferWrapper.num_key_value_heads,
+                self.flashinferWrapper.head_dim,
+            ),
+            cos,
+            sin,
+        )
 
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
@@ -150,6 +151,7 @@ class FlashLlamaAttention(nn.Module):
             decodeBatchPosition,
             self.rotaryParams,
         )
+        # torch.save(attn_outputs_raw, '/workspace/kv.run/server/examples/flashinfer_attn_res.pt')
         attn_outputs = self.o_proj(attn_outputs_raw)
         loraWeight.apply_lora_weight_attn(
             attn_outputs, attn_outputs_raw, self.layer_idx
@@ -428,4 +430,5 @@ class FlashLlamaForCausalLM(torch.nn.Module):
             loraWeight,
         )
         logits, speculative_logits = self.lm_head(hidden_states)
+        # torch.save(logits, '/workspace/kv.run/server/examples/flashinfer_prefill.pt')
         return logits, speculative_logits

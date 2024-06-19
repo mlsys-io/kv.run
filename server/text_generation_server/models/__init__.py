@@ -269,6 +269,7 @@ for data in ModelType:
 
 def get_model(
     model_id: str,
+    use_flashinfer: bool,
     revision: Optional[str],
     sharded: bool,
     quantize: Optional[str],
@@ -606,7 +607,7 @@ def get_model(
             )
 
     elif model_type == LLAMA or model_type == BAICHUAN or model_type == PHI3:
-        if FLASHINFER_AVAILABLE:
+        if use_flashinfer:
             return FlashinferLlama(
                 model_id,
                 lora_ids.split(";") if lora_ids else None,
