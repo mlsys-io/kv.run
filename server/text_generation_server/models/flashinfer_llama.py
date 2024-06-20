@@ -33,23 +33,14 @@ class FlashinferLlama(FlashinferLM):
         else:
             raise NotImplementedError("Flashinfer Llama is only available on Cuda")
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        try:
-            tokenizer = LlamaTokenizer.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=trust_remote_code,
-            )
-        except Exception:
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_id,
-                revision=revision,
-                padding_side="left",
-                truncation_side="left",
-                trust_remote_code=trust_remote_code,
-            )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            revision=revision,
+            padding_side="left",
+            truncation_side="left",
+            trust_remote_code=trust_remote_code,
+        )
+
         try:
             generation_config = GenerationConfig.from_pretrained(
                 model_id, revision=revision, trust_remote_code=trust_remote_code
@@ -65,6 +56,12 @@ class FlashinferLlama(FlashinferLM):
         )
         config.quantize = quantize
         config.speculator = None
+        if not hasattr(config, "num_key_value_heads"):
+            config.num_key_value_heads = config.num_attention_heads
+
+        if not hasattr(config, "rope_theta"):
+            config.rope_theta = 1.0e4
+
         torch.distributed.barrier(group=self.process_group)
 
         filenames = weight_files(model_id, revision=revision, extension=".safetensors")

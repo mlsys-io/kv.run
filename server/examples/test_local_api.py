@@ -251,7 +251,9 @@ elif test == "baichuan":
             promptOverride="What are the differences between Manhattan and Brooklyn",
         ),
     ]
-    service = FlashinferLlama(model_id="baichuan-inc/Baichuan2-7B-Chat")
+    service = FlashinferLlama(
+        model_id="baichuan-inc/Baichuan2-7B-Chat", trust_remote_code=True
+    )
 
 print(service.get_lora_adapters())
 tokenizer = service.tokenizer

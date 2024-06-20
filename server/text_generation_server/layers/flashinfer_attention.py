@@ -19,7 +19,7 @@ class AttentionRotaryParams:
     causal: bool = True
     pos_encoding_mode: POS_ENCODING_MODE = POS_ENCODING_MODE.ROPE_LLAMA
     rope_scale: float = 1.0
-    rope_theta: float = 1.0e-4
+    rope_theta: float = 1.0e4
 
 
 def find_padded_head_dim(head_dim):
