@@ -1,11 +1,10 @@
 import torch
 import torch.distributed
 from typing import Optional, List
-from text_generation_server.models.flashinfer_causal_lm import FlashinferLM
-from text_generation_server.models.custom_modeling.flashinfer_gemma_modeling import (
-    GemmaTokenizerFast,
-    GemmaConfig,
-    FlashGemmaForCausalLM,
+from text_generation_server.models_flashinfer.flashinfer_causal_lm import FlashinferLM
+from text_generation_server.models_flashinfer.custom_modeling.flashinfer_mistral_modeling import (
+    MistralConfig,
+    FlashMistralForCausalLM,
 )
 from text_generation_server.utils import (
     initialize_torch_distributed,
@@ -13,8 +12,10 @@ from text_generation_server.utils import (
     Weights,
 )
 
+from transformers import AutoTokenizer
 
-class FlashinferGemma(FlashinferLM):
+
+class FlashinferMistral(FlashinferLM):
     def __init__(
         self,
         model_id: str,
@@ -30,14 +31,15 @@ class FlashinferGemma(FlashinferLM):
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{rank}")
         else:
-            raise NotImplementedError("Flashinfer Gemma is only available on GPU")
+            raise NotImplementedError("Flashinfer Mistral is only available on GPU")
 
-        gemmaConfig = GemmaConfig.from_pretrained(
+        mistralConfig = MistralConfig.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
 
-        gemmaConfig.quantize = quantize
-        gemmaConfig.speculator = speculator
+        mistralConfig.quantize = quantize
+        mistralConfig.speculator = speculator
+
         torch.distributed.barrier(group=process_group)
 
         filenames = weight_files(model_id, revision=revision, extension=".safetensors")
@@ -45,21 +47,13 @@ class FlashinferGemma(FlashinferLM):
         if quantize in ["gptq", "awq"]:
             weights._set_gptq_params(model_id, revision)
 
-        model = FlashGemmaForCausalLM(gemmaConfig, weights)
-        tokenizer = GemmaTokenizerFast.from_pretrained(
-            model_id,
-            revision=revision,
-            padding_side="left",
-            truncation_side="left",
-            trust_remote_code=trust_remote_code,
-            use_fast=True,
-            from_slow=False,
-        )
+        model = FlashMistralForCausalLM(None, mistralConfig, weights)
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        super(FlashinferGemma, self).__init__(
+        super(FlashinferMistral, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            config=gemmaConfig,
+            config=mistralConfig,
             dtype=dtype,
             device=device,
             lora_ids=lora_ids,

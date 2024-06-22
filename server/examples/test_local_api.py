@@ -1,17 +1,23 @@
 from text_generation_server.pb import generate_pb2
 import torch
-from text_generation_server.models.flashinfer_llama import FlashinferLlama
-from text_generation_server.models.flashinfer_gemma import FlashinferGemma
+from text_generation_server.models_flashinfer.flashinfer_llama import FlashinferLlama
+from text_generation_server.models_flashinfer.flashinfer_gemma import FlashinferGemma
 import sys
 
 try:
-    from text_generation_server.models.flashinfer_mistral import FlashinferMistral
-    from text_generation_server.models.flashinfer_phi import FlashinferPhi
-    from text_generation_server.models.flashinfer_qwen2 import FlashinferQwen2
+    from text_generation_server.models_flashinfer.flashinfer_mistral import (
+        FlashinferMistral,
+    )
+    from text_generation_server.models_flashinfer.flashinfer_phi import FlashinferPhi
+    from text_generation_server.models_flashinfer.flashinfer_qwen2 import (
+        FlashinferQwen2,
+    )
 except:
     print("can't load flashinfer mistral and phi and qwen2 without flash attn")
 
-from text_generation_server.models.flashinfer_causal_lm import FlashinferBatch
+from text_generation_server.models_flashinfer.flashinfer_causal_lm import (
+    FlashinferBatch,
+)
 import random, json
 from test_cases import DEMO, LoraSpec
 
