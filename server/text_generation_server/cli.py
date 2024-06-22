@@ -43,6 +43,7 @@ def serve(
     logger_level: str = "INFO",
     json_output: bool = False,
     otlp_endpoint: Optional[str] = None,
+    use_flashinfer: bool = True,
 ):
     if sharded:
         assert (
@@ -90,17 +91,33 @@ def serve(
         raise RuntimeError(
             "Only 1 can be set between `dtype` and `quantize`, as they both decide how goes the final model."
         )
-    server.serve(
-        model_id,
-        revision,
-        sharded,
-        quantize,
-        speculate,
-        dtype,
-        trust_remote_code,
-        uds_path,
-        lora_ids,
-    )
+
+    if use_flashinfer:
+        from text_generation_server import server_flashinfer
+
+        server_flashinfer.serve(
+            model_id,
+            revision,
+            sharded,
+            quantize,
+            speculate,
+            dtype,
+            trust_remote_code,
+            uds_path,
+            lora_ids,
+        )
+    else:
+        server.serve(
+            model_id,
+            revision,
+            sharded,
+            quantize,
+            speculate,
+            dtype,
+            trust_remote_code,
+            uds_path,
+            lora_ids,
+        )
 
 
 @app.command()
