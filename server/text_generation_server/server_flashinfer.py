@@ -175,7 +175,6 @@ def serve(
                 revision,
                 sharded,
                 quantize,
-                speculate,
                 dtype,
                 trust_remote_code,
                 lora_ids,

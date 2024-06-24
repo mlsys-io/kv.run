@@ -79,6 +79,11 @@ class ModelType(enum.Enum):
     }
 
 
+__GLOBALS = locals()
+for data in ModelType:
+    __GLOBALS[data.name] = data.value["type"]
+
+
 def get_model(
     model_id: str,
     revision: Optional[str],

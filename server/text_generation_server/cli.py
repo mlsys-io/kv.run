@@ -43,7 +43,7 @@ def serve(
     logger_level: str = "INFO",
     json_output: bool = False,
     otlp_endpoint: Optional[str] = None,
-    use_flashinfer: bool = True,
+    use_flashinfer: Optional[bool] = True,
 ):
     if sharded:
         assert (
