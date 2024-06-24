@@ -78,9 +78,11 @@ class ModelType(enum.Enum):
         "url": "https://huggingface.co/bigcode/starcoder2-15b-instruct-v0.1",
     }
 
+
 __GLOBALS = locals()
 for data in ModelType:
     __GLOBALS[data.name] = data.value["type"]
+
 
 def get_model(
     model_id: str,
