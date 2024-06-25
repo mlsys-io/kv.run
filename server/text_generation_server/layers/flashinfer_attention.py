@@ -41,6 +41,7 @@ class FlashinferAttentionWrapper:
         self._workspace_buffer = torch.empty(
             32 * 1024 * 1024, dtype=torch.int8, device=torch.cuda.current_device()
         )
+        self.page_size = 16
 
     def computeAttention(
         self,
@@ -144,6 +145,7 @@ class FlashinferAttentionWrapper:
             self.num_attention_heads,
             self.num_key_value_heads,
             self._head_padded_dim,
+            self.page_size,
         )
 
         attn_output_prefill = prefill_wrapper.forward(
