@@ -11,6 +11,9 @@ class Cache:
     def __init__(self):
         self.cache: Dict[int, B] = {}
 
+    def get_all_values(self):
+        return self.cache.values()
+
     def pop(self, batch_id: int) -> Optional[B]:
         return self.cache.pop(batch_id, None)
 
