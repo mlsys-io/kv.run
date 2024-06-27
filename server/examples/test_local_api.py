@@ -265,17 +265,17 @@ print(service.get_lora_adapters())
 tokenizer = service.tokenizer
 
 batch = generate_pb2.Batch(id=0, requests=requests, size=len(requests))
-pb_batch = FlashinferBatch.from_pb(
-    batch, tokenizer, torch.float16, torch.device("cuda")
-)
-
-# Add input batch to model service
-ids = service.add_request(pb_batch)
 display_results = {}
 
 # Iterative generation: each step generates a token for each input in the batch
+isPrefill = True
 while True:
-    generations, _, _ = service.generate_token(FlashinferBatch.Empty(batch.id))
+    if isPrefill:
+        generations, next_batch, _ = service.prefill_batch(batch)
+        isPrefill = False
+    else:
+        generations, next_batch, _ = service.decode_batch(next_batch)
+
     for gen in generations:
         if gen.prefill_tokens:
             display_results[gen.request_id] = [
