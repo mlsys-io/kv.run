@@ -131,7 +131,7 @@ class FlashinferBatch:
             request_ids=[
                 request_context.request_id for request_context in self.request_contexts
             ],
-            size=len(self),
+            size=len(self.request_contexts),
             max_tokens=max_tokens,
         )
 
@@ -247,7 +247,7 @@ class FlashinferLM(Model):
         start_concat = time.time_ns()
         batch = self._convertCachedBatch(cachedBatchesPb)
         concat_ns = time.time_ns() - start_concat
-        generations, next_batch, timings = self._generate_token(batch)
+        generations, next_batch, timings = self.generate_token(batch)
         if next_batch:
             self.batch_cache.set(next_batch)
         return generations, batch, timings, concat_ns
@@ -256,7 +256,7 @@ class FlashinferLM(Model):
         self, batchPb: generate_pb2.Batch
     ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
         batch = self._convertPbBatch(batchPb)
-        generations, next_batch, timings = self._generate_token(batch)
+        generations, next_batch, timings = self.generate_token(batch)
         if next_batch:
             self.batch_cache.set(next_batch)
         return generations, batch, timings
@@ -293,10 +293,11 @@ class FlashinferLM(Model):
                 top_k=parameters.top_k,
                 maxlen=min(request.stopping_parameters.max_new_tokens, 4096),
                 stop_token_id=self.tokenizer.eos_token_id,
+                is_stopped=False,
                 request_kv_cache=RequestKvCache(
                     self.kvCachePool,
                     self.kvCachePool.page_len,
-                    request_context.prompt_len,
+                    len(input_ids),
                 ),
                 prefill_logprobs=request.prefill_logprobs,
                 lora_id=request.lora_id,
@@ -330,10 +331,13 @@ class FlashinferLM(Model):
             is_prefill=False,
             request_contexts=request_contexts_combined,
         )
+        
+    def batch_type(self):
+        return FlashinferBatch
 
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
-    def _generate_token(
+    def generate_token(
         self, batch: FlashinferBatch
     ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
         start = time.time_ns()
@@ -361,10 +365,10 @@ class FlashinferLM(Model):
         request_kv_caches_prefill = request_kv_caches if batch.is_prefill else []
         request_kv_caches_decode = [] if batch.is_prefill else request_kv_caches
         prefillBatchPosition: KvCacheBatchPosition = getKvCacheBatchPosition(
-            request_kv_caches_prefill, isPrefill=True
+            request_kv_caches_prefill, isPrefill=True, device=self.device
         )
         decodeBatchPosition: KvCacheBatchPosition = getKvCacheBatchPosition(
-            request_kv_caches_decode, isPrefill=False
+            request_kv_caches_decode, isPrefill=False, device=self.device
         )
 
         raw_logits, _ = self.model(
@@ -386,7 +390,7 @@ class FlashinferLM(Model):
 
         all_stop = True
         generations: List[Generation] = []
-        for request_context in batch.request_contexts:
+        for i, request_context in enumerate(batch.request_contexts):
             next_token_id = request_context.get_next_token_id(logits[i].unsqueeze(0))
             request_context.append_token(next_token_id)
             # text = reqctx.decode_tokens() # todo: ??

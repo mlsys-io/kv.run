@@ -27,7 +27,7 @@ else:
     # test = "gemma"
     # test = "llama-3"
     # test = 'llama-3-70'
-    test = "llama-2"
+    test = "gemma"
     # test = 'mistral'
     # test = 'qwen2'
     # test = 'qwen2-1.8'
@@ -274,7 +274,7 @@ while True:
         generations, next_batch, _ = service.prefill_batch(batch)
         isPrefill = False
     else:
-        generations, next_batch, _ = service.decode_batch(next_batch)
+        generations, next_batch, _ = service.decode_batch([next_batch.to_pb()])
 
     for gen in generations:
         if gen.prefill_tokens:

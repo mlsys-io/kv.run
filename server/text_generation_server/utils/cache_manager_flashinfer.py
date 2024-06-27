@@ -81,7 +81,7 @@ class RequestKvCache:
 
 
 def getKvCacheBatchPosition(
-    self, request_kv_caches: List[RequestKvCache], isPrefill: bool, device: torch.device
+    request_kv_caches: List[RequestKvCache], isPrefill: bool, device: torch.device
 ) -> KvCacheBatchPosition:
     kv_page_indices_list = []
     kv_page_indptr_list = []
@@ -102,15 +102,15 @@ def getKvCacheBatchPosition(
     kv_page_indptr_list.append(cum_pages)
     seq_indptr_list.append(cum_seq_len)
     kv_page_indices = torch.tensor(
-        kv_page_indices_list, dtype=torch.int32, device=self.device
+        kv_page_indices_list, dtype=torch.int32, device=device
     )
     kv_page_indptr = torch.tensor(
-        kv_page_indptr_list, dtype=torch.int32, device=self.device
+        kv_page_indptr_list, dtype=torch.int32, device=device
     )
     kv_last_page_len = torch.tensor(
-        kv_last_page_len_list, dtype=torch.int32, device=self.device
+        kv_last_page_len_list, dtype=torch.int32, device=device
     )
-    seq_indptr = torch.tensor(seq_indptr_list, dtype=torch.int32, device=self.device)
+    seq_indptr = torch.tensor(seq_indptr_list, dtype=torch.int32, device=device)
     seq_lens = torch.tensor(
         seq_lens_list,
         dtype=torch.int32,
