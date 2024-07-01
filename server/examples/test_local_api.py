@@ -2,6 +2,8 @@ from text_generation_server.pb import generate_pb2
 import torch
 from text_generation_server.models_flashinfer.flashinfer_llama import FlashinferLlama
 from text_generation_server.models_flashinfer.flashinfer_gemma import FlashinferGemma
+from text_generation_server.models_flashinfer.flashinfer_qwen2 import FlashinferQwen2
+from text_generation_server.models_flashinfer.flashinfer_chatglm import FlashinferChatGLM
 import sys
 
 try:
@@ -27,11 +29,13 @@ else:
     # test = "gemma"
     # test = "llama-3"
     # test = 'llama-3-70'
-    test = "llama-2"
+    # test = "llama-2"
     # test = 'mistral'
-    # test = 'qwen2'
-    # test = 'qwen2-1.8'
-    # test = 'qwen2-70'
+    # test = 'qwen1.5-7'
+    # test = 'qwen1.5-1.8'
+    # test = 'qwen1.5-70'
+    # test = 'qwen2-7'
+    test = 'chatglm4'
 print("Testing " + test)
 
 # Load demo inputs
@@ -161,7 +165,7 @@ elif test == "mistral":
         ),
     ]
     service = FlashinferMistral(model_id="mistralai/Mistral-7B-v0.3")
-elif test == "qwen2":
+elif test == "qwen1.5-7":
     requests = [
         make_input(
             "REILX/Qwen1.5-7B-Chat-750Mb-lora",
@@ -180,7 +184,7 @@ elif test == "qwen2":
     service = FlashinferQwen2(
         model_id="Qwen/Qwen1.5-7B-Chat", lora_ids=["REILX/Qwen1.5-7B-Chat-750Mb-lora"]
     )
-elif test == "qwen2-1.8":
+elif test == "qwen1.5-1.8":
     # Todo: Add qwen1.5 1.8b chat lora adapter / Output Repetition Problem
     requests = [
         make_input(
@@ -194,7 +198,7 @@ elif test == "qwen2-1.8":
     service = FlashinferQwen2(
         model_id="Qwen/Qwen1.5-1.8B-Chat", lora_ids=["REILX/Qwen1.5-7B-Chat-750Mb-lora"]
     )
-elif test == "qwen2-70":
+elif test == "qwen1.5-70":
     # Todo: Add qwen1.5 72b chat lora adapter
     requests = [
         make_input(
@@ -259,6 +263,33 @@ elif test == "baichuan":
     ]
     service = FlashinferLlama(
         model_id="baichuan-inc/Baichuan2-7B-Chat", trust_remote_code=True
+    )
+elif test == "qwen2-7":
+    # Todo: qwen2-7b instruct lora adapter
+    requests = [
+        make_input(
+            "abcdabcd987/gsm8k-llama2-7b-lora-16",
+            "base",
+            id=0,
+            promptOverride="给我讲个故事",
+        ),
+    ]
+    service = FlashinferQwen2(
+        model_id="Qwen/Qwen2-7B-Instruct", trust_remote_code=True
+    )
+    
+elif test == "chatglm4":
+    # Todo: chatglm4-9b lora adapter
+    requests = [
+        make_input(
+            "abcdabcd987/gsm8k-llama2-7b-lora-16",
+            "base",
+            id=0,
+            promptOverride="给我讲个故事",
+        ),
+    ]
+    service = FlashinferChatGLM(
+        model_id="THUDM/glm-4-9b-chat", trust_remote_code=True
     )
 
 print(service.get_lora_adapters())

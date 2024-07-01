@@ -444,11 +444,19 @@ class FlashinferLM(Model):
             next_token_id = reqctx.get_next_token_id(logits[i].unsqueeze(0))
             reqctx.append_token(next_token_id)
             # text = reqctx.decode_tokens() # todo: ??
-            text = self.tokenizer.decode(
-                next_token_id,
-                clean_up_tokenization_spaces=False,
-                skip_special_tokens=False,
-            )
+            # special handling for ChatGLM
+            if 'ChatGLM' in str(type(self.model)):
+                text = self.tokenizer.decode(
+                    [next_token_id],
+                    clean_up_tokenization_spaces=False,
+                    skip_special_tokens=False
+                )
+            else:
+                text = self.tokenizer.decode(
+                    next_token_id,
+                    clean_up_tokenization_spaces=False,
+                    skip_special_tokens=False
+                ) 
 
             is_stop = reqctx.is_stop()
             if is_stop != None:
@@ -474,11 +482,20 @@ class FlashinferLM(Model):
                 # Remove generated token to only have prefill and add nan for first prompt token
                 prefill_logprobs = []  # todo
                 prefill_token_ids = reqctx.output_ids[: reqctx.prompt_len]
-                prefill_texts = self.tokenizer.batch_decode(
-                    prefill_token_ids,
-                    clean_up_tokenization_spaces=False,
-                    skip_special_tokens=False,
-                )
+                # special handling for ChatGLM
+                if 'ChatGLM' in str(type(self.model)):
+                    prefill_texts = self.tokenizer.batch_decode(
+                        [prefill_token_ids],
+                        clean_up_tokenization_spaces=False,
+                        skip_special_tokens=False,
+                    )
+                else:
+                    prefill_texts = self.tokenizer.batch_decode(
+                        prefill_token_ids,
+                        clean_up_tokenization_spaces=False,
+                        skip_special_tokens=False,
+                    )
+
                 reqctx.prefill_tokens = Tokens(
                     prefill_token_ids,
                     prefill_logprobs,
