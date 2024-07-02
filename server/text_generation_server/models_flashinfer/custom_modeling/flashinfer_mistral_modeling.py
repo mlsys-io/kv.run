@@ -47,6 +47,11 @@ from text_generation_server.layers import (
 from text_generation_server.layers.rotary import PositionRotaryEmbedding
 from text_generation_server.layers.layernorm import FastRMSNorm
 
+from text_generation_server.layers.flashinfer_attention import (
+    FlashinferAttentionWrapper,
+    AttentionRotaryParams,
+)
+
 
 class FlashinferBatch:
     def __init__(self, seq_indptr, kv_page_indptr, kv_page_indices, kv_last_page_len):
@@ -155,11 +160,29 @@ class MistralAttention(torch.nn.Module):
     def __init__(
         self,
         prefix: str,
+        flashinferWrapper: FlashinferAttentionWrapper,
         config,
         weights,
         layer_idx: int,
     ):
         super().__init__()
+
+        self.flashinferWrapper = flashinferWrapper
+
+        self.rotaryParams = AttentionRotaryParams(
+            rope_scale=None, rope_theta=config.rope_theta
+        )
+
+        self.layer_idx = layer_idx
+        self.qkv_proj = load_attention(config, prefix, weights)
+        self.o_proj = TensorParallelRowLinear.load(
+            config,
+            prefix=f"{prefix}.o_proj",
+            weights=weights,
+            bias=False,
+        )
+
+
         self.max_past = (
             config.sliding_window if config.sliding_window is not None else -1
         )
@@ -208,177 +231,38 @@ class MistralAttention(torch.nn.Module):
         kvCachePool: KvCachePool,
         prefillBatchPosition: KvCacheBatchPosition,
         decodeBatchPosition: KvCacheBatchPosition,
-        lora: BatchedModelLoraWeight | None,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
-        qkv = self.query_key_value(hidden_states)
-
-        # qkv = qkv.to('cuda')
-
+        q_dim = (
+            self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
+        )
+        kv_dim = (
+            self.flashinferWrapper.num_key_value_heads * self.flashinferWrapper.head_dim
+        )
+        qkv = self.qkv_proj(hidden_states)
         q_proj, k_proj, v_proj = qkv.split(
-            [
-                self.head_size * self.num_heads,
-                self.head_size * self.num_key_value_heads,
-                self.head_size * self.num_key_value_heads,
-            ],
+            [q_dim, kv_dim, kv_dim],
             dim=1,
         )
-
-        q_proj = q_proj.contiguous()
-        k_proj = k_proj.contiguous()
-        v_proj = v_proj.contiguous()
-
-        # print(f"q proj {q_proj}")
-        # print(f"lora rank: {lora.rank}")
-
-        if lora:
-            add_lora(
-                q_proj,
-                hidden_states,
-                lora.q.wa_ptr,
-                lora.q.wb_ptr,
-                lora.segment,
-                self.layer_idx,
-                lora.rank,
-            )
-            add_lora(
-                k_proj,
-                hidden_states,
-                lora.k.wa_ptr,
-                lora.k.wb_ptr,
-                lora.segment,
-                self.layer_idx,
-                lora.rank,
-            )
-            add_lora(
-                v_proj,
-                hidden_states,
-                lora.v.wa_ptr,
-                lora.v.wb_ptr,
-                lora.segment,
-                self.layer_idx,
-                lora.rank,
-            )
-
-        stack_attn_output = []
-        workspace_buffer = torch.empty(
-            32 * 1024 * 1024, dtype=torch.int8, device=kvCachePool.device
+        q = q_proj.contiguous()
+        k = k_proj.contiguous()
+        v = v_proj.contiguous()
+        loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
+        attn_outputs_raw = self.flashinferWrapper.computeAttention(
+            q,
+            k,
+            v,
+            kvCachePool.cache_data[self.layer_idx],
+            kvCachePool.page_len,
+            prefillBatchPosition,
+            decodeBatchPosition,
+            self.rotaryParams,
         )
-        prefillTotalSeqLen = prefillBatchPosition.total_seq_len
-        if prefillTotalSeqLen > 0:
-            q = (
-                q_proj[:prefillTotalSeqLen]
-                .view(prefillTotalSeqLen, self.num_heads, self.head_size)
-                .contiguous()
-            )
-            k = (
-                k_proj[:prefillTotalSeqLen]
-                .view(prefillTotalSeqLen, self.num_key_value_heads, self.head_size)
-                .contiguous()
-            )
-            v = (
-                v_proj[:prefillTotalSeqLen]
-                .view(prefillTotalSeqLen, self.num_key_value_heads, self.head_size)
-                .contiguous()
-            )
-
-            seq_indptr = prefillBatchPosition.seq_indptr.clone()
-            kv_page_indices = prefillBatchPosition.kv_page_indices.clone()
-            kv_page_indptr = prefillBatchPosition.kv_page_indptr.clone()
-            kv_last_page_len = prefillBatchPosition.kv_last_page_len.clone()
-
-            flashinfer.append_paged_kv_cache(
-                k,
-                v,
-                seq_indptr,
-                kvCachePool.cache_data[self.layer_idx],
-                kv_page_indices,
-                kv_page_indptr,
-                kv_last_page_len,
-            )
-
-            prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                workspace_buffer, "NHD"
-            )
-
-            prefill_wrapper.begin_forward(
-                seq_indptr,
-                kv_page_indptr,
-                kv_page_indices,
-                kv_last_page_len,
-                self.num_heads,
-                self.num_key_value_heads,
-                self.head_size,
-            )
-
-            attn_output_prefill = prefill_wrapper.forward(
-                q,
-                kvCachePool.cache_data[self.layer_idx],
-                causal=True,
-                pos_encoding_mode="ROPE_LLAMA",
-            ).view(prefillTotalSeqLen, self.hidden_size)
-
-            prefill_wrapper.end_forward()
-            stack_attn_output.append(attn_output_prefill)
-
-        decodeTotalSeqLen = decodeBatchPosition.total_seq_len
-        if decodeTotalSeqLen > 0:
-            q = (
-                q_proj[prefillTotalSeqLen:]
-                .view(decodeTotalSeqLen, self.num_heads, self.head_size)
-                .contiguous()
-            )
-            k = (
-                k_proj[prefillTotalSeqLen:]
-                .view(decodeTotalSeqLen, self.num_key_value_heads, self.head_size)
-                .contiguous()
-            )
-            v = (
-                v_proj[prefillTotalSeqLen:]
-                .view(decodeTotalSeqLen, self.num_key_value_heads, self.head_size)
-                .contiguous()
-            )
-
-            flashinfer.append_paged_kv_cache(
-                k,
-                v,
-                decodeBatchPosition.seq_indptr,
-                kvCachePool.cache_data[self.layer_idx],
-                decodeBatchPosition.kv_page_indices,
-                decodeBatchPosition.kv_page_indptr,
-                decodeBatchPosition.kv_last_page_len,
-            )
-
-            decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                workspace_buffer, "NHD"
-            )
-
-            decode_wrapper.begin_forward(
-                decodeBatchPosition.kv_page_indptr,
-                decodeBatchPosition.kv_page_indices,
-                decodeBatchPosition.kv_last_page_len,
-                self.num_heads,
-                self.num_key_value_heads,
-                self.head_size,
-                kvCachePool.page_len,
-                pos_encoding_mode="ROPE_LLAMA",
-            )
-
-            attn_output_decode = decode_wrapper.forward(
-                q,
-                kvCachePool.cache_data[self.layer_idx],
-                pos_encoding_mode="ROPE_LLAMA",
-            ).view(decodeTotalSeqLen, self.hidden_size)
-
-            decode_wrapper.end_forward()
-            stack_attn_output.append(attn_output_decode)
-
-        if len(stack_attn_output) == 1:
-            attn_output = stack_attn_output[0]
-        else:
-            attn_output = torch.cat(stack_attn_output, dim=0)
-
-        o = self.o_proj(attn_output)
-        return o
+        attn_outputs = self.o_proj(attn_outputs_raw)
+        loraWeight.apply_lora_weight_attn(
+            attn_outputs, attn_outputs_raw, self.layer_idx
+        )
+        return attn_outputs
 
 
 class MistralMLP(nn.Module):
@@ -458,11 +342,12 @@ class MistralMLP(nn.Module):
 
 
 class MistralLayer(nn.Module):
-    def __init__(self, layer_id, config, weights):
+    def __init__(self, flashinferWrapper: FlashinferAttentionWrapper, layer_id, config, weights):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = MistralAttention(
             prefix=f"{prefix}.self_attn",
+            flashinferWrapper=flashinferWrapper,
             config=config,
             weights=weights,
             layer_idx=layer_id,
@@ -524,9 +409,19 @@ class FlashMistralModel(torch.nn.Module):
         )
         # self.embed_tokens.weight *= embed_norm
 
+        assert config.num_attention_heads % weights.process_group.size() == 0
+        assert config.num_key_value_heads % weights.process_group.size() == 0
+        num_attention_heads = config.num_attention_heads // weights.process_group.size()
+        num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
+
+        flashinferWrapper = FlashinferAttentionWrapper(
+            num_attention_heads, num_key_value_heads, config.hidden_size
+        )
+
         self.layers = nn.ModuleList(
             [
                 MistralLayer(
+                    flashinferWrapper,
                     layer_id,
                     config=config,
                     weights=weights,

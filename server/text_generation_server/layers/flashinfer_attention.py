@@ -42,6 +42,8 @@ class FlashinferAttentionWrapper:
             32 * 1024 * 1024, dtype=torch.int8, device=torch.cuda.current_device()
         )
         self.page_size = 16
+        
+        self.group_size = self.num_attention_heads // self.num_key_value_heads
 
     def computeAttention(
         self,
@@ -182,9 +184,15 @@ class FlashinferAttentionWrapper:
             decodeBatchPosition.kv_last_page_len,
         )
 
-        decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            workspace_buffer=self._workspace_buffer, kv_layout="NHD"
-        )
+        if self.group_size in [7, 16]:
+            decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffer=self._workspace_buffer, kv_layout="NHD", use_tensor_cores=True
+            )
+        else:
+            decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffer=self._workspace_buffer, kv_layout="NHD"
+            )
+
         decode_wrapper.begin_forward(
             decodeBatchPosition.kv_page_indptr,
             decodeBatchPosition.kv_page_indices,

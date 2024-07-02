@@ -331,7 +331,7 @@ class FlashinferLM(Model):
             is_prefill=False,
             request_contexts=request_contexts_combined,
         )
-        
+
     def batch_type(self):
         return FlashinferBatch
 
@@ -394,11 +394,19 @@ class FlashinferLM(Model):
             next_token_id = request_context.get_next_token_id(logits[i].unsqueeze(0))
             request_context.append_token(next_token_id)
             # text = reqctx.decode_tokens() # todo: ??
-            text = self.tokenizer.decode(
-                next_token_id,
-                clean_up_tokenization_spaces=False,
-                skip_special_tokens=False,
-            )
+            # special handling for ChatGLM
+            if "ChatGLM" in str(type(self.model)):
+                text = self.tokenizer.decode(
+                    [next_token_id],
+                    clean_up_tokenization_spaces=False,
+                    skip_special_tokens=False,
+                )
+            else:
+                text = self.tokenizer.decode(
+                    next_token_id,
+                    clean_up_tokenization_spaces=False,
+                    skip_special_tokens=False,
+                )
 
             stop_reason = request_context.get_stop_reason()
             if stop_reason != None:
@@ -426,11 +434,19 @@ class FlashinferLM(Model):
                 prefill_token_ids = request_context.output_ids[
                     : request_context.prompt_len
                 ]
-                prefill_texts = self.tokenizer.batch_decode(
-                    prefill_token_ids,
-                    clean_up_tokenization_spaces=False,
-                    skip_special_tokens=False,
-                )
+                # special handling for ChatGLM
+                if "ChatGLM" in str(type(self.model)):
+                    prefill_texts = self.tokenizer.batch_decode(
+                        [prefill_token_ids],
+                        clean_up_tokenization_spaces=False,
+                        skip_special_tokens=False,
+                    )
+                else:
+                    prefill_texts = self.tokenizer.batch_decode(
+                        prefill_token_ids,
+                        clean_up_tokenization_spaces=False,
+                        skip_special_tokens=False,
+                    )
                 request_context.prefill_tokens = Tokens(
                     prefill_token_ids,
                     prefill_logprobs,
