@@ -398,7 +398,9 @@ class FlashinferLM(Model):
             if request_context.is_stopped:
                 num_stopped_requests += 1
                 continue
-            next_token_id = request_context.get_next_token_id(logits[i-num_stopped_requests].unsqueeze(0))
+            next_token_id = request_context.get_next_token_id(
+                logits[i - num_stopped_requests].unsqueeze(0)
+            )
             request_context.append_token(next_token_id)
             # text = reqctx.decode_tokens() # todo: ??
             # special handling for ChatGLM

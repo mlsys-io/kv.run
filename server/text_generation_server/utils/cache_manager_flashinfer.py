@@ -104,9 +104,7 @@ def getKvCacheBatchPosition(
     kv_page_indices = torch.tensor(
         kv_page_indices_list, dtype=torch.int32, device=device
     )
-    kv_page_indptr = torch.tensor(
-        kv_page_indptr_list, dtype=torch.int32, device=device
-    )
+    kv_page_indptr = torch.tensor(kv_page_indptr_list, dtype=torch.int32, device=device)
     kv_last_page_len = torch.tensor(
         kv_last_page_len_list, dtype=torch.int32, device=device
     )
