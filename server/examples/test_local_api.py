@@ -303,7 +303,7 @@ while True:
         generations, next_batch, _ = service.prefill_batch(batch)
         isPrefill = False
     else:
-        generations, next_batch, _ = service.decode_batch([next_batch.to_pb()])
+        generations, next_batch, _, _ = service.decode_batch([next_batch.to_pb()])
 
     for gen in generations:
         if gen.prefill_tokens:

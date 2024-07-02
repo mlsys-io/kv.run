@@ -345,7 +345,10 @@ class FlashinferLM(Model):
         request_kv_caches = []
         for request_context in batch.request_contexts:
             if not request_context.is_stopped:
-                input_ids.extend(request_context.output_ids)
+                if batch.is_prefill:
+                    input_ids.extend(request_context.output_ids)
+                else:
+                    input_ids.append(request_context.output_ids[-1])
                 request_kv_caches.append(request_context.request_kv_cache)
                 if not batch.is_prefill:
                     request_context.request_kv_cache.increment()
@@ -390,8 +393,12 @@ class FlashinferLM(Model):
 
         all_stop = True
         generations: List[Generation] = []
+        num_stopped_requests = 0
         for i, request_context in enumerate(batch.request_contexts):
-            next_token_id = request_context.get_next_token_id(logits[i].unsqueeze(0))
+            if request_context.is_stopped:
+                num_stopped_requests += 1
+                continue
+            next_token_id = request_context.get_next_token_id(logits[i-num_stopped_requests].unsqueeze(0))
             request_context.append_token(next_token_id)
             # text = reqctx.decode_tokens() # todo: ??
             # special handling for ChatGLM
