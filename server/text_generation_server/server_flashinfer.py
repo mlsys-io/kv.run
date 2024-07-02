@@ -13,7 +13,8 @@ from typing import List, Optional
 
 from text_generation_server.cache import Cache
 from text_generation_server.interceptor import ExceptionInterceptor
-from text_generation_server.models_flashinfer import Model, get_model
+from text_generation_server.models_flashinfer import get_model
+from text_generation_server.models_flashinfer.flashinfer_causal_lm import FlashinferLM
 
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
 from text_generation_server.tracing import UDSOpenTelemetryAioServerInterceptor
@@ -34,7 +35,7 @@ class SignalHandler:
 class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
     def __init__(
         self,
-        model: Model,
+        model: FlashinferLM,
         cache: Cache,
         quantize: Optional[str],
         server_urls: List[str],
@@ -60,40 +61,24 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
         return generate_pb2.ServiceDiscoveryResponse(urls=self.server_urls)
 
     async def ClearCache(self, request, context):
-        if request.HasField("id"):
-            self.cache.delete(request.id)
-        else:
-            self.cache.clear()
+        self.model.clear_cache()
         return generate_pb2.ClearCacheResponse()
 
-    async def FilterBatch(self, request, context):
-        batch = self.cache.pop(request.batch_id)
-        if batch is None:
-            raise ValueError(f"Batch ID {request.batch_id} not found in cache.")
-        filtered_batch = batch.filter(request.request_ids)
-        self.cache.set(filtered_batch)
+    # async def FilterBatch(self, request, context):
+    #     batch = self.cache.pop(request.batch_id)
+    #     if batch is None:
+    #         raise ValueError(f"Batch ID {request.batch_id} not found in cache.")
+    #     filtered_batch = batch.filter(request.request_ids)
+    #     self.cache.set(filtered_batch)
 
-        return generate_pb2.FilterBatchResponse(batch=filtered_batch.to_pb())
+    #     return generate_pb2.FilterBatchResponse(batch=filtered_batch.to_pb())
 
     async def Warmup(self, request, context):
+        pass
 
-        batch = self.model.batch_type.from_pb(
-            request.batch, self.model.tokenizer, self.model.dtype, self.model.device
-        )
-        max_supported_total_tokens = self.model.warmup(batch)
-
-        return generate_pb2.WarmupResponse(
-            max_supported_total_tokens=max_supported_total_tokens
-        )
-
-    async def Prefill(self, request, context):
+    async def Prefill(self, request: generate_pb2.PrefillRequest):
         start = time.time_ns()
-        batch = self.model.batch_type.from_pb(
-            request.batch, self.model.tokenizer, self.model.dtype, self.model.device
-        )
-
-        generations, next_batch, timings = self.model.generate_token(batch)
-        self.cache.set(next_batch)
+        generations, next_batch, timings = self.model.prefill_batch(request.batch)
         return generate_pb2.PrefillResponse(
             generations=[generation.to_pb() for generation in generations],
             batch=next_batch.to_pb() if next_batch else None,
@@ -102,32 +87,11 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             total_ns=time.time_ns() - start,
         )
 
-    async def Decode(self, request, context):
+    async def Decode(self, request: generate_pb2.DecodeRequest):
         start = time.time_ns()
-        if len(request.batches) == 0:
-            raise ValueError("Must provide at least one batch")
-
-        batches = []
-        for batch_pb in request.batches:
-            batch = self.cache.pop(batch_pb.id)
-            if batch is None:
-                raise ValueError(f"Batch ID {batch_pb.id} not found in cache.")
-            batches.append(batch)
-
-        if len(batches) == 0:
-            raise ValueError("All batches are empty")
-
-        if len(batches) > 1:
-            start_concat = time.time_ns()
-            batch = self.model.batch_type.concatenate(batches)
-            concat_ns = time.time_ns() - start_concat
-        else:
-            batch = batches[0]
-            concat_ns = None
-
-        generations, next_batch, timings = self.model.generate_token(batch)
-        self.cache.set(next_batch)
-
+        generations, next_batch, timings, concat_ns = self.model.decode_batch(
+            request.batches
+        )
         return generate_pb2.DecodeResponse(
             generations=[generation.to_pb() for generation in generations],
             batch=next_batch.to_pb() if next_batch else None,

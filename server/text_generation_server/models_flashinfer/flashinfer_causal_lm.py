@@ -1,14 +1,14 @@
 import torch
 import torch.distributed
-from typing import Any, TypedDict, Optional
+from typing import Any, Optional
 from text_generation_server.utils.lora_utils import ModelLoraManager, ModelConfigForLora
 from text_generation_server.utils.cache_manager_flashinfer import (
-    ModelKvCache,
+    getKvCacheBatchPosition,
+    KvCacheBatchPosition,
     KvCachePool,
+    RequestKvCache,
 )
 from text_generation_server.utils.tokens import (
-    StopSequenceCriteria,
-    StoppingCriteria,
     FinishReason,
 )
 from text_generation_server.layers.flashinfer_attention import find_padded_head_dim
@@ -20,119 +20,24 @@ import time
 from opentelemetry import trace
 from typing import Optional, Tuple, List, Type, Dict
 from text_generation_server.models import Model
-from text_generation_server.models.causal_lm import CausalLMBatch
 from text_generation_server.models.types import (
-    Batch,
     Tokens,
     Generation,
     GeneratedText,
 )
-from text_generation_server.utils import (
-    NextTokenChooser,
-    StoppingCriteria,
-)
 from text_generation_server.utils.dist import MEMORY_FRACTION
 from dataclasses import dataclass
+from collections.abc import Iterable
+from text_generation_server.cache import Cache
 
 tracer = trace.get_tracer(__name__)
-
-
-class TextGenerationChunk(TypedDict):
-    index: int
-    token_id: int
-    text: str
-    is_stop: bool
-
-
-@dataclass
-class FlashinferBatch(CausalLMBatch):
-    @classmethod
-    def Empty(cls, batch_id):
-        return cls(
-            batch_id=batch_id,
-            requests=None,
-            prefix_offsets=None,
-            read_offsets=None,
-            next_token_choosers=None,
-            stopping_criterias=None,
-            top_n_tokens=None,
-            top_n_tokens_tensor=None,
-            input_ids=None,
-            requests_idx_mapping=None,
-            attention_mask=None,
-            position_ids=None,
-            past_key_values=None,
-            all_input_ids=None,
-            input_lengths=None,
-            max_input_length=None,
-            padding_right_offset=None,
-            max_tokens=None,
-        )
-
-    @classmethod
-    def from_pb(
-        cls,
-        pb: generate_pb2.Batch,
-        tokenizer: PreTrainedTokenizerBase = None,
-        dtype: torch.dtype = None,
-        device: torch.device = "cuda",
-    ) -> "CausalLMBatch":
-        input_ids = []
-        next_token_choosers = []
-        stopping_criterias = []
-        top_n_tokens = []
-        prefix_offsets = []
-        read_offsets = []
-
-        # Parse batch
-        for i, r in enumerate(pb.requests):
-            prompt = r.inputs
-
-            next_token_choosers.append(
-                NextTokenChooser.from_pb(r.parameters, device, tokenizer)
-            )
-            stopping_criteria = StoppingCriteria.from_pb(
-                r.stopping_parameters, tokenizer
-            )
-            stopping_criterias.append(stopping_criteria)
-            top_n_tokens.append(r.top_n_tokens)
-            tokenized_inputs = tokenizer.encode(prompt)
-            input_len = len(tokenized_inputs)
-            prefix_offsets.append(input_len - 5)
-            read_offsets.append(input_len)
-            input_ids.append(tokenized_inputs)
-
-        top_n_tokens_tensor = torch.tensor(
-            top_n_tokens, device=device, dtype=torch.int64
-        )
-
-        return cls(
-            batch_id=pb.id,
-            requests=pb.requests,
-            requests_idx_mapping=None,
-            input_ids=input_ids,
-            attention_mask=None,
-            position_ids=None,
-            past_key_values=None,
-            all_input_ids=None,
-            input_lengths=None,
-            prefix_offsets=prefix_offsets,
-            read_offsets=read_offsets,
-            next_token_choosers=next_token_choosers,
-            stopping_criterias=stopping_criterias,
-            top_n_tokens=top_n_tokens,
-            top_n_tokens_tensor=top_n_tokens_tensor,
-            max_input_length=None,
-            padding_right_offset=None,
-            max_tokens=None,
-        )
 
 
 class RequestContext:
     def __init__(
         self,
+        request_id: str,
         input_ids: list[int],
-        lora_id: str,
         tokenizer,
         *,
         temperature: float,
@@ -141,8 +46,12 @@ class RequestContext:
         top_k: int,
         maxlen: int,
         stop_token_id: int,
+        is_stopped: bool,
+        request_kv_cache: RequestKvCache,
         prefill_logprobs: bool = True,
+        lora_id: str = "empty",
     ):
+        self.request_id = request_id
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.top_p = top_p
@@ -172,6 +81,9 @@ class RequestContext:
         self.tokenizer = tokenizer
         self.prefix_offset = 0
         self.read_offset = 0
+        self.is_stopped = is_stopped
+        self.prefill_tokens: Optional[Tokens] = None
+        self.request_kv_cache = request_kv_cache
 
     def get_next_token_id(self, logits: torch.Tensor) -> int:
         if self.logits_processor:
@@ -194,15 +106,34 @@ class RequestContext:
     def append_token(self, token_id: int):
         self.output_ids.append(token_id)
 
-    def is_stop(self) -> FinishReason:
+    def get_stop_reason(self) -> FinishReason:
         if len(self.output_ids) - self.prompt_len >= self.maxlen:
             return FinishReason.FINISH_REASON_LENGTH
         if self.output_ids[-1] == self.stop_token_id:
             return FinishReason.FINISH_REASON_EOS_TOKEN
         return None
 
-    def is_prefill(self) -> bool:
-        return len(self.output_ids) == self.prompt_len
+
+@dataclass(frozen=True)
+class FlashinferBatch:
+    batch_id: int
+    is_prefill: bool
+    request_contexts: List[RequestContext]
+
+    def to_pb(self) -> generate_pb2.CachedBatch:
+
+        max_input_length = max([r.prompt_len for r in self.request_contexts])
+        max_decode_tokens = max([r.maxlen for r in self.request_contexts])
+        max_tokens = len(self.request_contexts) * (max_input_length + max_decode_tokens)
+
+        return generate_pb2.CachedBatch(
+            id=self.batch_id,
+            request_ids=[
+                request_context.request_id for request_context in self.request_contexts
+            ],
+            size=len(self.request_contexts),
+            max_tokens=max_tokens,
+        )
 
 
 class FlashinferLM(Model):
@@ -213,11 +144,12 @@ class FlashinferLM(Model):
         config: PretrainedConfig,
         dtype: torch.dtype,
         device: torch.device,
-        lora_ids: List[str] = None,
+        lora_ids: List[str],
     ):
         self.device = device
         self.dtype = dtype
         self.model_config = config
+        self.batch_cache = Cache()
 
         if (
             torch.cuda.is_available()
@@ -267,7 +199,7 @@ class FlashinferLM(Model):
             f"  Number of Pages to Allocate: {num_pages_to_allocate}"
         )
 
-        kvCachePool = KvCachePool(
+        self.kvCachePool = KvCachePool(
             max_pages=num_pages_to_allocate,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
@@ -277,7 +209,6 @@ class FlashinferLM(Model):
             device=device,
         )
 
-        self.modelKvCache = ModelKvCache(kvCachePool)
         self.model_config_for_lora = ModelConfigForLora(
             num_hidden_layers=config.num_hidden_layers,
             hidden_size=config.hidden_size,
@@ -287,11 +218,7 @@ class FlashinferLM(Model):
         )
 
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype)
-        if lora_ids:
-            self.loraManager.set_lora_weights(
-                lora_ids, self.model_config_for_lora or {}, dtype
-            )
-        self.reqctx: dict[int, RequestContext] = {}
+        self.loraManager.set_lora_weights(lora_ids, self.model_config_for_lora, dtype)
 
         super(FlashinferLM, self).__init__(
             model=model,
@@ -300,13 +227,6 @@ class FlashinferLM(Model):
             dtype=dtype,
             device=device,
         )
-
-    def _find_padded_head_dim(self, head_dim):
-        flashInferDimensions = [64, 128, 256]
-        for dim in flashInferDimensions:
-            if head_dim <= dim:
-                return dim
-        raise ValueError("The head dimension is too large for FlashInfer")
 
     def load_lora_adapters(self, lora_ids: List[str]):
         self.loraManager.set_lora_weights(
@@ -321,50 +241,99 @@ class FlashinferLM(Model):
     def get_lora_adapters(self):
         return list(self.loraManager.lora_weights_cpu)
 
-    def has_request(self):
-        return len(self.reqctx) > 0
+    def decode_batch(
+        self, cachedBatchesPb: Iterable[generate_pb2.CachedBatch]
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int], int]:
+        start_concat = time.time_ns()
+        batch = self._convertCachedBatch(cachedBatchesPb)
+        concat_ns = time.time_ns() - start_concat
+        generations, next_batch, timings = self.generate_token(batch)
+        if next_batch:
+            self.batch_cache.set(next_batch)
+        return generations, batch, timings, concat_ns
 
-    @property
-    def batch_type(self) -> Type[FlashinferBatch]:
-        return FlashinferBatch
+    def prefill_batch(
+        self, batchPb: generate_pb2.Batch
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
+        batch = self._convertPbBatch(batchPb)
+        generations, next_batch, timings = self.generate_token(batch)
+        if next_batch:
+            self.batch_cache.set(next_batch)
+        return generations, batch, timings
 
-    def decode(self, generated_ids: List[int]) -> str:
-        return self.tokenizer.decode(
-            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    def clear_cache(self):
+        all_batches: List[FlashinferBatch] = self.batch_cache.get_all_values()
+        for batch in all_batches:
+            for request_context in batch.request_contexts:
+                request_context.request_kv_cache.release()
+
+        self.batch_cache.clear()
+
+    def _find_padded_head_dim(self, head_dim):
+        flashInferDimensions = [64, 128, 256]
+        for dim in flashInferDimensions:
+            if head_dim <= dim:
+                return dim
+        raise ValueError("The head dimension is too large for FlashInfer")
+
+    def _convertPbBatch(self, batchPb: generate_pb2.Batch) -> FlashinferBatch:
+        request_contexts = []
+
+        for request in batchPb.requests:
+            prompt = request.inputs
+            input_ids = self.tokenizer.encode(prompt)
+            parameters = request.parameters
+            request_context = RequestContext(
+                request.id,
+                input_ids,
+                self.tokenizer,
+                temperature=parameters.temperature,
+                repetition_penalty=parameters.repetition_penalty,
+                top_p=parameters.top_p,
+                top_k=parameters.top_k,
+                maxlen=min(request.stopping_parameters.max_new_tokens, 4096),
+                stop_token_id=self.tokenizer.eos_token_id,
+                is_stopped=False,
+                request_kv_cache=RequestKvCache(
+                    self.kvCachePool,
+                    self.kvCachePool.page_len,
+                    len(input_ids),
+                ),
+                prefill_logprobs=request.prefill_logprobs,
+                lora_id=request.lora_id,
+            )
+
+            request_contexts.append(request_context)
+
+        return FlashinferBatch(
+            batch_id=batchPb.id, is_prefill=True, request_contexts=request_contexts
         )
 
-    def add_request(self, batch: FlashinferBatch):
-        ids = []
-        for r in range(len(batch.requests)):
-            id = batch.requests[r].id
-            # Router sends initial request in each iteration
-            if id not in self.reqctx:
-                lora_id = batch.requests[r].lora_id or "empty"
-                input = batch.input_ids[r]
-                parameters = batch.requests[r].parameters
-                stop = batch.requests[r].stopping_parameters
-                prefill_logprobs = batch.requests[r].prefill_logprobs
+    def _convertCachedBatch(
+        self, cachedBatchesPb: Iterable[generate_pb2.CachedBatch]
+    ) -> FlashinferBatch:
+        batches: List[FlashinferBatch] = []
+        for batch_pb in cachedBatchesPb:
+            batch = self.batch_cache.pop(batch_pb.id)
+            if batch is None:
+                raise ValueError(f"Batch ID {batch_pb.id} not found in cache.")
+            batches.append(batch)
 
-                if lora_id not in self.loraManager.lora_weights_cpu:
-                    raise ValueError("Cannot find lora weights", lora_id)
+        if len(batches) == 0:
+            raise ValueError("All batches are empty")
 
-                self.reqctx[id] = RequestContext(
-                    input,
-                    lora_id,
-                    self.tokenizer,
-                    temperature=parameters.temperature,
-                    repetition_penalty=parameters.repetition_penalty,
-                    top_p=parameters.top_p,
-                    top_k=parameters.top_k,
-                    maxlen=min(stop.max_new_tokens, 4096),
-                    stop_token_id=self.tokenizer.eos_token_id,
-                    prefill_logprobs=prefill_logprobs,
-                )
-                ids.append(id)
-        return ids
+        request_contexts_combined: List[RequestContext] = []
+        for batch in batches:
+            request_contexts_combined.extend(batch.request_contexts)
 
-    def warmup(self, batch: FlashinferBatch):
-        pass
+        return FlashinferBatch(
+            batch_id=batches[0].batch_id,
+            is_prefill=False,
+            request_contexts=request_contexts_combined,
+        )
+
+    def batch_type(self):
+        return FlashinferBatch
 
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
@@ -372,64 +341,48 @@ class FlashinferLM(Model):
         self, batch: FlashinferBatch
     ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
         start = time.time_ns()
+        input_ids, lora_ids, lora_lens = [], [], []
+        request_kv_caches = []
+        for request_context in batch.request_contexts:
+            if not request_context.is_stopped:
+                if batch.is_prefill:
+                    input_ids.extend(request_context.output_ids)
+                else:
+                    input_ids.append(request_context.output_ids[-1])
+                request_kv_caches.append(request_context.request_kv_cache)
+                if not batch.is_prefill:
+                    request_context.request_kv_cache.increment()
 
-        if hasattr(batch, "requests") and batch.requests:
-            ids = self.add_request(batch)
+                if lora_ids and lora_ids[-1] == request_context.lora_id:
+                    lora_lens[-1] += 1
+                else:
+                    lora_ids.append(request_context.lora_id)
+                    lora_lens.append(1)
 
-        if not self.reqctx:
-            return None, batch, (0, 0)
-
-        reqs = sorted(
-            self.reqctx.items(),
-            key=lambda req: (not req[1].is_prefill(), req[1].lora_id),
-        )
-
-        input_ids = []
-        lora_ids, lora_lens = [], []
-        batchKvCache = self.modelKvCache.getOrCreate(batch.batch_id)
-        prefill_reqIds = []
-        decode_reqIds = []
-
-        for requestId, req in reqs:
-            req.prefill = req.is_prefill()
-            if req.prefill:
-                input_ids.extend(req.output_ids)
-                prefill_reqIds.append(requestId)
-                batchKvCache.create(requestId, req.prompt_len)
-            else:
-                input_ids.append(req.output_ids[-1])
-                decode_reqIds.append(requestId)
-                batchKvCache.get(requestId).increment()
-            if lora_ids and lora_ids[-1] == req.lora_id:
-                lora_lens[-1] += 1
-            else:
-                lora_ids.append(req.lora_id)
-                lora_lens.append(1)
-
-        input_ids = torch.tensor(
+        input_ids_tensor = torch.tensor(
             input_ids,
             dtype=torch.long,
             device=self.device,
         )
 
-        prefillBatchPosition = batchKvCache.getKvCacheBatchPosition(
-            prefill_reqIds, isPrefill=True
+        request_kv_caches_prefill = request_kv_caches if batch.is_prefill else []
+        request_kv_caches_decode = [] if batch.is_prefill else request_kv_caches
+        prefillBatchPosition: KvCacheBatchPosition = getKvCacheBatchPosition(
+            request_kv_caches_prefill, isPrefill=True, device=self.device
         )
-        decodeBatchPosition = batchKvCache.getKvCacheBatchPosition(
-            decode_reqIds, isPrefill=False
+        decodeBatchPosition: KvCacheBatchPosition = getKvCacheBatchPosition(
+            request_kv_caches_decode, isPrefill=False, device=self.device
         )
 
-        # Forward pass
         raw_logits, _ = self.model(
-            input_ids,
-            self.modelKvCache.kvCachePool,
+            input_ids_tensor,
+            self.kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
             self.loraManager.get_lora_batched_weights(lora_ids, lora_lens),
         )
 
         start_decode = time.time_ns()
-
         prefill_logits = (
             raw_logits[prefillBatchPosition.seq_indptr[1:] - 1]
             if prefillBatchPosition.total_seq_len > 0
@@ -440,50 +393,58 @@ class FlashinferLM(Model):
 
         all_stop = True
         generations: List[Generation] = []
-        for i, (reqid, reqctx) in enumerate(reqs):
-            next_token_id = reqctx.get_next_token_id(logits[i].unsqueeze(0))
-            reqctx.append_token(next_token_id)
+        num_stopped_requests = 0
+        for i, request_context in enumerate(batch.request_contexts):
+            if request_context.is_stopped:
+                num_stopped_requests += 1
+                continue
+            next_token_id = request_context.get_next_token_id(
+                logits[i - num_stopped_requests].unsqueeze(0)
+            )
+            request_context.append_token(next_token_id)
             # text = reqctx.decode_tokens() # todo: ??
             # special handling for ChatGLM
-            if 'ChatGLM' in str(type(self.model)):
+            if "ChatGLM" in str(type(self.model)):
                 text = self.tokenizer.decode(
                     [next_token_id],
                     clean_up_tokenization_spaces=False,
-                    skip_special_tokens=False
+                    skip_special_tokens=False,
                 )
             else:
                 text = self.tokenizer.decode(
                     next_token_id,
                     clean_up_tokenization_spaces=False,
-                    skip_special_tokens=False
-                ) 
+                    skip_special_tokens=False,
+                )
 
-            is_stop = reqctx.is_stop()
-            if is_stop != None:
+            stop_reason = request_context.get_stop_reason()
+            if stop_reason != None:
                 output_text = self.tokenizer.decode(
-                    reqctx.output_ids[reqctx.prompt_len :],
+                    request_context.output_ids[request_context.prompt_len :],
                     clean_up_tokenization_spaces=False,
                     skip_special_tokens=False,
                 )
                 generated_text = GeneratedText(
                     output_text,
-                    len(reqctx.output_ids) - reqctx.prompt_len + 1,
-                    is_stop,
+                    len(request_context.output_ids) - request_context.prompt_len + 1,
+                    stop_reason,
                     None,
                 )
-                self.reqctx.pop(reqid)
-                batchKvCache.release(reqid)
+                request_context.is_stopped = True
+                request_context.request_kv_cache.release()
             else:
                 generated_text = None
                 all_stop = False
 
             # Prefill
-            if reqctx.prefill:  # and reqctx.prefill_logprobs:
+            if batch.is_prefill:  # and request_context.prefill_logprobs:
                 # Remove generated token to only have prefill and add nan for first prompt token
                 prefill_logprobs = []  # todo
-                prefill_token_ids = reqctx.output_ids[: reqctx.prompt_len]
+                prefill_token_ids = request_context.output_ids[
+                    : request_context.prompt_len
+                ]
                 # special handling for ChatGLM
-                if 'ChatGLM' in str(type(self.model)):
+                if "ChatGLM" in str(type(self.model)):
                     prefill_texts = self.tokenizer.batch_decode(
                         [prefill_token_ids],
                         clean_up_tokenization_spaces=False,
@@ -495,20 +456,19 @@ class FlashinferLM(Model):
                         clean_up_tokenization_spaces=False,
                         skip_special_tokens=False,
                     )
-
-                reqctx.prefill_tokens = Tokens(
+                request_context.prefill_tokens = Tokens(
                     prefill_token_ids,
                     prefill_logprobs,
                     prefill_texts,
                     is_special=[],
                 )
-                reqctx.prefix_offset = reqctx.prompt_len
+                request_context.prefix_offset = request_context.prompt_len
             else:
-                reqctx.prefill_tokens = None
+                request_context.prefill_tokens = None
 
             generation = Generation(
-                reqid,
-                reqctx.prefill_tokens,
+                request_context.request_id,
+                request_context.prefill_tokens,
                 Tokens(
                     [next_token_id],
                     [0],  # prob
@@ -525,5 +485,6 @@ class FlashinferLM(Model):
         decode_ns = time.time_ns() - start_decode
         # The router stops generation only when batch=None
         if all_stop:
-            batch = None
-        return generations, batch, (forward_ns, decode_ns)
+            return generations, None, (forward_ns, decode_ns)
+        else:
+            return generations, batch, (forward_ns, decode_ns)

@@ -41,7 +41,7 @@ class KvCachePool:
         self.device = device
         self.max_pages = max_pages
         self.page_len = page_len
-        self.free_page_mask = torch.ones(max_pages, dtype=torch.bool, device=device)
+        self.free_page_mask = torch.ones(max_pages, dtype=torch.bool, device="cpu")
 
     def allocate(self, num_pages: int):
         free_page_indices = self.free_page_mask.nonzero()
@@ -65,6 +65,7 @@ class RequestKvCache:
         self.kv_last_page_len = seq_init_len - (init_num_pages - 1) * self.page_len
         self.kv_page_indices = kvCachePool.allocate(init_num_pages)
         self.kv_len = seq_init_len
+        self.is_released = False
 
     def increment(self):
         self.kv_len += 1
@@ -76,92 +77,48 @@ class RequestKvCache:
 
     def release(self):
         self.kvCachePool.deallocate(self.kv_page_indices)
+        self.is_released = True
 
 
-class BatchKvCache:
-    def __init__(self, kvCachePool: KvCachePool, page_len, device):
-        self.kvCachePool = kvCachePool
-        self.page_len = page_len
-        self.device = device
-        self.kvCacheDict: dict[int, RequestKvCache] = {}
-
-    def get(self, req_id):
-        return self.kvCacheDict.get(req_id)
-
-    def create(self, req_id, seq_init_len):
-        self.kvCacheDict[req_id] = RequestKvCache(
-            self.kvCachePool, self.page_len, seq_init_len
-        )
-        return self.kvCacheDict[req_id]
-
-    def release(self, req_id):
-        self.kvCacheDict[req_id].release()
-        del self.kvCacheDict[req_id]
-
-    def increment(self):
-        for kvCache in self.kvCacheDict.values():
-            kvCache.increment()
-
-    def setRequestOrder(self, requestIds: List[int]):
-        self.requestIds = requestIds
-
-    def getKvCacheBatchPosition(self, requestIds: List[int], isPrefill: bool):
-        kv_page_indices_list = []
-        kv_page_indptr_list = []
-        seq_indptr_list = []
-        kv_last_page_len_list = []
-        seq_lens_list = []
-        cum_pages = 0
-        cum_seq_len = 0
-        for requestId in requestIds:
-            kvCache = self.kvCacheDict[requestId]
-            kv_page_indices_list.extend(kvCache.kv_page_indices)
-            kv_page_indptr_list.append(cum_pages)
-            seq_indptr_list.append(cum_seq_len)
-            kv_last_page_len_list.append(kvCache.kv_last_page_len)
-            seq_lens_list.append(kvCache.kv_len)
-            cum_pages += len(kvCache.kv_page_indices)
-            cum_seq_len += kvCache.kv_len if isPrefill else 1
-
+def getKvCacheBatchPosition(
+    request_kv_caches: List[RequestKvCache], isPrefill: bool, device: torch.device
+) -> KvCacheBatchPosition:
+    kv_page_indices_list = []
+    kv_page_indptr_list = []
+    seq_indptr_list = []
+    kv_last_page_len_list = []
+    seq_lens_list = []
+    cum_pages = 0
+    cum_seq_len = 0
+    for request_kv_cache in request_kv_caches:
+        kv_page_indices_list.extend(request_kv_cache.kv_page_indices)
         kv_page_indptr_list.append(cum_pages)
         seq_indptr_list.append(cum_seq_len)
-        kv_page_indices = torch.tensor(
-            kv_page_indices_list, dtype=torch.int32, device=self.device
-        )
-        kv_page_indptr = torch.tensor(
-            kv_page_indptr_list, dtype=torch.int32, device=self.device
-        )
-        kv_last_page_len = torch.tensor(
-            kv_last_page_len_list, dtype=torch.int32, device=self.device
-        )
-        seq_indptr = torch.tensor(
-            seq_indptr_list, dtype=torch.int32, device=self.device
-        )
-        seq_lens = torch.tensor(
-            seq_lens_list,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        return KvCacheBatchPosition(
-            seq_indptr=seq_indptr,
-            kv_page_indptr=kv_page_indptr,
-            kv_page_indices=kv_page_indices,
-            kv_last_page_len=kv_last_page_len,
-            seq_lens=seq_lens,
-            total_seq_len=cum_seq_len,
-        )
+        kv_last_page_len_list.append(request_kv_cache.kv_last_page_len)
+        seq_lens_list.append(request_kv_cache.kv_len)
+        cum_pages += len(request_kv_cache.kv_page_indices)
+        cum_seq_len += request_kv_cache.kv_len if isPrefill else 1
 
-
-class ModelKvCache:
-    def __init__(self, kvCachePool: KvCachePool):
-        self.kvCachePool = kvCachePool
-        self.device = kvCachePool.device
-        self.page_len = kvCachePool.page_len
-        self.batchKvCacheDict: dict[int, BatchKvCache] = {}
-
-    def getOrCreate(self, batch_id):
-        batchKvCache = self.batchKvCacheDict.get(batch_id) or BatchKvCache(
-            self.kvCachePool, self.page_len, self.device
-        )
-        self.batchKvCacheDict[batch_id] = batchKvCache
-        return batchKvCache
+    kv_page_indptr_list.append(cum_pages)
+    seq_indptr_list.append(cum_seq_len)
+    kv_page_indices = torch.tensor(
+        kv_page_indices_list, dtype=torch.int32, device=device
+    )
+    kv_page_indptr = torch.tensor(kv_page_indptr_list, dtype=torch.int32, device=device)
+    kv_last_page_len = torch.tensor(
+        kv_last_page_len_list, dtype=torch.int32, device=device
+    )
+    seq_indptr = torch.tensor(seq_indptr_list, dtype=torch.int32, device=device)
+    seq_lens = torch.tensor(
+        seq_lens_list,
+        dtype=torch.int32,
+        device=device,
+    )
+    return KvCacheBatchPosition(
+        seq_indptr=seq_indptr,
+        kv_page_indptr=kv_page_indptr,
+        kv_page_indices=kv_page_indices,
+        kv_last_page_len=kv_last_page_len,
+        seq_lens=seq_lens,
+        total_seq_len=cum_seq_len,
+    )

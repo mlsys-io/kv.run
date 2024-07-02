@@ -3,7 +3,9 @@ import torch
 from text_generation_server.models_flashinfer.flashinfer_llama import FlashinferLlama
 from text_generation_server.models_flashinfer.flashinfer_gemma import FlashinferGemma
 from text_generation_server.models_flashinfer.flashinfer_qwen2 import FlashinferQwen2
-from text_generation_server.models_flashinfer.flashinfer_chatglm import FlashinferChatGLM
+from text_generation_server.models_flashinfer.flashinfer_chatglm import (
+    FlashinferChatGLM,
+)
 import sys
 
 try:
@@ -29,13 +31,13 @@ else:
     # test = "gemma"
     # test = "llama-3"
     # test = 'llama-3-70'
-    # test = "llama-2"
+    test = "gemma"
     # test = 'mistral'
     # test = 'qwen1.5-7'
     # test = 'qwen1.5-1.8'
     # test = 'qwen1.5-70'
     # test = 'qwen2-7'
-    test = 'chatglm4'
+    # test = "chatglm4"
 print("Testing " + test)
 
 # Load demo inputs
@@ -274,10 +276,8 @@ elif test == "qwen2-7":
             promptOverride="给我讲个故事",
         ),
     ]
-    service = FlashinferQwen2(
-        model_id="Qwen/Qwen2-7B-Instruct", trust_remote_code=True
-    )
-    
+    service = FlashinferQwen2(model_id="Qwen/Qwen2-7B-Instruct", trust_remote_code=True)
+
 elif test == "chatglm4":
     # Todo: chatglm4-9b lora adapter
     requests = [
@@ -288,25 +288,23 @@ elif test == "chatglm4":
             promptOverride="给我讲个故事",
         ),
     ]
-    service = FlashinferChatGLM(
-        model_id="THUDM/glm-4-9b-chat", trust_remote_code=True
-    )
+    service = FlashinferChatGLM(model_id="THUDM/glm-4-9b-chat", trust_remote_code=True)
 
 print(service.get_lora_adapters())
 tokenizer = service.tokenizer
 
 batch = generate_pb2.Batch(id=0, requests=requests, size=len(requests))
-pb_batch = FlashinferBatch.from_pb(
-    batch, tokenizer, torch.float16, torch.device("cuda")
-)
-
-# Add input batch to model service
-ids = service.add_request(pb_batch)
 display_results = {}
 
 # Iterative generation: each step generates a token for each input in the batch
+isPrefill = True
 while True:
-    generations, _, _ = service.generate_token(FlashinferBatch.Empty(batch.id))
+    if isPrefill:
+        generations, next_batch, _ = service.prefill_batch(batch)
+        isPrefill = False
+    else:
+        generations, next_batch, _, _ = service.decode_batch([next_batch.to_pb()])
+
     for gen in generations:
         if gen.prefill_tokens:
             display_results[gen.request_id] = [
