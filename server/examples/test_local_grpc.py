@@ -46,18 +46,8 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 
 
 requests = [
-    make_input(
-        "abcdabcd987/gsm8k-llama2-7b-lora-16",
-        "base",
-        id=0,
-        promptOverride="Give me a breif introduction to Byznatine Fault Tolerance and why it is important?",
-    ),
-    make_input(
-        "abcdabcd987/gsm8k-llama2-7b-lora-16",
-        "lora",
-        id=1,
-        promptOverride="Which network interface card is more suitable for distributed systems, Meallanox or Broadcom?",
-    ),
+    make_input("tjluyao/gemma-2b-it-math", "base", id=0),
+    make_input("tjluyao/gemma-2b-it-math", "base", id=1),
 ]
 
 # Assemble input batch
@@ -78,11 +68,26 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     )
     stub.Warmup(wr)
     # Prefill
-    pr = generate_pb2.PrefillRequest(batch=pb_batch_empty)
+    pr = generate_pb2.PrefillRequest(batch=pb_batch_with_inputs)
     resp = stub.Prefill(pr)
-    gen, cbatch = resp.generations, resp.batch
-    # Decode
-    dr = generate_pb2.DecodeRequest(batches=[cbatch])
-    resp = stub.Decode(dr)
-    gen, cbatch = resp.generations, resp.batch
-    print("done")
+    generations, cbatch = resp.generations, resp.batch
+    for gen in generations:
+        print(gen.tokens.texts)
+
+    print("finished prefill tokens")
+
+    while True:
+        dr = generate_pb2.DecodeRequest(batches=[cbatch])
+        resp = stub.Decode(dr)
+        generations, cbatch = resp.generations, resp.batch
+        toExit = False
+        for gen in generations:
+            if gen.generated_text.text:
+                print("finished")
+                res = gen.generated_text.text
+                toExit = True
+
+        if toExit:
+            break
+
+    print(res)
