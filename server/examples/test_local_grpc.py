@@ -46,16 +46,8 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 
 
 requests = [
-    make_input(
-        "tjluyao/gemma-2b-it-math",
-        "base",
-        id=0
-    ),
-    make_input(
-        "tjluyao/gemma-2b-it-math",
-        "base",
-        id=1
-    ),
+    make_input("tjluyao/gemma-2b-it-math", "base", id=0),
+    make_input("tjluyao/gemma-2b-it-math", "base", id=1),
 ]
 
 # Assemble input batch
