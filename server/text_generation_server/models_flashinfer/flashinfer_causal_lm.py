@@ -218,7 +218,10 @@ class FlashinferLM(Model):
         )
 
         self.loraManager = ModelLoraManager(self.model_config_for_lora, dtype)
-        self.loraManager.set_lora_weights(lora_ids, self.model_config_for_lora, dtype)
+        if lora_ids:
+            self.loraManager.set_lora_weights(
+                lora_ids, self.model_config_for_lora, dtype
+            )
 
         super(FlashinferLM, self).__init__(
             model=model,
@@ -355,7 +358,7 @@ class FlashinferLM(Model):
 
                 if lora_ids and lora_ids[-1] == request_context.lora_id:
                     lora_lens[-1] += 1
-                else:
+                elif request_context.lora_id:
                     lora_ids.append(request_context.lora_id)
                     lora_lens.append(1)
 
@@ -374,12 +377,17 @@ class FlashinferLM(Model):
             request_kv_caches_decode, isPrefill=False, device=self.device
         )
 
+        loraWeights = (
+            self.loraManager.get_lora_batched_weights(lora_ids, lora_lens)
+            if lora_ids
+            else None
+        )
         raw_logits, _ = self.model(
             input_ids_tensor,
             self.kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
-            self.loraManager.get_lora_batched_weights(lora_ids, lora_lens),
+            loraWeights,
         )
 
         start_decode = time.time_ns()

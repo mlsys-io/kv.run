@@ -95,29 +95,20 @@ def serve(
     if use_flashinfer:
         from text_generation_server import server_flashinfer
 
-        server_flashinfer.serve(
-            model_id,
-            revision,
-            sharded,
-            quantize,
-            speculate,
-            dtype,
-            trust_remote_code,
-            uds_path,
-            lora_ids,
-        )
+        serv = server_flashinfer
     else:
-        server.serve(
-            model_id,
-            revision,
-            sharded,
-            quantize,
-            speculate,
-            dtype,
-            trust_remote_code,
-            uds_path,
-            lora_ids,
-        )
+        serv = server
+    serv.serve(
+        model_id,
+        revision,
+        sharded,
+        quantize,
+        speculate,
+        dtype,
+        trust_remote_code,
+        uds_path,
+        lora_ids,
+    )
 
 
 @app.command()

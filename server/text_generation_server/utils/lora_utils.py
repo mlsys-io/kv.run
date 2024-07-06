@@ -351,11 +351,11 @@ class ModelLoraManager:
         self, lora_ids: List[str], lora_lens: List[int]
     ) -> BatchedModelLoraWeight:
         assert len(lora_ids) <= self.lora_cap
-        for lora_id in lora_ids:
-            assert lora_id in self.lora_weights_cpu
+        # for lora_id in lora_ids:
+        #    assert lora_id in self.lora_weights_cpu
         loraweights = []
         for lora_id in lora_ids:
-            if lora_id not in self.lora_weights_gpu:
+            if lora_id and lora_id not in self.lora_weights_gpu:
                 self.lora_weights_gpu[lora_id] = self.lora_weights_cpu[lora_id]
                 self.lora_weights_gpu[lora_id].to_gpu()
         while len(self.lora_weights_gpu) > self.lora_cap:

@@ -74,9 +74,11 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
     #     return generate_pb2.FilterBatchResponse(batch=filtered_batch.to_pb())
 
     async def Warmup(self, request, context):
-        pass
+        return generate_pb2.WarmupResponse(
+            max_supported_total_tokens=request.max_total_tokens
+        )
 
-    async def Prefill(self, request: generate_pb2.PrefillRequest):
+    async def Prefill(self, request, context):
         start = time.time_ns()
         generations, next_batch, timings = self.model.prefill_batch(request.batch)
         return generate_pb2.PrefillResponse(
@@ -87,7 +89,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
             total_ns=time.time_ns() - start,
         )
 
-    async def Decode(self, request: generate_pb2.DecodeRequest):
+    async def Decode(self, request, context):
         start = time.time_ns()
         generations, next_batch, timings, concat_ns = self.model.decode_batch(
             request.batches
