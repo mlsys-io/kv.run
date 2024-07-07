@@ -253,7 +253,7 @@ class FlashinferLM(Model):
         generations, next_batch, timings = self.generate_token(batch)
         if next_batch:
             self.batch_cache.set(next_batch)
-        return generations, batch, timings, concat_ns
+        return generations, next_batch, timings, concat_ns
 
     def prefill_batch(
         self, batchPb: generate_pb2.Batch
