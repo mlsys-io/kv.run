@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "benchmark",
+    "router",
+    "router/client",
+    "router/grpc-metadata",
+    "launcher"
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.5-dev0"
+edition = "2021"
+authors = ["Olivier Dehaene"]
+homepage = "https://github.com/huggingface/text-generation-inference"
+
+[workspace.dependencies]
+tokenizers = { version = "0.19.1", features = ["http"] }
+hf-hub = { version = "0.3.1", features = ["tokio"] }
+bitstream-io = { version = "2.3.0" }
+
+[profile.release]
+debug = 1
+incremental = true
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+panic = "abort"

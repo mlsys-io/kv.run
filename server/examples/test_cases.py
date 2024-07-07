@@ -7,11 +7,13 @@ import numpy as np
 import torch
 from typing import Optional
 
+
 @dataclasses.dataclass
 class LoraSpec:
     lora_prompts: list[str]
     base_prompts: list[str]
     weight_path: Optional[str] = None
+
 
 @dataclasses.dataclass
 class DemoSpec:
@@ -142,6 +144,7 @@ DEMO["tjluyao/llama-3-8b-oaast"] = DemoSpec(
 """,
 )
 
+DEMO["Dogge/llama-3-70B-instruct-uncensored-lora"] = DEMO["tjluyao/llama-3-8b-oaast"]
 
 DEMO["abcdabcd987/gsm8k-llama2-7b-lora-16"] = DemoSpec(
     weight_url="https://huggingface.co/abcdabcd987/gsm8k-llama2-7b-lora-16/resolve/main/gsm8k-r16.punica.pt",

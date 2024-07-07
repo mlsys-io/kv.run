@@ -1,4 +1,7 @@
-from text_generation_server.models.flashinfer_causal_lm import FlashinferLM, FlashinferBatch
+from text_generation_server.models.flashinfer_causal_lm import (
+    FlashinferLM,
+    FlashinferBatch,
+)
 
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
 
@@ -25,8 +28,11 @@ warnings.filterwarnings(
     "ignore", category=UserWarning, message="TypedStorage is deprecated"
 )
 
+
 class MultiLora:
-    def __init__(self, base_model, model_type, lora_ids, lora_specs: dict[str, LoraSpec]):
+    def __init__(
+        self, base_model, model_type, lora_ids, lora_specs: dict[str, LoraSpec]
+    ):
         self.device = torch.device("cuda:0")
         self.lora_specs = lora_specs
         self.stop_signal = threading.Event()
@@ -67,16 +73,17 @@ class MultiLora:
                 repetition_penalty=1.1,
             ),
             stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-                max_new_tokens=2048,
-                stop_sequences=[],
-                ignore_eos_token=True),
-            lora_id=lora_id
+                max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
+            ),
+            lora_id=lora_id,
         )
-        batch = generate_pb2.Batch(id = 0, requests = [request], size = 1)
-        pb_batch = FlashinferBatch.from_pb(batch, self.tokenizer, torch.float16, torch.device("cuda"))
+        batch = generate_pb2.Batch(id=0, requests=[request], size=1)
+        pb_batch = FlashinferBatch.from_pb(
+            batch, self.tokenizer, torch.float16, torch.device("cuda")
+        )
         self.model.add_request(pb_batch)
-        self.id+=1
-        return self.id-1, prompt
+        self.id += 1
+        return self.id - 1, prompt
 
     def stop(self):
         self.stop_signal.set()
@@ -87,18 +94,20 @@ class MultiLora:
     ):
         time.sleep(0.1)
         while not self.stop_signal.is_set():
-            generations, _, timing = self.model.generate_token(FlashinferBatch.from_pb(generate_pb2.Batch()))
+            generations, _, timing = self.model.generate_token(
+                FlashinferBatch.from_pb(generate_pb2.Batch())
+            )
             for gen in generations:
-                append_box('-'.join(self.reqname[gen.request_id]), gen.tokens.texts[0])
+                append_box("-".join(self.reqname[gen.request_id]), gen.tokens.texts[0])
 
             for gen in generations:
-                if gen.generated_text: # finished
-                    append_box('-'.join(self.reqname[gen.request_id]), "\n------\n\n")
+                if gen.generated_text:  # finished
+                    append_box("-".join(self.reqname[gen.request_id]), "\n------\n\n")
                     model_name, lora_or_base = self.reqname[gen.request_id]
                     nid, prompt = self._create_request(model_name, lora_or_base)
                     self.reqname[nid] = (model_name, lora_or_base)
-                    append_box('-'.join(self.reqname[nid]), prompt)
-            assert(len(self.model.reqctx) == 6)
+                    append_box("-".join(self.reqname[nid]), prompt)
+            assert len(self.model.reqctx) == 6
 
 
 class TailLog(Label):
@@ -116,6 +125,7 @@ class TailLog(Label):
         last_line = self._lines.pop()
         self._last_line_text = last_line.plain.rstrip()
         self.update(Lines(self._lines + [last_line]))
+
 
 class MultiLoraTui(App):
     CSS = """
@@ -137,7 +147,7 @@ class MultiLoraTui(App):
     class AppendBox(Message):
         def __init__(self, box_id: str, text: str):
             super().__init__()
-            self.box_id = box_id.replace('/', '--')
+            self.box_id = box_id.replace("/", "--")
             self.text = text
 
     def __init__(self, model_names: list[str]):
@@ -148,7 +158,7 @@ class MultiLoraTui(App):
         yield Header()
         with Vertical():
             for model_name in self._model_names:
-                model_name = model_name.replace('/', '--')
+                model_name = model_name.replace("/", "--")
                 with Horizontal():
                     box_lora = TailLog(id=f"{model_name}-lora", classes="box")
                     box_lora.border_title = f"{model_name}: LoRA finetuned model"
@@ -163,7 +173,8 @@ class MultiLoraTui(App):
     def on_multi_lora_tui_append_box(self, msg: AppendBox):
         self.query_one(f"#{msg.box_id}").write(msg.text)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     project_root = pathlib.Path(__file__).parents[1]
     model_dir = project_root / "model"
 
@@ -174,9 +185,11 @@ if __name__ == '__main__':
     #            'abcdabcd987/viggo-llama2-7b-lora-16']
     base_model = "tjluyao/llama-3-8b"
     model_type = "llama"
-    lora_ids = ['tjluyao/llama-3-8b-math',
-                'tjluyao/llama-3-8b-oaast',
-                'tjluyao/llama-3-8b-zh']
+    lora_ids = [
+        "tjluyao/llama-3-8b-math",
+        "tjluyao/llama-3-8b-oaast",
+        "tjluyao/llama-3-8b-zh",
+    ]
 
     lora_specs = {}
     for name, spec in DEMO.items():

@@ -5,17 +5,17 @@
 Token streaming is the mode in which the server returns the tokens one by one as the model generates them. This enables showing progressive generations to the user rather than waiting for the whole generation. Streaming is an essential aspect of the end-user experience as it reduces latency, one of the most critical aspects of a smooth experience.
 
 <div class="flex justify-center">
-    <img 
-        class="block dark:hidden" 
+    <img
+        class="block dark:hidden"
         src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/tgi/streaming-generation-visual_360.gif"
     />
-    <img 
-        class="hidden dark:block" 
+    <img
+        class="hidden dark:block"
         src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/tgi/streaming-generation-visual-dark_360.gif"
     />
 </div>
 
-With token streaming, the server can start returning the tokens one by one before having to generate the whole response. Users can have a sense of the generation's quality earlier than the end of the generation. This has different positive effects:
+With token streaming, the server can start returning the tokens one by one before having to generate the whole response. Users can have a sense of the generation's quality before the end of the generation. This has different positive effects:
 
 * Users can get results orders of magnitude earlier for extremely long queries.
 * Seeing something in progress allows users to stop the generation if it's not going in the direction they expect.
@@ -25,14 +25,14 @@ With token streaming, the server can start returning the tokens one by one befor
 For example, a system can generate 100 tokens per second. If the system generates 1000 tokens, with the non-streaming setup, users need to wait 10 seconds to get results. On the other hand, with the streaming setup, users get initial results immediately, and although end-to-end latency will be the same, they can see half of the generation after five seconds. Below you can see an interactive demo that shows non-streaming vs streaming side-by-side. Click **generate** below.
 
 <div class="block dark:hidden">
-	<iframe 
+	<iframe
         src="https://osanseviero-streaming-vs-non-streaming.hf.space?__theme=light"
         width="850"
         height="350"
     ></iframe>
 </div>
 <div class="hidden dark:block">
-    <iframe 
+    <iframe
         src="https://osanseviero-streaming-vs-non-streaming.hf.space?__theme=dark"
         width="850"
         height="350"
@@ -43,7 +43,7 @@ For example, a system can generate 100 tokens per second. If the system generate
 
 ### Streaming with Python
 
-To stream tokens with `InferenceClient`, simply pass `stream=True` and iterate over the response. 
+To stream tokens with `InferenceClient`, simply pass `stream=True` and iterate over the response.
 
 ```python
 from huggingface_hub import InferenceClient
@@ -116,7 +116,7 @@ curl -N 127.0.0.1:8080/generate_stream \
 First, we need to install the `@huggingface/inference` library.
 `npm install @huggingface/inference`
 
-If you're using the free Inference API, you can use `HfInference`. If you're using inference endpoints, you can use `HfInferenceEndpoint`. Let's 
+If you're using the free Inference API, you can use `HfInference`. If you're using inference endpoints, you can use `HfInferenceEndpoint`.
 
 We can create a `HfInferenceEndpoint` providing our endpoint URL and credential.
 
@@ -129,7 +129,7 @@ const hf = new HfInferenceEndpoint('https://YOUR_ENDPOINT.endpoints.huggingface.
 const prompt = 'What can you do in Nuremberg, Germany? Give me 3 Tips'
 
 const stream = hf.textGenerationStream({ inputs: prompt })
-for await (const r of stream) { 
+for await (const r of stream) {
   // yield the generated token
   process.stdout.write(r.token.text)
 }

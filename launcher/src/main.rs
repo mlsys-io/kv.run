@@ -55,6 +55,10 @@ enum Quantization {
     /// Should be a drop-in replacement to bitsandbytes with much better performance.
     /// Kernels are from <https://github.com/NetEase-FuXi/EETQ.git>
     Eetq,
+    /// Variable bit quantization. Requires a specific EXL2 quantized model:
+    /// <https://hf.co/models?search=exl2>. Requires exllama2 kernels and does
+    /// not support tensor parallelism (num_shard > 1).
+    Exl2,
     /// 4 bit quantization. Requires a specific GTPQ quantized model: <https://hf.co/models?search=gptq>.
     /// text-generation-inference will use exllama (faster) kernels wherever possible, and use
     /// triton kernel (wider support) when it's not.
@@ -94,6 +98,9 @@ impl std::fmt::Display for Quantization {
             }
             Quantization::BitsandbytesFP4 => {
                 write!(f, "bitsandbytes-fp4")
+            }
+            Quantization::Exl2 => {
+                write!(f, "exl2")
             }
             Quantization::Gptq => {
                 write!(f, "gptq")
@@ -478,7 +485,7 @@ fn shard_manager(
     status_sender: mpsc::Sender<ShardStatus>,
     shutdown: Arc<AtomicBool>,
     _shutdown_sender: mpsc::Sender<()>,
-    lora_ids: String
+    lora_ids: String,
 ) {
     // Enter shard-manager tracing span
     let _span = tracing::span!(tracing::Level::INFO, "shard-manager", rank = rank).entered();
@@ -502,7 +509,7 @@ fn shard_manager(
         "--json-output".to_string(),
     ];
 
-    if lora_ids != "empty".to_string() {
+    if lora_ids != *"empty" {
         shard_args.push("--lora-ids".to_string());
         shard_args.push(lora_ids.clone());
     }
@@ -1001,12 +1008,11 @@ fn download_convert_model(args: &Args, running: Arc<AtomicBool>) -> Result<(), L
     Ok(())
 }
 
-
 fn download_lora_adapters(args: &Args, running: Arc<AtomicBool>) -> Result<(), LauncherError> {
     // Enter download tracing span
     let _span = tracing::span!(tracing::Level::INFO, "download").entered();
 
-    let mut download_args = vec![
+    let download_args = vec![
         "download-lora-adapters".to_string(),
         args.lora_ids.to_string(),
     ];
@@ -1149,6 +1155,7 @@ fn spawn_shards(
         let rope_factor = args.rope_factor;
         let max_batch_size = args.max_batch_size;
         let lora_ids = args.lora_ids.clone();
+
         thread::spawn(move || {
             shard_manager(
                 model_id,
@@ -1402,16 +1409,6 @@ fn terminate(process_name: &str, mut process: Child, timeout: Duration) -> io::R
 }
 
 fn main() -> Result<(), LauncherError> {
-    match Command::new("ldconfig").spawn() {
-        Ok(_) => {}
-        Err(err) => {
-            tracing::warn!(
-                "Unable to refresh ldconfig cache. Skipping (useless in most cases). Details {:?}",
-                err
-            )
-        }
-    }
-
     // Pattern match configuration
     let args: Args = Args::parse();
 
@@ -1591,6 +1588,11 @@ fn main() -> Result<(), LauncherError> {
 
     let num_shard = find_num_shards(args.sharded, args.num_shard)?;
     if num_shard > 1 {
+        if matches!(args.quantize, Some(Quantization::Exl2)) {
+            return Err(LauncherError::ArgumentValidation(
+                "Sharding is currently not supported with `exl2` quantization".into(),
+            ));
+        }
         tracing::info!("Sharding model on {num_shard} processes");
     }
 
@@ -1635,7 +1637,7 @@ fn main() -> Result<(), LauncherError> {
     download_convert_model(&args, running.clone())?;
 
     // Download LoRA adapters
-    if args.lora_ids != "empty".to_string() {
+    if args.lora_ids != *"empty" {
         download_lora_adapters(&args, running.clone())?;
     }
 

@@ -7,7 +7,7 @@ from loguru import logger
 from typing import Optional
 from enum import Enum
 from huggingface_hub import hf_hub_download
-from text_generation_server.utils.lora_utils import load_lora_weights
+from text_generation_server.utils import load_lora_weights
 
 
 app = typer.Typer()
@@ -20,6 +20,7 @@ class Quantization(str, Enum):
     gptq = "gptq"
     awq = "awq"
     eetq = "eetq"
+    exl2 = "exl2"
     fp8 = "fp8"
 
 
@@ -42,6 +43,7 @@ def serve(
     logger_level: str = "INFO",
     json_output: bool = False,
     otlp_endpoint: Optional[str] = None,
+    use_flashinfer: Optional[bool] = True,
 ):
     if sharded:
         assert (
@@ -89,7 +91,14 @@ def serve(
         raise RuntimeError(
             "Only 1 can be set between `dtype` and `quantize`, as they both decide how goes the final model."
         )
-    server.serve(
+
+    if use_flashinfer:
+        from text_generation_server import server_flashinfer
+
+        serv = server_flashinfer
+    else:
+        serv = server
+    serv.serve(
         model_id,
         revision,
         sharded,
@@ -98,8 +107,9 @@ def serve(
         dtype,
         trust_remote_code,
         uds_path,
-        lora_ids
+        lora_ids,
     )
+
 
 @app.command()
 def download_lora_adapters(
@@ -118,8 +128,9 @@ def download_lora_adapters(
         backtrace=True,
         diagnose=False,
     )
-    for lora_id in lora_ids.split(';'):
+    for lora_id in lora_ids.split(";"):
         load_lora_weights(lora_id)
+
 
 @app.command()
 def download_weights(
@@ -274,7 +285,7 @@ def download_weights(
     if auto_convert:
         if not trust_remote_code:
             logger.warning(
-                f"????????BREAKING CHANGE in 2.0????????: Safetensors conversion is disabled without `--trust-remote-code` because "
+                f"🚨🚨BREAKING CHANGE in 2.0🚨🚨: Safetensors conversion is disabled without `--trust-remote-code` because "
                 f"Pickle files are unsafe and can essentially contain remote code execution!"
                 f"Please check for more information here: https://huggingface.co/docs/text-generation-inference/basic_tutorials/safety",
             )

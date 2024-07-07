@@ -89,7 +89,7 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
         return generate_pb2.FilterBatchResponse(batch=filtered_batch.to_pb())
 
     async def Warmup(self, request, context):
-        if self.quantize == "gptq":
+        if self.quantize in {"exl2", "gptq"}:
             try:
                 # When using GPTQ, Exllama kernels need some global kernels
                 # For which we have the finale shapes only after the model has loaded
@@ -199,7 +199,7 @@ def serve(
     dtype: Optional[str],
     trust_remote_code: bool,
     uds_path: Path,
-    lora_ids: Optional[str]
+    lora_ids: Optional[str],
 ):
     async def serve_inner(
         model_id: str,
@@ -230,7 +230,7 @@ def serve(
                 speculate,
                 dtype,
                 trust_remote_code,
-                lora_ids
+                lora_ids,
             )
         except Exception:
             logger.exception("Error when initializing model")

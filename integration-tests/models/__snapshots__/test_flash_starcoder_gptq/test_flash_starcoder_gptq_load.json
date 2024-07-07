@@ -1,0 +1,538 @@
+[
+  {
+    "details": {
+      "best_of_sequences": null,
+      "finish_reason": "length",
+      "generated_tokens": 10,
+      "prefill": [
+        {
+          "id": 589,
+          "logprob": null,
+          "text": "def"
+        },
+        {
+          "id": 3226,
+          "logprob": -8.5859375,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -7.5820312,
+          "text": "ometric"
+        },
+        {
+          "id": 81,
+          "logprob": -0.26708984,
+          "text": "_"
+        },
+        {
+          "id": 6009,
+          "logprob": -1.6386719,
+          "text": "mean"
+        },
+        {
+          "id": 26,
+          "logprob": -0.22717285,
+          "text": "("
+        },
+        {
+          "id": 62,
+          "logprob": -5.234375,
+          "text": "L"
+        },
+        {
+          "id": 44,
+          "logprob": -3.1015625,
+          "text": ":"
+        },
+        {
+          "id": 1682,
+          "logprob": -1.1083984,
+          "text": " List"
+        },
+        {
+          "id": 77,
+          "logprob": -0.14294434,
+          "text": "["
+        },
+        {
+          "id": 1808,
+          "logprob": -0.32592773,
+          "text": "float"
+        },
+        {
+          "id": 10794,
+          "logprob": -2.8164062,
+          "text": "]):"
+        }
+      ],
+      "seed": null,
+      "tokens": [
+        {
+          "id": 284,
+          "logprob": -0.12817383,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 1524,
+          "logprob": -0.9863281,
+          "special": false,
+          "text": " \"\"\""
+        },
+        {
+          "id": 284,
+          "logprob": -0.7011719,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 14883,
+          "logprob": -2.2050781,
+          "special": false,
+          "text": " Calculate"
+        },
+        {
+          "id": 322,
+          "logprob": -0.2668457,
+          "special": false,
+          "text": " the"
+        },
+        {
+          "id": 3226,
+          "logprob": -0.08465576,
+          "special": false,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -0.019012451,
+          "special": false,
+          "text": "ometric"
+        },
+        {
+          "id": 5651,
+          "logprob": -0.028625488,
+          "special": false,
+          "text": " mean"
+        },
+        {
+          "id": 432,
+          "logprob": -0.29418945,
+          "special": false,
+          "text": " of"
+        },
+        {
+          "id": 312,
+          "logprob": -0.3161621,
+          "special": false,
+          "text": " a"
+        }
+      ],
+      "top_tokens": null
+    },
+    "generated_text": "\n    \"\"\"\n    Calculate the geometric mean of a"
+  },
+  {
+    "details": {
+      "best_of_sequences": null,
+      "finish_reason": "length",
+      "generated_tokens": 10,
+      "prefill": [
+        {
+          "id": 589,
+          "logprob": null,
+          "text": "def"
+        },
+        {
+          "id": 3226,
+          "logprob": -8.5859375,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -7.59375,
+          "text": "ometric"
+        },
+        {
+          "id": 81,
+          "logprob": -0.26953125,
+          "text": "_"
+        },
+        {
+          "id": 6009,
+          "logprob": -1.640625,
+          "text": "mean"
+        },
+        {
+          "id": 26,
+          "logprob": -0.22705078,
+          "text": "("
+        },
+        {
+          "id": 62,
+          "logprob": -5.234375,
+          "text": "L"
+        },
+        {
+          "id": 44,
+          "logprob": -3.1132812,
+          "text": ":"
+        },
+        {
+          "id": 1682,
+          "logprob": -1.1123047,
+          "text": " List"
+        },
+        {
+          "id": 77,
+          "logprob": -0.14294434,
+          "text": "["
+        },
+        {
+          "id": 1808,
+          "logprob": -0.32299805,
+          "text": "float"
+        },
+        {
+          "id": 10794,
+          "logprob": -2.8164062,
+          "text": "]):"
+        }
+      ],
+      "seed": null,
+      "tokens": [
+        {
+          "id": 284,
+          "logprob": -0.12854004,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 1524,
+          "logprob": -0.9897461,
+          "special": false,
+          "text": " \"\"\""
+        },
+        {
+          "id": 284,
+          "logprob": -0.69970703,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 14883,
+          "logprob": -2.2050781,
+          "special": false,
+          "text": " Calculate"
+        },
+        {
+          "id": 322,
+          "logprob": -0.2668457,
+          "special": false,
+          "text": " the"
+        },
+        {
+          "id": 3226,
+          "logprob": -0.08496094,
+          "special": false,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -0.019012451,
+          "special": false,
+          "text": "ometric"
+        },
+        {
+          "id": 5651,
+          "logprob": -0.029037476,
+          "special": false,
+          "text": " mean"
+        },
+        {
+          "id": 432,
+          "logprob": -0.2939453,
+          "special": false,
+          "text": " of"
+        },
+        {
+          "id": 312,
+          "logprob": -0.31591797,
+          "special": false,
+          "text": " a"
+        }
+      ],
+      "top_tokens": null
+    },
+    "generated_text": "\n    \"\"\"\n    Calculate the geometric mean of a"
+  },
+  {
+    "details": {
+      "best_of_sequences": null,
+      "finish_reason": "length",
+      "generated_tokens": 10,
+      "prefill": [
+        {
+          "id": 589,
+          "logprob": null,
+          "text": "def"
+        },
+        {
+          "id": 3226,
+          "logprob": -8.5859375,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -7.5859375,
+          "text": "ometric"
+        },
+        {
+          "id": 81,
+          "logprob": -0.26586914,
+          "text": "_"
+        },
+        {
+          "id": 6009,
+          "logprob": -1.6347656,
+          "text": "mean"
+        },
+        {
+          "id": 26,
+          "logprob": -0.22766113,
+          "text": "("
+        },
+        {
+          "id": 62,
+          "logprob": -5.2265625,
+          "text": "L"
+        },
+        {
+          "id": 44,
+          "logprob": -3.0976562,
+          "text": ":"
+        },
+        {
+          "id": 1682,
+          "logprob": -1.1025391,
+          "text": " List"
+        },
+        {
+          "id": 77,
+          "logprob": -0.1427002,
+          "text": "["
+        },
+        {
+          "id": 1808,
+          "logprob": -0.32592773,
+          "text": "float"
+        },
+        {
+          "id": 10794,
+          "logprob": -2.8164062,
+          "text": "]):"
+        }
+      ],
+      "seed": null,
+      "tokens": [
+        {
+          "id": 284,
+          "logprob": -0.13012695,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 1524,
+          "logprob": -0.98046875,
+          "special": false,
+          "text": " \"\"\""
+        },
+        {
+          "id": 284,
+          "logprob": -0.69921875,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 14883,
+          "logprob": -2.1992188,
+          "special": false,
+          "text": " Calculate"
+        },
+        {
+          "id": 322,
+          "logprob": -0.2668457,
+          "special": false,
+          "text": " the"
+        },
+        {
+          "id": 3226,
+          "logprob": -0.083496094,
+          "special": false,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -0.01902771,
+          "special": false,
+          "text": "ometric"
+        },
+        {
+          "id": 5651,
+          "logprob": -0.029006958,
+          "special": false,
+          "text": " mean"
+        },
+        {
+          "id": 432,
+          "logprob": -0.29248047,
+          "special": false,
+          "text": " of"
+        },
+        {
+          "id": 312,
+          "logprob": -0.3161621,
+          "special": false,
+          "text": " a"
+        }
+      ],
+      "top_tokens": null
+    },
+    "generated_text": "\n    \"\"\"\n    Calculate the geometric mean of a"
+  },
+  {
+    "details": {
+      "best_of_sequences": null,
+      "finish_reason": "length",
+      "generated_tokens": 10,
+      "prefill": [
+        {
+          "id": 589,
+          "logprob": null,
+          "text": "def"
+        },
+        {
+          "id": 3226,
+          "logprob": -8.5859375,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -7.5859375,
+          "text": "ometric"
+        },
+        {
+          "id": 81,
+          "logprob": -0.26904297,
+          "text": "_"
+        },
+        {
+          "id": 6009,
+          "logprob": -1.6386719,
+          "text": "mean"
+        },
+        {
+          "id": 26,
+          "logprob": -0.22705078,
+          "text": "("
+        },
+        {
+          "id": 62,
+          "logprob": -5.234375,
+          "text": "L"
+        },
+        {
+          "id": 44,
+          "logprob": -3.1132812,
+          "text": ":"
+        },
+        {
+          "id": 1682,
+          "logprob": -1.1074219,
+          "text": " List"
+        },
+        {
+          "id": 77,
+          "logprob": -0.14477539,
+          "text": "["
+        },
+        {
+          "id": 1808,
+          "logprob": -0.3256836,
+          "text": "float"
+        },
+        {
+          "id": 10794,
+          "logprob": -2.8027344,
+          "text": "]):"
+        }
+      ],
+      "seed": null,
+      "tokens": [
+        {
+          "id": 284,
+          "logprob": -0.12915039,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 1524,
+          "logprob": -0.98535156,
+          "special": false,
+          "text": " \"\"\""
+        },
+        {
+          "id": 284,
+          "logprob": -0.69921875,
+          "special": false,
+          "text": "\n   "
+        },
+        {
+          "id": 14883,
+          "logprob": -2.2011719,
+          "special": false,
+          "text": " Calculate"
+        },
+        {
+          "id": 322,
+          "logprob": -0.26708984,
+          "special": false,
+          "text": " the"
+        },
+        {
+          "id": 3226,
+          "logprob": -0.08502197,
+          "special": false,
+          "text": " ge"
+        },
+        {
+          "id": 21017,
+          "logprob": -0.019012451,
+          "special": false,
+          "text": "ometric"
+        },
+        {
+          "id": 5651,
+          "logprob": -0.028625488,
+          "special": false,
+          "text": " mean"
+        },
+        {
+          "id": 432,
+          "logprob": -0.29589844,
+          "special": false,
+          "text": " of"
+        },
+        {
+          "id": 312,
+          "logprob": -0.31591797,
+          "special": false,
+          "text": " a"
+        }
+      ],
+      "top_tokens": null
+    },
+    "generated_text": "\n    \"\"\"\n    Calculate the geometric mean of a"
+  }
+]

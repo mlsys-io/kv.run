@@ -12,7 +12,8 @@ for name, spec in DEMO.items():
     lora_prompts, base_prompts = spec.generate_prompts()
     lora_specs[name] = LoraSpec(lora_prompts, base_prompts)
 
-def make_input(lora_id, lora_or_base):
+
+def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
     if lora_or_base == "lora":
         prompts = lora_specs[lora_id].lora_prompts
     elif lora_or_base == "base" or lora_or_base == "empty":
@@ -20,10 +21,11 @@ def make_input(lora_id, lora_or_base):
         lora_id = "empty"
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
-    prompt = random.choice(prompts)
+    prompt = random.choice(prompts) if not promptOverride else promptOverride
     inputs = prompt
 
     request = generate_pb2.Request(
+        id=id,
         inputs=inputs,
         truncate=256,
         prefill_logprobs=True,
@@ -36,66 +38,56 @@ def make_input(lora_id, lora_or_base):
             repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=2048,
-            stop_sequences=[],
-            ignore_eos_token=True),
-        lora_id=lora_id
+            max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
+        ),
+        lora_id=lora_id,
     )
     return request
 
-req1 = make_input('gsm8k', 'base')
-req2 = make_input('gsm8k', 'lora')
-requests = [req1, req2]
+
+requests = [
+    make_input("tjluyao/gemma-2b-it-math", "base", id=0),
+    make_input("tjluyao/gemma-2b-it-math", "base", id=1),
+]
 
 # Assemble input batch
-pb_batch_with_inputs = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
+pb_batch_with_inputs = generate_pb2.Batch(id=0, requests=requests, size=len(requests))
 pb_batch_empty = generate_pb2.Batch()
 
 with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     stub = generate_pb2_grpc.TextGenerationServiceStub(channel)
 
-    # Test adapter loading and offloading
-    stub.AdapterControl(generate_pb2.AdapterControlRequest(
-        lora_ids='all',
-        operation='remove'
-    ))
-    stub.AdapterControl(generate_pb2.AdapterControlRequest(
-        lora_ids='gsm8k:abcdabcd987/gsm8k-llama2-7b-lora-16,sqlctx:abcdabcd987/sqlctx-llama2-7b-lora-16,viggo:abcdabcd987/viggo-llama2-7b-lora-16',
-        operation='load'
-    ))
-    resp = stub.AdapterControl(generate_pb2.AdapterControlRequest(
-        operation='status'
-    ))
-    print(resp)
-
     # Info
     print(stub.Info(generate_pb2.InfoRequest()))
     # Warm up
-    wr = generate_pb2.WarmupRequest(batch = pb_batch_with_inputs, max_total_tokens = 2048, max_prefill_tokens = 1024*10, max_input_length = 1024)
+    wr = generate_pb2.WarmupRequest(
+        batch=pb_batch_with_inputs,
+        max_total_tokens=2048,
+        max_prefill_tokens=1024 * 10,
+        max_input_length=1024,
+    )
     stub.Warmup(wr)
     # Prefill
-    pr = generate_pb2.PrefillRequest(batch = pb_batch_empty)
+    pr = generate_pb2.PrefillRequest(batch=pb_batch_with_inputs)
     resp = stub.Prefill(pr)
-    gen, cbatch = resp.generations, resp.batch
-    # Decode
-    dr = generate_pb2.DecodeRequest(batches = [cbatch])
-    resp = stub.Decode(dr)
-    gen, cbatch = resp.generations, resp.batch
+    generations, cbatch = resp.generations, resp.batch
+    for gen in generations:
+        print(gen.tokens.texts)
 
-    results = {}
-    # Generate token
-    pr = generate_pb2.GenerateTokenRequest(batch = pb_batch_empty)
+    print("finished prefill tokens")
+
     while True:
-        resp = stub.GenerateToken(pr)
+        dr = generate_pb2.DecodeRequest(batches=[cbatch])
+        resp = stub.Decode(dr)
         generations, cbatch = resp.generations, resp.batch
-        if not generations:
-            break
+        toExit = False
         for gen in generations:
-            if gen.request_id in results:
-                results[gen.request_id].append(gen.tokens.texts[0])
-            else:
-                results[gen.request_id] = [gen.tokens.texts[0]]
-    for id in results:
-        print(str(id) + '=' * 30)
-        print(''.join(results[id]))
-    print('done')
+            if gen.generated_text.text:
+                print("finished")
+                res = gen.generated_text.text
+                toExit = True
+
+        if toExit:
+            break
+
+    print(res)
