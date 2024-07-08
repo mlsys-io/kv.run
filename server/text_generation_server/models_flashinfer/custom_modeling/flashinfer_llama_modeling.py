@@ -80,8 +80,6 @@ class FlashLlamaAttention(nn.Module):
         super().__init__()
         self.flashinferWrapper = flashinferWrapper
         self.rotaryParams = AttentionRotaryParams(
-            # rope_scale=config.rope_scaling,
-            # rope_theta=config.rope_theta,
             pos_encoding_mode=POS_ENCODING_MODE.NONE
         )
         self.rotary_emb = PositionRotaryEmbedding.static(
@@ -303,7 +301,7 @@ class FlashLlamaModel(torch.nn.Module):
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
         num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
 
-        flashinferWrapper = FlashinferAttentionWrapper(
+        self.flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size
         )
 
@@ -315,7 +313,7 @@ class FlashLlamaModel(torch.nn.Module):
                         if not prefix
                         else f"{prefix}.model.layers.{layer_id}"
                     ),
-                    flashinferWrapper=flashinferWrapper,
+                    flashinferWrapper=self.flashinferWrapper,
                     config=config,
                     weights=weights,
                     layer_idx=layer_id,
@@ -355,6 +353,19 @@ class FlashLlamaModel(torch.nn.Module):
             position_ids, max_seq_len, hidden_states.dtype
         )
         residual = None
+
+        if prefillBatchPosition.total_seq_len > 0:
+            self.flashinferWrapper.prepareBatchPrefill(
+                prefillBatchPosition, kvCachePool.page_len
+            )
+        else:
+            self.flashinferWrapper.prepareBatchDecode(
+                decodeBatchPosition,
+                kvCachePool.page_len,
+                POS_ENCODING_MODE.NONE,
+                kvCachePool.cache_data[0].dtype,
+            )
+
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states,
@@ -368,6 +379,10 @@ class FlashLlamaModel(torch.nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if prefillBatchPosition.total_seq_len > 0:
+            self.flashinferWrapper.completeBatchPrefill()
+        else:
+            self.flashinferWrapper.completeBatchDecode()
         return hidden_states
 
     def _getPositionIdsAndMaxSeqLenForPrefill(
