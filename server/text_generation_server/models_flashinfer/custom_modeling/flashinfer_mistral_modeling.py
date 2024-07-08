@@ -171,7 +171,9 @@ class MistralAttention(torch.nn.Module):
         self.flashinferWrapper = flashinferWrapper
 
         self.rotaryParams = AttentionRotaryParams(
-            pos_encoding_mode=POS_ENCODING_MODE.ROPE_LLAMA, rope_scale=None, rope_theta=config.rope_theta
+            pos_encoding_mode=POS_ENCODING_MODE.ROPE_LLAMA,
+            rope_scale=None,
+            rope_theta=config.rope_theta,
         )
 
         self.layer_idx = layer_idx
@@ -450,7 +452,7 @@ class FlashMistralModel(torch.nn.Module):
     ):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        
+
         self.flashinferWrapper.prepareAttention(
             is_prefill,
             batch_position,

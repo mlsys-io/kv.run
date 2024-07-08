@@ -237,7 +237,9 @@ class FlashChatGLMAttention(nn.Module):
 
         self.flashinferWrapper = flashinferWrapper
         self.rotaryParams = AttentionRotaryParams(
-            pos_encoding_mode=POS_ENCODING_MODE.ROPE_LLAMA, rope_scale=None, rope_theta=10000 * config.rope_ratio
+            pos_encoding_mode=POS_ENCODING_MODE.ROPE_LLAMA,
+            rope_scale=None,
+            rope_theta=10000 * config.rope_ratio,
         )
 
         self.layer_idx = layer_idx
@@ -405,7 +407,7 @@ class FlashChatGLM3Model(torch.nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
-        
+
         self.flashinferWrapper.prepareAttention(
             is_prefill,
             batch_position,
