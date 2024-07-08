@@ -38,7 +38,6 @@ class FlashinferAttentionWrapper:
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = hidden_size // num_attention_heads
         self._head_padded_dim = find_padded_head_dim(self.head_dim)
-        self.page_size = 16
 
         self.group_size = self.num_attention_heads // self.num_key_value_heads
         _workspace_buffer = torch.empty(
@@ -54,62 +53,65 @@ class FlashinferAttentionWrapper:
             use_tensor_cores=_use_tensor_cores,
         )
 
+    def prepareAttention(
+        self,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
+        page_len: int,
+        pos_encoding_mode: POS_ENCODING_MODE,
+        dtype: torch.dtype,
+    ):
+        if is_prefill:
+            self.prefill_wrapper.begin_forward(
+                batch_position.seq_indptr,
+                batch_position.kv_page_indptr,
+                batch_position.kv_page_indices,
+                batch_position.kv_last_page_len,
+                self.num_attention_heads,
+                self.num_key_value_heads,
+                self._head_padded_dim,
+                page_len,
+            )
+        else:
+            self.decode_wrapper.begin_forward(
+                batch_position.kv_page_indptr,
+                batch_position.kv_page_indices,
+                batch_position.kv_last_page_len,
+                self.num_attention_heads,
+                self.num_key_value_heads,
+                self._head_padded_dim,
+                page_len,
+                pos_encoding_mode=pos_encoding_mode.value,
+                data_type=dtype,
+            )
+
+    def endBatchAttention(self, is_prefill: bool):
+        if is_prefill:
+            self.prefill_wrapper.end_forward()
+        else:
+            self.decode_wrapper.end_forward()
+
     def computeAttention(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         cacheData: torch.Tensor,
-        page_len: int,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batchPosition: KvCacheBatchPosition,
         rotaryParams: AttentionRotaryParams,
     ):
-        stack_attn_output = []
-        prefillTotalSeqLen = prefillBatchPosition.total_seq_len
-        if prefillTotalSeqLen > 0:
-            q = q[:prefillTotalSeqLen].view(
-                prefillTotalSeqLen, self.num_attention_heads, self.head_dim
-            )
-            k = k[:prefillTotalSeqLen].view(
-                prefillTotalSeqLen, self.num_key_value_heads, self.head_dim
-            )
-            v = v[:prefillTotalSeqLen].view(
-                prefillTotalSeqLen, self.num_key_value_heads, self.head_dim
-            )
-            q, k, v = self._pad_qkv(q, k, v)
-            attn_output_prefill = self._batchPrefill(
-                q, k, v, cacheData, prefillBatchPosition, rotaryParams
-            )
-            attn_output_prefill = self._unpad_attention(
-                attn_output_prefill, prefillTotalSeqLen
-            )
-            stack_attn_output.append(attn_output_prefill)
-
-        decodeTotalSeqLen = decodeBatchPosition.total_seq_len
-        if decodeTotalSeqLen > 0:
-            q = q[prefillTotalSeqLen:].view(
-                decodeTotalSeqLen, self.num_attention_heads, self.head_dim
-            )
-            k = k[prefillTotalSeqLen:].view(
-                decodeTotalSeqLen, self.num_key_value_heads, self.head_dim
-            )
-            v = v[prefillTotalSeqLen:].view(
-                decodeTotalSeqLen, self.num_key_value_heads, self.head_dim
-            )
-            q, k, v = self._pad_qkv(q, k, v)
-            attn_output_decode = self._batchDecode(
-                q, k, v, cacheData, page_len, decodeBatchPosition, rotaryParams
-            )
-            attn_output_decode = self._unpad_attention(
-                attn_output_decode, decodeTotalSeqLen
-            )
-            stack_attn_output.append(attn_output_decode)
-        return (
-            stack_attn_output[0]
-            if len(stack_attn_output) == 1
-            else torch.cat(stack_attn_output, dim=0)
+        q = q.view(batchPosition.total_seq_len, self.num_attention_heads, self.head_dim)
+        k = k.view(batchPosition.total_seq_len, self.num_key_value_heads, self.head_dim)
+        v = v.view(batchPosition.total_seq_len, self.num_key_value_heads, self.head_dim)
+        q, k, v = self._pad_qkv(q, k, v)
+        attn_output = (
+            self._batchPrefill(q, k, v, cacheData, batchPosition, rotaryParams)
+            if is_prefill
+            else self._batchDecode(q, k, v, cacheData, batchPosition, rotaryParams)
         )
+
+        return self._unpad_attention(attn_output, batchPosition.total_seq_len)
 
     def _unpad_attention(self, attn_output, seqLen):
         if self._head_padded_dim > self.head_dim:
@@ -144,17 +146,6 @@ class FlashinferAttentionWrapper:
             prefillBatchPosition.kv_last_page_len,
         )
 
-        self.prefill_wrapper.begin_forward(
-            prefillBatchPosition.seq_indptr,
-            prefillBatchPosition.kv_page_indptr,
-            prefillBatchPosition.kv_page_indices,
-            prefillBatchPosition.kv_last_page_len,
-            self.num_attention_heads,
-            self.num_key_value_heads,
-            self._head_padded_dim,
-            self.page_size,
-        )
-
         attn_output_prefill = self.prefill_wrapper.forward(
             q,
             cacheData,
@@ -165,7 +156,6 @@ class FlashinferAttentionWrapper:
             rope_theta=rotaryParams.rope_theta,
         )
 
-        self.prefill_wrapper.end_forward()
         return attn_output_prefill
 
     def _batchDecode(
@@ -174,7 +164,6 @@ class FlashinferAttentionWrapper:
         k: torch.Tensor,
         v: torch.Tensor,
         cacheData: torch.Tensor,
-        page_len: int,
         decodeBatchPosition: KvCacheBatchPosition,
         rotaryParams: AttentionRotaryParams,
     ):
@@ -189,18 +178,6 @@ class FlashinferAttentionWrapper:
             decodeBatchPosition.kv_last_page_len,
         )
 
-        self.decode_wrapper.begin_forward(
-            decodeBatchPosition.kv_page_indptr,
-            decodeBatchPosition.kv_page_indices,
-            decodeBatchPosition.kv_last_page_len,
-            self.num_attention_heads,
-            self.num_key_value_heads,
-            self._head_padded_dim,
-            page_len,
-            pos_encoding_mode=rotaryParams.pos_encoding_mode.value,
-            data_type=cacheData.dtype,
-        )
-
         attn_output_decode = self.decode_wrapper.forward(
             q,
             cacheData,
@@ -210,5 +187,4 @@ class FlashinferAttentionWrapper:
             rope_theta=rotaryParams.rope_theta,
         )
 
-        self.decode_wrapper.end_forward()
         return attn_output_decode

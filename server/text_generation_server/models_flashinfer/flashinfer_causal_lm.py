@@ -368,13 +368,8 @@ class FlashinferLM(Model):
             device=self.device,
         )
 
-        request_kv_caches_prefill = request_kv_caches if batch.is_prefill else []
-        request_kv_caches_decode = [] if batch.is_prefill else request_kv_caches
-        prefillBatchPosition: KvCacheBatchPosition = getKvCacheBatchPosition(
-            request_kv_caches_prefill, isPrefill=True, device=self.device
-        )
-        decodeBatchPosition: KvCacheBatchPosition = getKvCacheBatchPosition(
-            request_kv_caches_decode, isPrefill=False, device=self.device
+        batch_position: KvCacheBatchPosition = getKvCacheBatchPosition(
+            request_kv_caches, isPrefill=batch.is_prefill, device=self.device
         )
 
         loraWeights = (
@@ -385,19 +380,17 @@ class FlashinferLM(Model):
         raw_logits, _ = self.model(
             input_ids_tensor,
             self.kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            batch.is_prefill,
+            batch_position,
             loraWeights,
         )
 
         start_decode = time.time_ns()
-        prefill_logits = (
-            raw_logits[prefillBatchPosition.seq_indptr[1:] - 1]
-            if prefillBatchPosition.total_seq_len > 0
-            else torch.tensor([], device=self.device)
+        logits = (
+            raw_logits[batch_position.seq_indptr[1:] - 1]
+            if batch.is_prefill
+            else raw_logits
         )
-        decode_logits = raw_logits[prefillBatchPosition.total_seq_len :]
-        logits = torch.cat([prefill_logits, decode_logits])
 
         all_stop = True
         generations: List[Generation] = []
