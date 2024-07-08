@@ -48,6 +48,7 @@ from text_generation_server.layers.rotary import PositionRotaryEmbedding
 from text_generation_server.layers.layernorm import FastRMSNorm
 
 from text_generation_server.layers.flashinfer_attention import (
+    POS_ENCODING_MODE,
     FlashinferAttentionWrapper,
     AttentionRotaryParams,
 )
@@ -170,7 +171,7 @@ class MistralAttention(torch.nn.Module):
         self.flashinferWrapper = flashinferWrapper
 
         self.rotaryParams = AttentionRotaryParams(
-            rope_scale=None, rope_theta=config.rope_theta
+            pos_encoding_mode=POS_ENCODING_MODE.ROPE_LLAMA, rope_scale=None, rope_theta=config.rope_theta
         )
 
         self.layer_idx = layer_idx
@@ -228,8 +229,8 @@ class MistralAttention(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         q_dim = (
@@ -252,9 +253,8 @@ class MistralAttention(torch.nn.Module):
             k,
             v,
             kvCachePool.cache_data[self.layer_idx],
-            kvCachePool.page_len,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             self.rotaryParams,
         )
         attn_outputs = self.o_proj(attn_outputs_raw)
@@ -371,8 +371,8 @@ class MistralLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         lora: BatchedModelLoraWeight | None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
@@ -381,8 +381,8 @@ class MistralLayer(nn.Module):
         attn_output = self.self_attn(
             normed_hidden_states,
             kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             lora,
         )
 
@@ -415,14 +415,14 @@ class FlashMistralModel(torch.nn.Module):
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
         num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
 
-        flashinferWrapper = FlashinferAttentionWrapper(
+        self.flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size
         )
 
         self.layers = nn.ModuleList(
             [
                 MistralLayer(
-                    flashinferWrapper,
+                    self.flashinferWrapper,
                     layer_id,
                     config=config,
                     weights=weights,
@@ -444,24 +444,32 @@ class FlashMistralModel(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         lora: BatchedModelLoraWeight | None,
     ):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+        
+        self.flashinferWrapper.prepareAttention(
+            is_prefill,
+            batch_position,
+            kvCachePool.page_len,
+            POS_ENCODING_MODE.ROPE_LLAMA,
+            kvCachePool.cache_data[0].dtype,
+        )
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
                 kvCachePool,
-                prefillBatchPosition,
-                decodeBatchPosition,
+                is_prefill,
+                batch_position,
                 lora,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-
+        self.flashinferWrapper.endBatchAttention(is_prefill)
         return hidden_states
 
 
@@ -501,12 +509,12 @@ class FlashMistralForCausalLM(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         lora: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids, kvCachePool, prefillBatchPosition, decodeBatchPosition, lora
+            input_ids, kvCachePool, is_prefill, batch_position, lora
         )
         logits = self.lm_head(hidden_states)
         return logits

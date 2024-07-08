@@ -144,7 +144,6 @@ class FlashLlamaAttention(nn.Module):
             k,
             v,
             kvCachePool.cache_data[self.layer_idx],
-            kvCachePool.page_len,
             is_prefill,
             batch_position,
             self.rotaryParams,

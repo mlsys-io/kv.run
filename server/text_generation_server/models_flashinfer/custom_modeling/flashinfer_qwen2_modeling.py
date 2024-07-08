@@ -33,6 +33,7 @@ from transformers.models.qwen2.modeling_qwen2 import (
     PreTrainedModel,
 )
 from text_generation_server.layers.flashinfer_attention import (
+    POS_ENCODING_MODE,
     FlashinferAttentionWrapper,
     AttentionRotaryParams,
 )
@@ -311,7 +312,7 @@ class FlashQwen2Attention(nn.Module):
 
         self.flashinferWrapper = flashinferWrapper
         self.rotaryParams = AttentionRotaryParams(
-            rope_scale=None, rope_theta=config.rope_theta
+            pos_encoding_mode=POS_ENCODING_MODE.ROPE_LLAMA, rope_scale=None, rope_theta=config.rope_theta
         )
 
         self.layer_idx = layer_idx
@@ -327,8 +328,8 @@ class FlashQwen2Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight | None,
     ):
         q_dim = (
@@ -353,9 +354,8 @@ class FlashQwen2Attention(nn.Module):
             k,
             v,
             kvCachePool.cache_data[self.layer_idx],
-            kvCachePool.page_len,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             self.rotaryParams,
         )
         attn_outputs = self.o_proj(attn_outputs_raw)
@@ -397,8 +397,8 @@ class FlashQwen2Layer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight | None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
@@ -406,8 +406,8 @@ class FlashQwen2Layer(nn.Module):
         attn_output = self.self_attn(
             normed_hidden_states,
             kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             loraWeight,
         )
 
@@ -437,14 +437,14 @@ class FlashQwen2Model(torch.nn.Module):
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
         num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
 
-        flashinferWrapper = FlashinferAttentionWrapper(
+        self.flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size
         )
 
         self.layers = nn.ModuleList(
             [
                 FlashQwen2Layer(
-                    flashinferWrapper,
+                    self.flashinferWrapper,
                     layer_id,
                     config,
                     weights,
@@ -462,24 +462,32 @@ class FlashQwen2Model(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+        
+        self.flashinferWrapper.prepareAttention(
+            is_prefill,
+            batch_position,
+            kvCachePool.page_len,
+            POS_ENCODING_MODE.ROPE_LLAMA,
+            kvCachePool.cache_data[0].dtype,
+        )
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
                 kvCachePool,
-                prefillBatchPosition,
-                decodeBatchPosition,
+                is_prefill,
+                batch_position,
                 loraWeight,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-
+        self.flashinferWrapper.endBatchAttention(is_prefill)
         return hidden_states
 
 
@@ -498,15 +506,15 @@ class FlashQwen2ForCausalLM(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
             input_ids,
             kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             loraWeight,
         )
         logits, speculative_logits = self.lm_head(hidden_states)

@@ -170,8 +170,8 @@ class FlashPhiAttention(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
         loraWeight: BatchedModelLoraWeight,
@@ -212,9 +212,8 @@ class FlashPhiAttention(torch.nn.Module):
             k,
             v,
             kvCachePool.cache_data[self.layer_idx],
-            kvCachePool.page_len,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             self.rotaryParams,
         )
         attn_outputs = self.o_proj(attn_outputs_raw)
@@ -298,8 +297,8 @@ class FlashPhiLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
         loraWeight: BatchedModelLoraWeight,
@@ -310,8 +309,8 @@ class FlashPhiLayer(nn.Module):
         attn_output = self.self_attn(
             hidden_states,
             kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             cos,
             sin,
             loraWeight,
@@ -333,7 +332,7 @@ class FlashPhiModel(torch.nn.Module):
         num_attention_heads = config.num_attention_heads // weights.process_group.size()
         num_key_value_heads = config.num_key_value_heads // weights.process_group.size()
 
-        flashinferWrapper = FlashinferAttentionWrapper(
+        self.flashinferWrapper = FlashinferAttentionWrapper(
             num_attention_heads, num_key_value_heads, config.hidden_size
         )
 
@@ -344,7 +343,7 @@ class FlashPhiModel(torch.nn.Module):
             [
                 FlashPhiLayer(
                     layer_id,
-                    flashinferWrapper=flashinferWrapper,
+                    flashinferWrapper=self.flashinferWrapper,
                     config=config,
                     weights=weights,
                 )
@@ -362,41 +361,46 @@ class FlashPhiModel(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        position_ids_prefill, max_seq_len_prefill = (
+        position_ids, max_seq_len = (
             self._getPositionIdsAndMaxSeqLenForPrefill(
-                prefillBatchPosition.seq_lens, hidden_states.device
+                batch_position.seq_lens, hidden_states.device
+            )
+            if is_prefill
+            else self._getPositionIdsAndMaxSeqLenForDecode(
+                batch_position.seq_lens, hidden_states.device
             )
         )
-        position_ids_decode, max_seq_len_decode = (
-            self._getPositionIdsAndMaxSeqLenForDecode(
-                decodeBatchPosition.seq_lens, hidden_states.device
-            )
-        )
-        position_ids = torch.cat([position_ids_prefill, position_ids_decode])
-        max_seq_len = max(max_seq_len_prefill, max_seq_len_decode)
 
         cos, sin = self.layers[0].self_attn.rotary_emb.get_cos_sin(
             position_ids, max_seq_len, hidden_states.dtype
         )
         residual = None
+        self.flashinferWrapper.prepareAttention(
+            is_prefill,
+            batch_position,
+            kvCachePool.page_len,
+            POS_ENCODING_MODE.NONE,
+            kvCachePool.cache_data[0].dtype,
+        )
         for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
                 kvCachePool,
-                prefillBatchPosition,
-                decodeBatchPosition,
+                is_prefill,
+                batch_position,
                 cos,
                 sin,
                 loraWeight,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        self.flashinferWrapper.endBatchAttention(is_prefill)
         return hidden_states
 
     def _getPositionIdsAndMaxSeqLenForPrefill(
@@ -443,16 +447,16 @@ class FlashPhiForCausalLM(torch.nn.Module):
         self,
         input_ids: torch.Tensor,
         kvCachePool: KvCachePool,
-        prefillBatchPosition: KvCacheBatchPosition,
-        decodeBatchPosition: KvCacheBatchPosition,
+        is_prefill: bool,
+        batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids,
             kvCachePool,
-            prefillBatchPosition,
-            decodeBatchPosition,
+            is_prefill,
+            batch_position,
             loraWeight,
         )
         if lm_head_indices is not None:
