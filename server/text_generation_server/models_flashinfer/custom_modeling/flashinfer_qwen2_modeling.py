@@ -305,7 +305,7 @@ class FlashQwen2Attention(nn.Module):
         flashinferWrapper: FlashinferAttentionWrapper,
         config: Qwen2Config,
         weights,
-        layer_idx: int
+        layer_idx: int,
     ):
         super().__init__()
 
@@ -322,7 +322,6 @@ class FlashQwen2Attention(nn.Module):
             weights=weights,
             bias=False,
         )
-
 
     def forward(
         self,
@@ -368,9 +367,7 @@ class FlashQwen2Attention(nn.Module):
 
 class FlashQwen2Layer(nn.Module):
     def __init__(
-        self,
-        flashinferWrapper: FlashinferAttentionWrapper,
-        layer_id, config, weights
+        self, flashinferWrapper: FlashinferAttentionWrapper, layer_id, config, weights
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -461,7 +458,6 @@ class FlashQwen2Model(torch.nn.Module):
 
         self.gradient_checkpointing = False
 
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -511,7 +507,7 @@ class FlashQwen2ForCausalLM(torch.nn.Module):
             kvCachePool,
             prefillBatchPosition,
             decodeBatchPosition,
-            loraWeight
+            loraWeight,
         )
         logits, speculative_logits = self.lm_head(hidden_states)
         return logits, speculative_logits

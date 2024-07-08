@@ -182,7 +182,6 @@ class MistralAttention(torch.nn.Module):
             bias=False,
         )
 
-
         self.max_past = (
             config.sliding_window if config.sliding_window is not None else -1
         )
@@ -342,7 +341,9 @@ class MistralMLP(nn.Module):
 
 
 class MistralLayer(nn.Module):
-    def __init__(self, flashinferWrapper: FlashinferAttentionWrapper, layer_id, config, weights):
+    def __init__(
+        self, flashinferWrapper: FlashinferAttentionWrapper, layer_id, config, weights
+    ):
         super().__init__()
         prefix = f"model.layers.{layer_id}"
         self.self_attn = MistralAttention(

@@ -4,7 +4,8 @@ from typing import Optional, List
 from transformers import AutoTokenizer, AutoConfig
 from text_generation_server.models_flashinfer.flashinfer_causal_lm import FlashinferLM
 from text_generation_server.models_flashinfer.custom_modeling.flashinfer_chatglm_modeling import (
-    ChatGLMConfig, FlashChatGLMForCausalLM
+    ChatGLMConfig,
+    FlashChatGLMForCausalLM,
 )
 from text_generation_server.utils import (
     initialize_torch_distributed,
@@ -34,7 +35,7 @@ class FlashinferChatGLM(FlashinferLM):
         chatglmConfig = ChatGLMConfig.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
-        
+
         chatglmConfig.quantize = quantize
         chatglmConfig.speculator = speculator
 
@@ -55,8 +56,8 @@ class FlashinferChatGLM(FlashinferLM):
         super(FlashinferChatGLM, self).__init__(
             model=model,
             tokenizer=tokenizer,
-            config = chatglmConfig,
+            config=chatglmConfig,
             dtype=dtype,
             device=device,
-            lora_ids = lora_ids,
+            lora_ids=lora_ids,
         )
