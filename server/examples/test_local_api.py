@@ -31,13 +31,14 @@ else:
     # test = "gemma"
     # test = "llama-3"
     # test = 'llama-3-70'
-    test = "gemma"
+    # test = "baichuan"
+    # test = "gemma"
     # test = 'mistral'
     # test = 'qwen1.5-7'
     # test = 'qwen1.5-1.8'
     # test = 'qwen1.5-70'
     # test = 'qwen2-7'
-    # test = "chatglm4"
+    test = "chatglm4"
 print("Testing " + test)
 
 # Load demo inputs
@@ -255,16 +256,12 @@ elif test == "baichuan":
             "base",
             id=0,
             promptOverride="why is deep learning so popular these days?",
-        ),
-        make_input(
-            "abcdabcd987/gsm8k-llama2-7b-lora-16",
-            "base",
-            id=1,
-            promptOverride="What are the differences between Manhattan and Brooklyn",
-        ),
+        )
     ]
     service = FlashinferLlama(
-        model_id="baichuan-inc/Baichuan2-7B-Chat", trust_remote_code=True
+        model_id="baichuan-inc/Baichuan2-7B-Chat",
+        lora_ids=["tjluyao/baichuan2-7b-chat-lora1"],
+        trust_remote_code=True
     )
 elif test == "qwen2-7":
     # Todo: qwen2-7b instruct lora adapter

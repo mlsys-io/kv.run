@@ -174,10 +174,14 @@ class ModelLoraWeight:
         self.down.to_gpu()
 
     def copy_from_tensors(self, ts: dict[str, torch.Tensor]):
-        self.q.copy_from_tensor(ts["q.A"], ts["q.B"])
-        self.k.copy_from_tensor(ts["k.A"], ts["k.B"])
-        self.v.copy_from_tensor(ts["v.A"], ts["v.B"])
-        self.o.copy_from_tensor(ts["o.A"], ts["o.B"])
+        if ts.get("q.A") is not None:
+            self.q.copy_from_tensor(ts["q.A"], ts["q.B"])
+        if ts.get("k.A") is not None:
+            self.k.copy_from_tensor(ts["k.A"], ts["k.B"])
+        if ts.get("v.A") is not None:
+            self.v.copy_from_tensor(ts["v.A"], ts["v.B"])
+        if ts.get("o.A") is not None:
+            self.o.copy_from_tensor(ts["o.A"], ts["o.B"])
         if ts.get("gate.A") is not None:
             self.gate.copy_from_tensor(ts["gate.A"], ts["gate.B"])
         if ts.get("up.A") is not None:
