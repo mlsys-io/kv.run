@@ -37,8 +37,8 @@ else:
     # test = 'qwen1.5-7'
     # test = 'qwen1.5-1.8'
     # test = 'qwen1.5-70'
-    test = 'qwen2-7'
-    # test = 'yi1.5-9b'
+    # test = 'qwen2-7'
+    test = 'yi1.5-9b'
     #test = "chatglm4"
 print("Testing " + test)
 
