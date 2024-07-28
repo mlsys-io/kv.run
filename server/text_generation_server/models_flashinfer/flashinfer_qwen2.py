@@ -50,6 +50,13 @@ class FlashinferQwen2(FlashinferLM):
 
         model = FlashQwen2ForCausalLM(qwenConfig, weights)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+        # Hack for problems in Qwen2 HF config
+        if "Instruct" in model_id:
+            tokenizer.eos_token_id = 151645
+        else:
+            tokenizer.eos_token_id = 151643
+
         super(FlashinferQwen2, self).__init__(
             model=model,
             tokenizer=tokenizer,

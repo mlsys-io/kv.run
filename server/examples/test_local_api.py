@@ -37,8 +37,8 @@ else:
     # test = 'qwen1.5-7'
     # test = 'qwen1.5-1.8'
     # test = 'qwen1.5-70'
-    # test = 'qwen2-7'
-    test = 'yi1.5-9b'
+    test = 'qwen2-7'
+    # test = 'yi1.5-9b'
     #test = "chatglm4"
 print("Testing " + test)
 
@@ -289,7 +289,8 @@ elif test == "qwen2-7":
             promptOverride="给我讲个故事",
         ),
     ]
-    service = FlashinferQwen2(model_id="Qwen/Qwen2-7B-Instruct", trust_remote_code=True)
+    #service = FlashinferQwen2(model_id="Qwen/Qwen2-7B-Instruct", trust_remote_code=True)
+    service = FlashinferQwen2(model_id="Qwen/Qwen2-7B", trust_remote_code=True)
 
 elif test == "chatglm4":
     # Todo: chatglm4-9b lora adapter
