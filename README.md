@@ -35,7 +35,7 @@ pip install flashinfer==0.1.1 -i https://flashinfer.ai/whl/cu121/torch2.3
 # For other CUDA & torch versions, please check https://docs.flashinfer.ai/installation.html
 
 # Install Flash and Paged Attention
-cd server && make install-flash-attention && make install-vllm-cuda
+cd server && make install-flash-attention && make install-vllm-cuda && install-flash-attention-v2-cuda
 ```
 
 #### Build Code Base
