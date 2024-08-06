@@ -425,8 +425,9 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
         loraWeight: BatchedModelLoraWeight,
+        input_embeddings: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids) if input_embeddings is None else input_embeddings
         hidden_states = self.model(
             inputs_embeds,
             kvCachePool,

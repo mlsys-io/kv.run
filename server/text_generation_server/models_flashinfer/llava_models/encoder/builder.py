@@ -1,5 +1,5 @@
 import os
-from .clip_encoder import CLIPVisionTower
+from .encoder import CLIPVisionTower
 
 
 def build_vision_tower(vision_tower_cfg, **kwargs):

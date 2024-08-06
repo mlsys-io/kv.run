@@ -7,7 +7,7 @@
 | Deepspeed MII   | PyTorch           | Deepspeed (Python)   | [DeepSpeed-Kernels](https://github.com/microsoft/DeepSpeed-Kernels)                              | Language                    |
 | TensorRT-LLM    | TensorRT-LLM      | TensorRT-LLM (C++)   | [TensorRT XQA](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/blogs/XQA-kernel.md) | Language                    |
 | vLLM            | vLLM              | vLLM (Python)        | Paged + Flash attention                                                                          | Language                    |
-| kv.run          | PyTorch           | HF TGI + more (Rust) | Paged + Flash attention, [FlashInfer](https://github.com/flashinfer-ai/flashinfer)               | Language, diffusion (soon) |
+| kv.run          | PyTorch           | HF TGI + more (Rust) | Paged + Flash attention, [FlashInfer](https://github.com/flashinfer-ai/flashinfer)               | Language, Diffusion models(soon) |
 
 
 
@@ -47,12 +47,6 @@ make install
 `Dockerfile_kvrun` provides a docker image building script. We will provide pre-built docker images shortly.
 
 ## Usages
-#### Deploy services
-```shell
-text-generation-launcher --model-id tjluyao/llama-3-8b
-```
-You can use `--disable-flashinfer` to force a classic TGI serving.
-
 #### Deploy services
 ```shell
 text-generation-launcher --model-id tjluyao/llama-3-8b

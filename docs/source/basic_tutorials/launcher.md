@@ -418,6 +418,14 @@ Options:
           [default: empty]
 
 ```
+## DISABLE_FLASHINFER
+```shell
+      --disable-flashinfer
+          Using Flashinfer kernel or not
+          
+          [env: DISABLE_FLASHINFER=]
+
+```
 ## HELP
 ```shell
   -h, --help
