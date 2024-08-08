@@ -19,7 +19,7 @@ from text_generation_server.layers.rotary import (
 from punica_kernels import (
     rms_norm,
 )
-from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
+from text_generation_server.utils.lora_utils import BatchedModelLoraWeightPhi
 from text_generation_server.utils.cache_manager_flashinfer import (
     KvCachePool,
     KvCacheBatchPosition,
@@ -174,7 +174,7 @@ class FlashPhiAttention(torch.nn.Module):
         batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeightPhi,
     ) -> torch.Tensor:
         q_dim = (
             self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
@@ -191,7 +191,7 @@ class FlashPhiAttention(torch.nn.Module):
         k = k_proj.contiguous()
         v = v_proj.contiguous()
         if loraWeight:
-            loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
+            loraWeight.apply_lora_weight_Wkvq(q, k, v, hidden_states, self.layer_idx)
 
         self.rotary_emb(
             q.view(
@@ -219,9 +219,11 @@ class FlashPhiAttention(torch.nn.Module):
         )
         attn_outputs = self.o_proj(attn_outputs_raw)
         if loraWeight:
-            loraWeight.apply_lora_weight_attn(
-            attn_outputs, attn_outputs_raw, self.layer_idx
-        )
+            # Note: Bug here, need to fix
+            # loraWeight.apply_lora_weight_attn(
+            #     attn_outputs, attn_outputs_raw, self.layer_idx
+            # )
+            pass
         return attn_outputs
 
 
@@ -256,7 +258,7 @@ class PhiMLP(nn.Module):
         )
 
     # TODO: add lora adapter
-    def forward(self, hidden_states, loraWeight: BatchedModelLoraWeight):
+    def forward(self, hidden_states, loraWeight: BatchedModelLoraWeightPhi):
         gate_up_states = self.up_proj(hidden_states)
         gate_up_acted = self.act(gate_up_states)
         gate_down_states = self.down_proj(gate_up_acted)
@@ -303,7 +305,7 @@ class FlashPhiLayer(nn.Module):
         batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeightPhi,
     ):
 
         hidden_states, res = self.input_layernorm(hidden_states, residual)
@@ -365,7 +367,7 @@ class FlashPhiModel(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeightPhi,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         position_ids, max_seq_len = (
@@ -451,7 +453,7 @@ class FlashPhiForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeightPhi,
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(

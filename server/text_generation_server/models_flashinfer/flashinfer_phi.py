@@ -95,4 +95,5 @@ class FlashinferPhi(FlashinferLM):
             dtype=dtype,
             device=device,
             lora_ids=lora_ids,
+            model_type="phi",
         )

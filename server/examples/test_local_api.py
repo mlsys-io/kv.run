@@ -235,21 +235,41 @@ elif test == "qwen1.5-70":
         quantize="gptq",
     )
 elif test == "phi":
+    # Local Model Path is used here, try below code to use remote model
+    # requests = [
+    #     make_input(
+    #         "/scratch/hy2203/models/VictorNanka/phi-2-sft-lora",
+    #         "base",
+    #         id=0,
+    #         promptOverride="why is deep learning so popular these days?",
+    #     ),
+    #     make_input(
+    #         "/scratch/hy2203/models/VictorNanka/phi-2-sft-lora",
+    #         "lora",
+    #         id=1,
+    #         promptOverride="why is deep learning so popular these days?",
+    #     ),
+    # ]
+    
+    # service = FlashinferPhi(model_id="/scratch/hy2203/models/microsoft/phi-2",
+    #                         lora_ids=['/scratch/hy2203/models/VictorNanka/phi-2-sft-lora'])
+    
     requests = [
         make_input(
-            "abcdabcd987/gsm8k-llama2-7b-lora-16",
+            "VictorNanka/phi-2-sft-lora",
             "base",
             id=0,
             promptOverride="why is deep learning so popular these days?",
         ),
         make_input(
-            "abcdabcd987/gsm8k-llama2-7b-lora-16",
-            "base",
+            "VictorNanka/phi-2-sft-lora",
+            "lora",
             id=1,
-            promptOverride="What are the differences between Manhattan and Brooklyn",
+            promptOverride="why is deep learning so popular these days?",
         ),
     ]
-    service = FlashinferPhi(model_id="microsoft/phi-2")
+    service = FlashinferPhi(model_id="microsoft/phi-2",
+                            lora_ids=['VictorNanka/phi-2-sft-lora'])
 elif test == "phi3":
     requests = [
         make_input(
