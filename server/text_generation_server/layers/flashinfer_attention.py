@@ -91,6 +91,25 @@ class FlashinferAttentionWrapper:
         else:
             self.decode_wrapper.end_forward()
 
+    def reshape_qkv_for_attention(self, q, k, v, batchPosition: KvCacheBatchPosition):
+        return (
+            q.view(
+                batchPosition.total_seq_len,
+                self.flashinferWrapper.num_attention_heads,
+                self.flashinferWrapper.head_dim,
+            ),
+            k.view(
+                batchPosition.total_seq_len,
+                self.flashinferWrapper.num_key_value_heads,
+                self.flashinferWrapper.head_dim,
+            ),
+            v.view(
+                batchPosition.total_seq_len,
+                self.flashinferWrapper.num_key_value_heads,
+                self.flashinferWrapper.head_dim,
+            ),
+        )
+
     def computeAttention(
         self,
         q: torch.Tensor,
@@ -101,9 +120,6 @@ class FlashinferAttentionWrapper:
         batchPosition: KvCacheBatchPosition,
         rotaryParams: AttentionRotaryParams,
     ):
-        q = q.view(batchPosition.total_seq_len, self.num_attention_heads, self.head_dim)
-        k = k.view(batchPosition.total_seq_len, self.num_key_value_heads, self.head_dim)
-        v = v.view(batchPosition.total_seq_len, self.num_key_value_heads, self.head_dim)
         q, k, v = self._pad_qkv(q, k, v)
         attn_output = (
             self._batchPrefill(q, k, v, cacheData, batchPosition, rotaryParams)
