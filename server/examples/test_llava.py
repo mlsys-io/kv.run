@@ -6,7 +6,6 @@ from collections import defaultdict
 
 service = LlavaLM(model_id="llava-hf/llava-v1.6-vicuna-7b-hf")
 tokenizer = service.language_model.tokenizer
-processor = service.processor
 
 prompts = [
     'How many people are in the image?',
@@ -29,7 +28,8 @@ def make_input(image, id = 0):
     request = generate_pb2.Request(
         id=id,
         inputs=f"![]({image}){prompt}\n\n",
-        truncate=1024,
+        #inputs=f"{prompt}\n\n",
+        truncate=4096,
         prefill_logprobs=True,
         top_n_tokens=20,
         parameters=generate_pb2.NextTokenChooserParameters(
@@ -48,17 +48,6 @@ def make_input(image, id = 0):
 
 requests = [make_input(image, i) for i in range(1)]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
-service.language_model.warmup(batchPb=batch)
-
-pb_batch = LlavaBatch.from_pb_processor(
-    batch, 
-    tokenizer, 
-    processor, 
-    service.language_model.model_config, 
-    torch.float16, 
-    torch.device("cuda"),
-    service.language_model,
-    )
 display_results = defaultdict(lambda: [])
 
 # Iterative generation: each step generates a token for each input in the batch
@@ -67,8 +56,10 @@ while True:
     if isPrefill:
         generations, next_batch, _ = service.prefill_batch(batch)
         isPrefill = False
+        print(generations[0].tokens.texts)
     else:
         generations, next_batch, _, _ = service.decode_batch([next_batch.to_pb()])
+        print(generations[0].tokens.texts)
 
     for gen in generations:
         if gen.prefill_tokens:
