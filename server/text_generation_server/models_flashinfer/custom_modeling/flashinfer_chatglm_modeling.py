@@ -152,7 +152,7 @@ class ChatGLMMLP(nn.Module):
             bias=False,
         )
 
-    def forward(self, hidden_states, loraWeight: BatchedModelLoraWeight):
+    def forward(self, hidden_states, loraWeight: BatchedModelLoraWeight | None):
         # [s, b, 3hp]
         up = self.up_proj(hidden_states)
         if loraWeight:
