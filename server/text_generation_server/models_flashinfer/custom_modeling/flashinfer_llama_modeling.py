@@ -105,7 +105,7 @@ class FlashLlamaAttention(nn.Module):
         batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         q_dim = (
             self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
@@ -271,7 +271,7 @@ class FlashLlamaLayer(nn.Module):
         batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
         attn_output = self.self_attn(
@@ -331,7 +331,7 @@ class FlashLlamaModel(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
         position_ids, max_seq_len = (
@@ -424,7 +424,7 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = self.model(

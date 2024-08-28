@@ -174,7 +174,7 @@ class FlashPhiAttention(torch.nn.Module):
         batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         q_dim = (
             self.flashinferWrapper.num_attention_heads * self.flashinferWrapper.head_dim
@@ -256,7 +256,7 @@ class PhiMLP(nn.Module):
         )
 
     # TODO: add lora adapter
-    def forward(self, hidden_states, loraWeight: BatchedModelLoraWeight):
+    def forward(self, hidden_states, loraWeight: BatchedModelLoraWeight | None):
         gate_up_states = self.up_proj(hidden_states)
         gate_up_acted = self.act(gate_up_states)
         gate_down_states = self.down_proj(gate_up_acted)
@@ -303,7 +303,7 @@ class FlashPhiLayer(nn.Module):
         batch_position: KvCacheBatchPosition,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ):
 
         hidden_states, res = self.input_layernorm(hidden_states, residual)
@@ -365,7 +365,7 @@ class FlashPhiModel(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         position_ids, max_seq_len = (
@@ -451,7 +451,7 @@ class FlashPhiForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
