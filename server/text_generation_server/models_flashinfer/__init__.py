@@ -13,6 +13,9 @@ from text_generation_server.models_flashinfer.flashinfer_mistral import (
 )
 from text_generation_server.models_flashinfer.flashinfer_phi import FlashinferPhi
 from text_generation_server.models_flashinfer.flashinfer_qwen2 import FlashinferQwen2
+from text_generation_server.models_flashinfer.flashinfer_chatglm import (
+    FlashinferChatGLM,
+)
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
 # in PyTorch 1.12 and later.
@@ -76,6 +79,11 @@ class ModelType(enum.Enum):
         "type": "qwen2",
         "name": "Qwen 2",
         "url": "https://huggingface.co/bigcode/starcoder2-15b-instruct-v0.1",
+    }
+    CHATGLM = {
+        "type": "chatglm",
+        "name": "Chatglm",
+        "url": "https://huggingface.co/THUDM/glm-4-9b-chat",
     }
 
 
@@ -168,6 +176,14 @@ def get_model(
             lora_ids.split(";") if lora_ids else None,
             quantize=quantize,
             dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
+    elif model_type == CHATGLM:
+        return FlashinferChatGLM(
+            model_id,
+            lora_ids.split(";") if lora_ids else None,
+            quantize=quantize,
+            dtype=torch.float16,
             trust_remote_code=trust_remote_code,
         )
 
