@@ -18,7 +18,8 @@ model/
 _build_meta.py
 .idea/
 lora_weights/
-.vscode/
+.vscode/*
+!.vscode/launch.json
 .venv
 .idea
 target
