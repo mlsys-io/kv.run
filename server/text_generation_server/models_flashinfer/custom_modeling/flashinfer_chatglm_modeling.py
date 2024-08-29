@@ -288,7 +288,12 @@ class FlashChatGLMAttention(nn.Module):
         q, k, v = self.flashinferWrapper.reshape_qkv_for_attention(
             q, k, v, batch_position
         )
-        rotate_query_key_in_place(q, k, cos, sin, is_neox=False)
+
+        try:
+            rotate_query_key_in_place(q, k, cos, sin, is_neox=False)
+        except Exception as e:
+            print(e)
+            raise e
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
             k,
@@ -338,7 +343,6 @@ class FlashChatGLM3Layer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
@@ -346,7 +350,7 @@ class FlashChatGLM3Layer(nn.Module):
         sin: torch.Tensor,
         loraWeight: BatchedModelLoraWeight | None,
     ):
-        normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
+        normed_hidden_states, _ = self.input_layernorm(hidden_states)
 
         attn_output = self.self_attn(
             normed_hidden_states,
@@ -358,13 +362,13 @@ class FlashChatGLM3Layer(nn.Module):
             loraWeight,
         )
 
-        normed_attn_res_output, attn_res = self.post_attention_layernorm(
-            attn_output, res
-        )
+        residual = hidden_states
+        layernorm_input = residual + attn_output
+        normed_attn_res_output, _ = self.post_attention_layernorm(layernorm_input)
+        residual = layernorm_input
+        mlp_output = self.mlp(normed_attn_res_output, loraWeight) + residual
 
-        mlp_output = self.mlp(normed_attn_res_output, loraWeight)
-
-        return mlp_output, attn_res
+        return mlp_output
 
 
 class FlashChatGLM3Model(torch.nn.Module):
@@ -428,8 +432,6 @@ class FlashChatGLM3Model(torch.nn.Module):
         loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
-        residual = None
-
         self.flashinferWrapper.prepareAttention(
             is_prefill,
             batch_position,
@@ -446,9 +448,8 @@ class FlashChatGLM3Model(torch.nn.Module):
             is_prefill,
         )
         for i, layer in enumerate(self.layers):
-            hidden_states, residual = layer(
+            hidden_states = layer(
                 hidden_states,
-                residual,
                 kvCachePool,
                 is_prefill,
                 batch_position,
@@ -457,7 +458,7 @@ class FlashChatGLM3Model(torch.nn.Module):
                 loraWeight,
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states)
         self.flashinferWrapper.endBatchAttention(is_prefill)
         return hidden_states
 
