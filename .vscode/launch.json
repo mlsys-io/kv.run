@@ -1,0 +1,28 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Kvrun Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/workspace/kv.run/server/text_generation_server/cli.py",
+            "console": "integratedTerminal",
+            "args": [
+                "serve", "THUDM/glm-4-9b-chat", "--trust-remote-code", "--disable-flashinfer"
+            ]
+        },
+        {
+            "name": "Debug test_local_api",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/workspace/kv.run/server/examples/test_local_api.py",
+            "console": "integratedTerminal",
+            "args": [
+                "chatglm4"
+            ]
+        }
+    ]
+}
