@@ -1,8 +1,6 @@
 from typing import Tuple
-from server.text_generation_server.utils.rotary_utils import (
+from text_generation_server.utils.rotary_utils import (
     get_cos_sin,
-    getPositionIdsAndMaxSeqLenForDecode,
-    getPositionIdsAndMaxSeqLenForPrefill,
     rotate_query_key_in_place,
 )
 from text_generation_server.layers.rotary import PositionRotaryEmbedding

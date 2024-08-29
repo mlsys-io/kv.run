@@ -22,8 +22,8 @@ def rotate_query_key_in_place(
 def rotate_in_place(x, cos, sin, is_neox):
     rotary_dim = cos.shape[-1] * 2
     if is_neox:
-        x1 = x[..., :rotary_dim]
-        x2 = x[..., rotary_dim : 2 * rotary_dim]
+        x1 = x[..., : rotary_dim // 2]
+        x2 = x[..., rotary_dim // 2 : rotary_dim]
         rotary_emb.apply_rotary(x1, x2, cos, sin, x1, x2, False)
     else:
         even_positions = list(range(0, rotary_dim, 2))

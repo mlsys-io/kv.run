@@ -19,7 +19,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
         prompts = lora_specs[lora_id].lora_prompts
     elif lora_or_base == "base" or lora_or_base == "empty":
         prompts = lora_specs[lora_id].base_prompts
-        lora_id = "empty"
+        lora_id = None
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
     prompt = random.choice(prompts) if not promptOverride else promptOverride

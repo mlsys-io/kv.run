@@ -8,7 +8,7 @@ from torch import nn
 import torch.distributed
 import torch.nn.functional as F
 
-from server.text_generation_server.layers.rotary import PositionRotaryEmbedding
+from text_generation_server.layers.rotary import PositionRotaryEmbedding
 from text_generation_server.layers.layernorm import FastRMSNorm
 from text_generation_server.utils.lora_utils import BatchedModelLoraWeight
 from text_generation_server.utils.cache_manager_flashinfer import (

@@ -6,7 +6,7 @@ from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
 from typing import Optional, List, Tuple
 
-from server.text_generation_server.utils.rotary_utils import (
+from text_generation_server.utils.rotary_utils import (
     get_cos_sin,
     rotate_query_key_in_place,
 )

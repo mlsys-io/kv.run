@@ -95,18 +95,18 @@ class FlashinferAttentionWrapper:
         return (
             q.view(
                 batchPosition.total_seq_len,
-                self.flashinferWrapper.num_attention_heads,
-                self.flashinferWrapper.head_dim,
+                self.num_attention_heads,
+                self.head_dim,
             ),
             k.view(
                 batchPosition.total_seq_len,
-                self.flashinferWrapper.num_key_value_heads,
-                self.flashinferWrapper.head_dim,
+                self.num_key_value_heads,
+                self.head_dim,
             ),
             v.view(
                 batchPosition.total_seq_len,
-                self.flashinferWrapper.num_key_value_heads,
-                self.flashinferWrapper.head_dim,
+                self.num_key_value_heads,
+                self.head_dim,
             ),
         )
 
