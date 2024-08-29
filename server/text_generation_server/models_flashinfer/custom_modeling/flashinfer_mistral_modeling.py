@@ -191,14 +191,6 @@ class MistralAttention(torch.nn.Module):
         self.num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.num_heads
-
-        self.rotary_emb = PositionRotaryEmbedding.static(
-            config=config,
-            dim=self.head_size,
-            base=config.rope_theta,
-            device=weights.device,
-        )
-
         self.softmax_scale = self.head_size**-0.5
 
         if self.num_heads % weights.process_group.size() != 0:
@@ -251,6 +243,10 @@ class MistralAttention(torch.nn.Module):
         v = v_proj.contiguous()
         if loraWeight:
             loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
+
+        q, k, v = self.flashinferWrapper.reshape_qkv_for_attention(
+            q, k, v, batch_position
+        )
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
             k,
@@ -263,8 +259,8 @@ class MistralAttention(torch.nn.Module):
         attn_outputs = self.o_proj(attn_outputs_raw)
         if loraWeight:
             loraWeight.apply_lora_weight_attn(
-            attn_outputs, attn_outputs_raw, self.layer_idx
-        )
+                attn_outputs, attn_outputs_raw, self.layer_idx
+            )
         return attn_outputs
 
 

@@ -355,6 +355,9 @@ class FlashQwen2Attention(nn.Module):
         if loraWeight:
             loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
 
+        q, k, v = self.flashinferWrapper.reshape_qkv_for_attention(
+            q, k, v, batch_position
+        )
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
             k,
