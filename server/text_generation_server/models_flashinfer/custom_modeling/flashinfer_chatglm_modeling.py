@@ -289,11 +289,7 @@ class FlashChatGLMAttention(nn.Module):
             q, k, v, batch_position
         )
 
-        try:
-            rotate_query_key_in_place(q, k, cos, sin, is_neox=False)
-        except Exception as e:
-            print(e)
-            raise e
+        rotate_query_key_in_place(q, k, cos, sin, is_neox=False)
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
             k,
