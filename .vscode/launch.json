@@ -8,17 +8,17 @@
             "name": "Debug Kvrun Server",
             "type": "debugpy",
             "request": "launch",
-            "program": "/workspace/kv.run/server/text_generation_server/cli.py",
+            "program": "${workspaceFolder}/server/text_generation_server/cli.py",
             "console": "integratedTerminal",
             "args": [
-                "serve", "THUDM/glm-4-9b-chat", "--trust-remote-code", "--disable-flashinfer"
+                "serve", "THUDM/glm-4-9b-chat", "--trust-remote-code","--disable-flashinfer"
             ]
         },
         {
             "name": "Debug test_local_api",
             "type": "debugpy",
             "request": "launch",
-            "program": "/workspace/kv.run/server/examples/test_local_api.py",
+            "program": "${workspaceFolder}/server/examples/test_local_api.py",
             "console": "integratedTerminal",
             "args": [
                 "chatglm4"
