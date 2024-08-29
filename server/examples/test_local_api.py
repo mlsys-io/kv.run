@@ -74,6 +74,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             top_p=0.9,
             typical_p=0.9,
             repetition_penalty=1.1,
+            seed=1000,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
             max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
@@ -86,7 +87,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
 if test == "llama-2":
     # Load model
     service = FlashinferLlama(
-        model_id="meta-llama/Llama-2-7b-hf",
+        model_id="meta-llama/Llama-2-7b-chat-hf",
         lora_ids=["abcdabcd987/gsm8k-llama2-7b-lora-16"],
     )
     # Create an input batch of two queries
