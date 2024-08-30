@@ -13,8 +13,7 @@ from text_generation_server.models.types import (
     GeneratedText,
 )
 from dataclasses import dataclass
-from transformers import AutoConfig, AutoModel, AutoProcessor
-from transformers.models.llava.modeling_llava import LlavaMultiModalProjector
+from transformers import AutoConfig, AutoProcessor
 from loguru import logger
 from text_generation_server.pb import generate_pb2
 tracer = trace.get_tracer(__name__)
@@ -30,7 +29,12 @@ from text_generation_server.models_flashinfer.flashinfer_causal_lm import (
     PAGE_LEN,
     KvCachePool,
 )
-from text_generation_server.models_flashinfer.flashinfer_llama import FlashinferLlama
+from text_generation_server.models_flashinfer.flashinfer_llama import (
+    FlashinferLlama,
+    weight_files,
+    Weights,
+    initialize_torch_distributed,
+)
 from text_generation_server.models.vlm_causal_lm import (
     image_text_replacement,
     load_data_uri,
@@ -39,6 +43,8 @@ from text_generation_server.models.vlm_causal_lm import (
 from text_generation_server.models.custom_modeling.llava_next import (
     get_anyres_image_grid_shape,
     unpad_image,
+    load_vision_model,
+    LlavaNextMultiModalProjector,
 )
 
 @dataclass
@@ -75,15 +81,28 @@ class LlavaLM(Model):
     ):  
         # Initialize LlavaLM
         self.config = AutoConfig.from_pretrained(model_id)
-        self.vision_tower = AutoModel.from_config(self.config.vision_config)
+        self.config.quantize = quantize
+        self.config.vision_config.quantize = quantize
+        self.process_group, rank, world_size = initialize_torch_distributed()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.distributed.barrier(group=self.process_group)
+        filenames = weight_files(model_id, revision=revision, extension=".safetensors")
+        weights = Weights(filenames, self.device, dtype, process_group=self.process_group)
+        
+        self.vision_tower = load_vision_model(
+            prefix="vision_tower",
+            config=self.config.vision_config,
+            weights=weights,
+        )
+
+        self.multi_modal_projector = LlavaNextMultiModalProjector(
+            prefix="multi_modal_projector", config=self.config, weights=weights
+        )
+        
         self.processor = AutoProcessor.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
-        self.multi_modal_projector = LlavaMultiModalProjector(self.config)
         self.vocab_size = self.config.text_config.vocab_size
-        
-        llama_config = AutoConfig.from_pretrained('lmsys/vicuna-7b-v1.5')
-        setattr(self.config, 'num_attention_heads', llama_config.num_attention_heads)
         
         self.language_model = FlashinferLlama(
             model_id= model_id,
@@ -94,8 +113,7 @@ class LlavaLM(Model):
             trust_remote_code= trust_remote_code, 
         )
         
-        embed_std = 1 / math.sqrt(self.config.text_config.hidden_size)
-        self.image_newline = torch.nn.Parameter(torch.randn(self.config.text_config.hidden_size, dtype=self.language_model.dtype) * embed_std)
+        self.image_newline = self.image_newline = weights.get_tensor("image_newline")
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self.id_embedder = self.language_model.model.embed_tokens
         self.vision_feature_select_strategy = self.config.vision_feature_select_strategy
@@ -306,11 +324,11 @@ class LlavaLM(Model):
             self.processor, 
             self.config
         )
-        
-        input_ids = torch.tensor(batch_tokenized_inputs, device=self.language_model.device)
+
+        input_ids = [torch.tensor(_tokenized, device=self.language_model.device) for _tokenized in batch_tokenized_inputs]
         
         if image_inputs is not None:
-            pixel_values = image_inputs["pixel_values"].to(device=self.vision_tower.device)
+            pixel_values = image_inputs["pixel_values"].to(device=self.language_model.device)
             if "pixel_attention_mask" in image_inputs:
                 pixel_attention_mask = image_inputs["pixel_attention_mask"].to(
                     device=self.vision_tower.device
@@ -318,7 +336,7 @@ class LlavaLM(Model):
             else:
                 pixel_attention_mask = None
             if "image_sizes" in image_inputs:
-                image_sizes = image_inputs["image_sizes"].to(device=self.vision_tower.device)
+                image_sizes = image_inputs["image_sizes"].to(device=self.language_model.device)
             else:
                 image_sizes = None
         else:
@@ -327,10 +345,11 @@ class LlavaLM(Model):
             image_sizes = None
             
         # Embed the input
-        inputs_embeds = self.id_embedder(input_ids)
+        inputs_embeds = [self.id_embedder(_input_ids) for _input_ids in input_ids]
         
         if pixel_values is not None and len(pixel_values) > 0:
             num_images, num_patches, channels, height, width = pixel_values.shape
+            print(f"num_images: {num_images}, num_patches: {num_patches}, channels: {channels}, height: {height}, width: {width}")
             pixel_values = pixel_values.view(
                 num_images * num_patches, channels, height, width
             )
@@ -395,16 +414,17 @@ class LlavaLM(Model):
                         (image_feature, self.image_newline[None]), dim=0
                     )
                 new_image_features.append(image_feature)
-            image_features = torch.stack(new_image_features, dim=0)
 
-            inputs_embeds = self._merge_input_ids_with_image_features(
-                input_ids, inputs_embeds, image_features.to(inputs_embeds.dtype).to(inputs_embeds.device)
-            )
-        
+            model_input = []
+            for _input_ids, _input_embeds, _image_features in zip(input_ids, inputs_embeds, new_image_features):
+                mask = _input_ids == self.config.image_token_index
+                _input_embeds[mask] = _image_features.view(-1, _image_features.shape[-1])
+                model_input.append(_input_embeds.view(-1, _input_embeds.shape[-1]))
+            model_input = torch.concat(model_input, dim=0)
+                
         batch = self.batch_convert(pb_batch, input_ids)
         
-        inputs_embeds = inputs_embeds.view(-1, inputs_embeds.shape[-1])
-        generations, next_batch, timings = self.generate_token(batch, inputs_embeds)
+        generations, next_batch, timings = self.generate_token(batch, model_input)
         if next_batch:
             self.language_model.batch_cache.set(next_batch)
         return generations, batch, timings
@@ -423,12 +443,9 @@ class LlavaLM(Model):
                     full_text += chunk["content"]
                 elif chunk["type"] == "image":
                     image = chunk["content"]
-                    # Should never receive URLs anymore, processing should be done
-                    # On the rust layer.
-                    # This avoid making n queries per TP
-                    # if image.startswith("https://") or image.startswith("http://"):
-                    #     image = processor.image_processor.fetch_images(image)
-                    if image.startswith("data:"):
+                    if image.startswith("https://") or image.startswith("http://"):
+                        image = processor.image_processor.fetch_images(image)
+                    elif image.startswith("data:"):
                         image = load_data_uri(image)
                     else:
                         raise RuntimeError(
@@ -436,11 +453,10 @@ class LlavaLM(Model):
                         )
                     image_input = processor.image_processor(image, return_tensors="pt")
                     full_text += image_text_replacement(image_input, config, image_id)
-                    #full_text += f"<image>"
                     image_inputs.append(image_input)
                 else:
                     raise RuntimeError(f"Invalid chunk type {chunk['type']}")
-
+                
             batch_inputs.append(full_text)
             max_truncation = max(max_truncation, r.truncate)
 
@@ -450,6 +466,7 @@ class LlavaLM(Model):
             max_length=max_truncation,
             add_special_tokens=not config.model_type == "paligemma",
         )["input_ids"]
+        
         if image_inputs:
             image_input = image_inputs[0]
             new_image_inputs = {
@@ -482,13 +499,11 @@ class LlavaLM(Model):
 
         for i,request in enumerate(batchPb.requests):
             _input_ids = input_ids[i]
-            prompt_mask = _input_ids != self.config.image_token_index
-            prompt_ids = _input_ids[prompt_mask]
             
             parameters = request.parameters
             request_context = RequestContext(
                 request.id,
-                prompt_ids,
+                _input_ids,
                 next_token_chooser_parameter=parameters,
                 maxlen=min(request.stopping_parameters.max_new_tokens, 4096),
                 stop_token_id=self.language_model.tokenizer.eos_token_id,
