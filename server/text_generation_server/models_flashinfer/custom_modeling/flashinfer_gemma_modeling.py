@@ -360,6 +360,9 @@ class FlashGemmaAttention(nn.Module):
         v = v_proj.contiguous()
         if loraWeight:
             loraWeight.apply_lora_weight_kvq(q, k, v, hidden_states, self.layer_idx)
+        q, k, v = self.flashinferWrapper.reshape_qkv_for_attention(
+            q, k, v, batch_position
+        )
         attn_outputs_raw = self.flashinferWrapper.computeAttention(
             q,
             k,
@@ -372,8 +375,8 @@ class FlashGemmaAttention(nn.Module):
         attn_outputs = self.o_proj(attn_outputs_raw)
         if loraWeight:
             loraWeight.apply_lora_weight_attn(
-            attn_outputs, attn_outputs_raw, self.layer_idx
-        )
+                attn_outputs, attn_outputs_raw, self.layer_idx
+            )
         return attn_outputs
 
 
@@ -410,7 +413,9 @@ class GemmaMLP(nn.Module):
             config.intermediate_size // weights.process_group.size()
         )
 
-    def forward(self, hidden_states: torch.Tensor, loraWeight: BatchedModelLoraWeight):
+    def forward(
+        self, hidden_states: torch.Tensor, loraWeight: BatchedModelLoraWeight | None
+    ):
         gate_up_states = self.gate_up_proj(hidden_states)
         gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
         gate = gate_up_states[:, 0].contiguous()
@@ -460,7 +465,7 @@ class FlashGemmaLayer(nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
         attn_output = self.self_attn(
@@ -525,7 +530,7 @@ class FlashGemmaModel(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -569,7 +574,7 @@ class FlashGemmaForCausalLM(torch.nn.Module):
         kvCachePool: KvCachePool,
         is_prefill: bool,
         batch_position: KvCacheBatchPosition,
-        loraWeight: BatchedModelLoraWeight,
+        loraWeight: BatchedModelLoraWeight | None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.model(
             input_ids,

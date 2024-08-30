@@ -47,7 +47,7 @@ class RequestContext:
         is_stopped: bool,
         request_kv_cache: RequestKvCache,
         prefill_logprobs: bool = True,
-        lora_id: str = "empty",
+        lora_id: Optional[str] = None,
     ):
         self.request_id = request_id
         self.maxlen = maxlen

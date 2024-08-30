@@ -19,7 +19,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
         prompts = lora_specs[lora_id].lora_prompts
     elif lora_or_base == "base" or lora_or_base == "empty":
         prompts = lora_specs[lora_id].base_prompts
-        lora_id = "empty"
+        lora_id = None
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
     prompt = random.choice(prompts) if not promptOverride else promptOverride
@@ -37,6 +37,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             top_p=0.9,
             typical_p=0.9,
             repetition_penalty=1.1,
+            seed=1000,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
             max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
@@ -51,7 +52,7 @@ requests = [
         "tjluyao/gemma-2b-it-math",
         "base",
         id=0,
-        promptOverride="What is deep learning?",
+        promptOverride="给我讲个故事",
     ),
     make_input(
         "tjluyao/gemma-2b-it-math",
