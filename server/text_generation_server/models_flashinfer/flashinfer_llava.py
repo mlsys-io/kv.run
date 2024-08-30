@@ -349,7 +349,6 @@ class LlavaLM(Model):
         
         if pixel_values is not None and len(pixel_values) > 0:
             num_images, num_patches, channels, height, width = pixel_values.shape
-            print(f"num_images: {num_images}, num_patches: {num_patches}, channels: {channels}, height: {height}, width: {width}")
             pixel_values = pixel_values.view(
                 num_images * num_patches, channels, height, width
             )
