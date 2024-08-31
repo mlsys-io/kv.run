@@ -2,7 +2,6 @@
 # Editor: Junyi Shen
 
 import torch
-import math
 import time
 from opentelemetry import trace
 from typing import Optional, Tuple, List, Type, Iterable
@@ -111,6 +110,7 @@ class LlavaLM(Model):
             quantize= quantize,
             dtype= dtype,
             trust_remote_code= trust_remote_code, 
+            weights= weights,
         )
         
         self.image_newline = self.image_newline = weights.get_tensor("image_newline")
@@ -526,23 +526,6 @@ class LlavaLM(Model):
             pixel_attention_mask=pixel_attention_mask,
             image_sizes=image_sizes,
         )
-    
-    def _merge_input_ids_with_image_features(
-        self,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        image_features: torch.Tensor,
-    ):
-        """In place merges in vision_embeddings with inputs_embeds."""
-        mask = input_ids == self.config.image_token_index
-        # Let's pray we have enabled enough slots !
-        try:
-            inputs_embeds[mask] = image_features.view(-1, image_features.shape[-1])
-        except Exception as e:
-            raise RuntimeError(
-                f"Cannot fill images right now. If error happens at warmup, make sure you have enough `--max-input-tokens`  to handle images. If error happens at regular runtime, please fill in an issue: {e}"
-            )
-        return inputs_embeds
 
 if __name__ == '__main__':
     model = LlavaLM(model_id='llava-hf/llava-v1.6-vicuna-7b-hf')

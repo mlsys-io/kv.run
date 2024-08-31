@@ -25,6 +25,7 @@ class FlashinferLlama(FlashinferLM):
         quantize: Optional[str] = None,
         dtype: Optional[torch.dtype] = torch.float16,
         trust_remote_code: bool = False,
+        weights: Optional[Weights] = None,
     ):
         dtype = dtype or torch.float16
         self.process_group, rank, world_size = initialize_torch_distributed()
@@ -82,11 +83,11 @@ class FlashinferLlama(FlashinferLM):
             config.rope_theta = 1.0e4
 
         torch.distributed.barrier(group=self.process_group)
-
-        filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-        weights = Weights(filenames, device, dtype, process_group=self.process_group)
-        if config.quantize in ["gptq", "awq"]:
-            weights._set_gptq_params(model_id, revision)
+        if not weights:
+            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
+            weights = Weights(filenames, device, dtype, process_group=self.process_group)
+            if config.quantize in ["gptq", "awq"]:
+                weights._set_gptq_params(model_id, revision)
 
         prefix = "language_model" if 'llava' in model_id else ""
         model = FlashLlamaForCausalLM(prefix, config, weights)
