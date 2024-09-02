@@ -96,6 +96,15 @@ class FlashinferBatch:
         )
 
 
+@dataclass
+class DebugInfo:
+    forward_ns: float
+    decode_ns: float
+    total_ns: float
+    concat_ns: Optional[float]
+    all_log_probs: Optional[torch.Tensor]
+
+
 class FlashinferLM(Model):
     def __init__(
         self,
@@ -167,23 +176,24 @@ class FlashinferLM(Model):
 
     def decode_batch(
         self, cachedBatchesPb: Iterable[generate_pb2.CachedBatch]
-    ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int], int]:
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
         start_concat = time.time_ns()
         batch = self._convertCachedBatch(cachedBatchesPb)
         concat_ns = time.time_ns() - start_concat
-        generations, next_batch, timings = self.generate_token(batch)
+        generations, next_batch, debug_info = self.generate_token(batch)
+        debug_info.concat_ns = concat_ns
         if next_batch:
             self.batch_cache.set(next_batch)
-        return generations, next_batch, timings, concat_ns
+        return generations, next_batch, debug_info
 
     def prefill_batch(
-        self, batchPb: generate_pb2.Batch
-    ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
+        self, batchPb: generate_pb2.Batch, debug_mode: bool = False
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
         batch = self._convertPbBatch(batchPb)
-        generations, next_batch, timings = self.generate_token(batch)
+        generations, next_batch, debug_info = self.generate_token(batch, debug_mode)
         if next_batch:
             self.batch_cache.set(next_batch)
-        return generations, batch, timings
+        return generations, batch, debug_info
 
     def warmup(self, batchPb: generate_pb2.Batch):
         if not self.kvCachePool:
@@ -389,8 +399,8 @@ class FlashinferLM(Model):
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
     def generate_token(
-        self, batch: FlashinferBatch
-    ) -> Tuple[List[Generation], Optional[FlashinferBatch], Tuple[int, int]]:
+        self, batch: FlashinferBatch, debug_mode: bool = False
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
         start = time.time_ns()
         input_ids, lora_ids, lora_lens = [], [], []
         request_kv_caches = []
@@ -450,18 +460,20 @@ class FlashinferLM(Model):
         num_stopped_requests = 0
         start_next_token_id = time.time_ns()
 
-        next_token_ids, next_token_logprobs, logprobs, _, _ = (
+        next_token_ids, next_token_logprobs, alllogprobs, _, _ = (
             self._get_next_batch_token_id_heterogeneous(
                 batch.request_contexts, all_input_ids_tensor, logits
             )
         )
+
         next_token_id_ns = time.time_ns() - start_next_token_id
 
         for i, request_context in enumerate(batch.request_contexts):
             if request_context.is_stopped:
                 num_stopped_requests += 1
                 continue
-            next_token_id = next_token_ids[i - num_stopped_requests]
+            next_token_id = next_token_ids[i - num_stopped_requests].item()
+            next_token_logprob = next_token_logprobs[i - num_stopped_requests].item()
             request_context.append_token(next_token_id)
             text = self.tokenizer.decode(
                 next_token_id,
@@ -495,7 +507,7 @@ class FlashinferLM(Model):
                 request_context.prefill_tokens,
                 Tokens(
                     [next_token_id],
-                    [0],  # prob
+                    [next_token_logprob],
                     [text],
                     [next_token_id in self.all_special_ids],
                 ),
@@ -507,8 +519,26 @@ class FlashinferLM(Model):
 
         forward_ns = start_decode - start
         decode_ns = next_token_id_ns
+        debug_info = (
+            DebugInfo(
+                forward_ns=forward_ns,
+                decode_ns=decode_ns,
+                total_ns=time.time_ns() - start,
+                concat_ns=None,
+                all_log_probs=alllogprobs,
+            )
+            if debug_mode
+            else DebugInfo(
+                forward_ns=0,
+                decode_ns=0,
+                total_ns=0,
+                concat_ns=None,
+                all_log_probs=None,
+            )
+        )
+
         # The router stops generation only when batch=None
         if all_stop:
-            return generations, None, (forward_ns, decode_ns)
+            return generations, None, debug_info
         else:
-            return generations, batch, (forward_ns, decode_ns)
+            return generations, batch, debug_info
