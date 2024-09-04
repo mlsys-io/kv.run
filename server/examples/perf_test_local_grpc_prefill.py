@@ -1,6 +1,8 @@
 import grpc
 from text_generation_server.pb import generate_pb2_grpc, generate_pb2
 import random, json
+
+import torch
 from test_cases import DEMO, LoraSpec
 
 lora_specs = {}
@@ -14,7 +16,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
         prompts = lora_specs[lora_id].lora_prompts
     elif lora_or_base == "base" or lora_or_base == "empty":
         prompts = lora_specs[lora_id].base_prompts
-        lora_id = "empty"
+        lora_id = None
     else:
         raise ValueError(f"Unknown lora_or_base={lora_or_base}")
     prompt = random.choice(prompts) if not promptOverride else promptOverride
@@ -71,7 +73,8 @@ num_tests = 100
 batch_size = 32
 
 forward_ms_all = []
-decode_ms_all = []
+decode_token_ms_all = []
+decode_text_ms_all = []
 total_ms_all = []
 
 with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
@@ -88,14 +91,35 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
         batch = generateBatch(batch_size)
         prefillRequest = generate_pb2.PrefillRequest(batch=batch)
         response = stub.Prefill(prefillRequest)
+        # print(response)
+        decode_text_ms = (
+            response.total_ns - response.forward_ns - response.decode_ns
+        ) / 1e6
         forward_ms_all.append(response.forward_ns / 1e6)
-        decode_ms_all.append(response.decode_ns / 1e6)
+        decode_token_ms_all.append(response.decode_ns / 1e6)
+        decode_text_ms_all.append(decode_text_ms)
         total_ms_all.append(response.total_ns / 1e6)
 
         clearCacheRequest = generate_pb2.ClearCacheRequest(id=batch.id)
         stub.ClearCache(clearCacheRequest)
+        torch.cuda.empty_cache()
 
 
 print(forward_ms_all)
-print(decode_ms_all)
+print(decode_token_ms_all)
+print(decode_text_ms_all)
 print(total_ms_all)
+
+average_forward_ms = sum(forward_ms_all) / len(forward_ms_all) if forward_ms_all else 0
+average_decode_token_ms = (
+    sum(decode_token_ms_all) / len(decode_token_ms_all) if decode_token_ms_all else 0
+)
+average_decode_text_ms = (
+    sum(decode_text_ms_all) / len(decode_text_ms_all) if decode_text_ms_all else 0
+)
+average_total_ms = sum(total_ms_all) / len(total_ms_all) if total_ms_all else 0
+
+print(f"Average Forward Time (ms): {average_forward_ms}")
+print(f"Average Decode Token Time (ms): {average_decode_token_ms}")
+print(f"Average Decode Text Time (ms): {average_decode_text_ms}")
+print(f"Average Total Time (ms): {average_total_ms}")

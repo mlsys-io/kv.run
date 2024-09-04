@@ -448,7 +448,8 @@ class FlashinferLM(Model):
             loraWeights,
         )
 
-        start_decode = time.time_ns()
+        torch.cuda.synchronize()
+        start_decode_token = time.time_ns()
         logits = (
             raw_logits[batch_position.seq_indptr[1:] - 1]
             if batch.is_prefill
@@ -458,22 +459,24 @@ class FlashinferLM(Model):
         all_stop = True
         generations: List[Generation] = []
         num_stopped_requests = 0
-        start_next_token_id = time.time_ns()
-
         next_token_ids, next_token_logprobs, alllogprobs, _, _ = (
             self._get_next_batch_token_id_heterogeneous(
                 batch.request_contexts, all_input_ids_tensor, logits
             )
         )
 
-        next_token_id_ns = time.time_ns() - start_next_token_id
+        next_token_ids_list = next_token_ids.tolist()
+        next_token_logprobs_list = next_token_logprobs.tolist()
+
+        torch.cuda.synchronize()
+        start_decode_text = time.time_ns()
 
         for i, request_context in enumerate(batch.request_contexts):
             if request_context.is_stopped:
                 num_stopped_requests += 1
                 continue
-            next_token_id = next_token_ids[i - num_stopped_requests].item()
-            next_token_logprob = next_token_logprobs[i - num_stopped_requests].item()
+            next_token_id = next_token_ids_list[i - num_stopped_requests]
+            next_token_logprob = next_token_logprobs_list[i - num_stopped_requests]
             request_context.append_token(next_token_id)
             text = self.tokenizer.decode(
                 next_token_id,
@@ -517,21 +520,23 @@ class FlashinferLM(Model):
             )
             generations.append(generation)
 
-        forward_ns = start_decode - start
-        decode_ns = next_token_id_ns
+        torch.cuda.synchronize()
+        forward_ns = start_decode_token - start
+        decode_ns = start_decode_text - start_decode_token
+        total_ns = time.time_ns() - start
         debug_info = (
             DebugInfo(
                 forward_ns=forward_ns,
                 decode_ns=decode_ns,
-                total_ns=time.time_ns() - start,
+                total_ns=total_ns,
                 concat_ns=None,
                 all_log_probs=alllogprobs,
             )
             if debug_mode
             else DebugInfo(
-                forward_ns=0,
-                decode_ns=0,
-                total_ns=0,
+                forward_ns=forward_ns,
+                decode_ns=decode_ns,
+                total_ns=total_ns,
                 concat_ns=None,
                 all_log_probs=None,
             )
