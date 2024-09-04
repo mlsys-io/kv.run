@@ -36,7 +36,7 @@ def make_input(lora_id, lora_or_base, id=0, promptOverride=None):
             repetition_penalty=1.1,
         ),
         stopping_parameters=generate_pb2.StoppingCriteriaParameters(
-            max_new_tokens=2048, stop_sequences=[], ignore_eos_token=True
+            max_new_tokens=32, stop_sequences=[], ignore_eos_token=True
         ),
         lora_id=lora_id,
     )
@@ -82,8 +82,8 @@ with grpc.insecure_channel("unix:///tmp/text-generation-server-0") as channel:
     print(stub.Info(generate_pb2.InfoRequest()))
     warmupRequest = generate_pb2.WarmupRequest(
         batch=generateBatch(2),
-        max_total_tokens=2048,
-        max_prefill_tokens=1024,
+        max_total_tokens=64,
+        max_prefill_tokens=32,
         max_input_length=1024,
     )
     stub.Warmup(warmupRequest)
