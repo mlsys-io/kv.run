@@ -80,9 +80,9 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
         return generate_pb2.PrefillResponse(
             generations=[generation.to_pb() for generation in generations],
             batch=next_batch.to_pb() if next_batch else None,
-            forward_ns=debug_info.forward_ns,
-            decode_ns=debug_info.decode_ns,
-            total_ns=time.time_ns() - start,
+            forward_ns=int(debug_info.forward_ns),
+            decode_ns=int(debug_info.decode_ns),
+            total_ns=int(time.time_ns() - start),
         )
 
     async def Decode(self, request, context):

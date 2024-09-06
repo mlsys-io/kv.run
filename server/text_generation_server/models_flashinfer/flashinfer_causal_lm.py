@@ -396,12 +396,7 @@ class FlashinferLM(Model):
     def batch_type(self):
         return FlashinferBatch
 
-    @tracer.start_as_current_span("generate_token")
-    @torch.no_grad()
-    def generate_token(
-        self, batch: FlashinferBatch, debug_mode: bool = False
-    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
-        start = time.time_ns()
+    def _prepare_model_inputs(self, batch: FlashinferBatch):
         input_ids, lora_ids, lora_lens = [], [], []
         request_kv_caches = []
         all_input_ids_stacked: List[List[int]] = []
@@ -440,40 +435,21 @@ class FlashinferLM(Model):
             if lora_ids
             else None
         )
-        raw_logits, _ = self.model(
-            input_ids_tensor,
-            self.kvCachePool,
-            batch.is_prefill,
-            batch_position,
-            loraWeights,
-        )
 
-        start_decode = time.time_ns()
-        logits = (
-            raw_logits[batch_position.seq_indptr[1:] - 1]
-            if batch.is_prefill
-            else raw_logits
-        )
+        return input_ids_tensor, all_input_ids_tensor, batch_position, loraWeights
 
+    def _decode_text(
+        self, batch: FlashinferBatch, next_token_ids_list, next_token_logprobs_list
+    ):
         all_stop = True
         generations: List[Generation] = []
         num_stopped_requests = 0
-        start_next_token_id = time.time_ns()
-
-        next_token_ids, next_token_logprobs, alllogprobs, _, _ = (
-            self._get_next_batch_token_id_heterogeneous(
-                batch.request_contexts, all_input_ids_tensor, logits
-            )
-        )
-
-        next_token_id_ns = time.time_ns() - start_next_token_id
-
         for i, request_context in enumerate(batch.request_contexts):
             if request_context.is_stopped:
                 num_stopped_requests += 1
                 continue
-            next_token_id = next_token_ids[i - num_stopped_requests].item()
-            next_token_logprob = next_token_logprobs[i - num_stopped_requests].item()
+            next_token_id = next_token_ids_list[i - num_stopped_requests]
+            next_token_logprob = next_token_logprobs_list[i - num_stopped_requests]
             request_context.append_token(next_token_id)
             text = self.tokenizer.decode(
                 next_token_id,
@@ -516,22 +492,66 @@ class FlashinferLM(Model):
                 None,
             )
             generations.append(generation)
+            return generations, all_stop
 
-        forward_ns = start_decode - start
-        decode_ns = next_token_id_ns
+    @tracer.start_as_current_span("generate_token")
+    @torch.no_grad()
+    def generate_token(
+        self, batch: FlashinferBatch, debug_mode: bool = False
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
+        start = time.time_ns()
+        input_ids_tensor, all_input_ids_tensor, batch_position, loraWeights = (
+            self._prepare_model_inputs(batch)
+        )
+        raw_logits, _ = self.model(
+            input_ids_tensor,
+            self.kvCachePool,
+            batch.is_prefill,
+            batch_position,
+            loraWeights,
+        )
+        torch.cuda.synchronize()
+        start_decode_token = time.time_ns()
+
+        logits = (
+            raw_logits[batch_position.seq_indptr[1:] - 1]
+            if batch.is_prefill
+            else raw_logits
+        )
+
+        next_token_ids, next_token_logprobs, alllogprobs, _, _ = (
+            self._get_next_batch_token_id_heterogeneous(
+                batch.request_contexts, all_input_ids_tensor, logits
+            )
+        )
+
+        next_token_ids_list = next_token_ids.tolist()
+        next_token_logprobs_list = next_token_logprobs.tolist()
+        torch.cuda.synchronize()
+        start_decode_text = time.time_ns()
+
+        generations, all_stop = self._decode_text(
+            batch, next_token_ids_list, next_token_logprobs_list
+        )
+        torch.cuda.synchronize()
+        end = time.time_ns()
+
+        forward_ns = start_decode_token - start
+        decode_ns = start_decode_text - start_decode_token
+        total_ns = end - start
         debug_info = (
             DebugInfo(
                 forward_ns=forward_ns,
                 decode_ns=decode_ns,
-                total_ns=time.time_ns() - start,
+                total_ns=total_ns,
                 concat_ns=None,
                 all_log_probs=alllogprobs,
             )
             if debug_mode
             else DebugInfo(
-                forward_ns=0,
-                decode_ns=0,
-                total_ns=0,
+                forward_ns=forward_ns,
+                decode_ns=decode_ns,
+                total_ns=total_ns,
                 concat_ns=None,
                 all_log_probs=None,
             )
