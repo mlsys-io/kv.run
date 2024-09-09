@@ -74,7 +74,7 @@ class RequestContext:
         return None
 
 
-@dataclass
+@dataclass(frozen=True)
 class FlashinferBatch:
     batch_id: int
     is_prefill: bool

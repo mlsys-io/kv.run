@@ -46,7 +46,7 @@ from text_generation_server.models.custom_modeling.llava_next import (
     LlavaNextMultiModalProjector,
 )
 
-@dataclass
+@dataclass(frozen=True)
 class LlavaBatch(FlashinferBatch):
     pixel_values: Optional[List[torch.Tensor]]
     pixel_attention_mask: Optional[List[torch.Tensor]]
