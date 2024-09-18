@@ -76,26 +76,24 @@ class TextGenerationService(generate_pb2_grpc.TextGenerationServiceServicer):
 
     async def Prefill(self, request, context):
         start = time.time_ns()
-        generations, next_batch, timings = self.model.prefill_batch(request.batch)
+        generations, next_batch, debug_info = self.model.prefill_batch(request.batch)
         return generate_pb2.PrefillResponse(
             generations=[generation.to_pb() for generation in generations],
             batch=next_batch.to_pb() if next_batch else None,
-            forward_ns=timings[0],
-            decode_ns=timings[1],
-            total_ns=time.time_ns() - start,
+            forward_ns=int(debug_info.forward_ns),
+            decode_ns=int(debug_info.decode_ns),
+            total_ns=int(time.time_ns() - start),
         )
 
     async def Decode(self, request, context):
         start = time.time_ns()
-        generations, next_batch, timings, concat_ns = self.model.decode_batch(
-            request.batches
-        )
+        generations, next_batch, debug_info = self.model.decode_batch(request.batches)
         return generate_pb2.DecodeResponse(
             generations=[generation.to_pb() for generation in generations],
             batch=next_batch.to_pb() if next_batch else None,
-            concat_ns=concat_ns,
-            forward_ns=timings[0],
-            decode_ns=timings[1],
+            concat_ns=debug_info.concat_ns,
+            forward_ns=debug_info.forward_ns,
+            decode_ns=debug_info.decode_ns,
             total_ns=time.time_ns() - start,
         )
 
