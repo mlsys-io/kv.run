@@ -44,11 +44,11 @@ class FlashinferAttentionWrapper:
             32 * 1024 * 1024, dtype=torch.int8, device=torch.cuda.current_device()
         )
         self.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            workspace_buffer=_workspace_buffer, kv_layout="NHD"
+            float_workspace_buffer=_workspace_buffer, kv_layout="NHD"
         )
         _use_tensor_cores = self.group_size in [7, 16]
         self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            workspace_buffer=_workspace_buffer,
+            float_workspace_buffer=_workspace_buffer,
             kv_layout="NHD",
             use_tensor_cores=_use_tensor_cores,
         )

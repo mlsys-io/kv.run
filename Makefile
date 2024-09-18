@@ -3,7 +3,7 @@ install-punica-kernel:
 	cd server/punica_kernels && pip install -v --no-build-isolation .
 
 install-flashinfer-kernel:
-	pip install flashinfer==0.1.1 -i https://flashinfer.ai/whl/cu121/torch2.3
+	pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3/
 
 install-server:
 	cd server && make install
