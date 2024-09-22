@@ -118,8 +118,8 @@ class Stable_Diffusion_Model:
         if batch.stage == "prefill":
             batch, time = self.prefill(batch)
             batch.stage = "sample"
-        else:   
-            batch, time = self.sample(batch)
+            
+        batch, time = self.sample(batch)
         
         Stop = False
         i = 0
@@ -287,7 +287,7 @@ class Stable_Diffusion_Model:
         s_time = time.time()
         batch_size = len(batch.counter)
         latents = batch.latents
-        print(batch.counter)
+
         t = torch.cat([batch.timesteps[i][batch.counter[i]].unsqueeze(0) for i in range(batch_size)])
         latent_model_input = torch.cat([latents] * 2) if self.model.do_classifier_free_guidance else latents
         latent_model_input = self.model.scheduler.scale_model_input(latent_model_input, t)
