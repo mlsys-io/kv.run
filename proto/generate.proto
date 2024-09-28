@@ -236,3 +236,26 @@ message WarmupResponse {
     /// Maximum number of tokens supported by the model
     optional uint32 max_supported_total_tokens = 1;
 }
+
+message StableDiffusionRequest {
+    // request ID
+    uint64 id = 1;
+    // user prompt
+    str prompt = 2;
+    // user negative_prompt
+    str negative_prompt = 3;
+    // images to generate
+    uint32 num_images_per_prompt = 4;
+    // inference steps
+    uint32 num_inference_steps = 5;
+    // input_image
+    optional bytes input_image = 6;
+    // image strength
+    optional float strength = 7;
+    // output_type
+    optional str output_type = 8;
+    // output image
+    repeated bytes output = 9;
+    // output nsfw
+    optional repeated bool nsfw = 10;
+}

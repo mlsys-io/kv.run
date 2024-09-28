@@ -351,6 +351,11 @@ class Stable_Diffusion_Model:
                 img_bytes = base64.b64encode(buffered.getvalue())
                 images.append(img_bytes)
             return images, has_nsfw_concept
+    
+    def warmup(self, batch: StableDiffusionBatch):
+        batch, _ = self.prefill(batch)
+        batch, _ = self.sample(batch)
+        return batch
         
 if __name__ == "__main__":
     server = Stable_Diffusion_Model("CompVis/stable-diffusion-v1-4")

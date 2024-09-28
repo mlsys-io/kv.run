@@ -301,6 +301,11 @@ class Stable_Diffusion_3_i2i_Model:
                 return images
             return image
         
+    def warmup(self, batch: StableDiffusion3ImageBatch):
+        batch, _ = self.prefill(batch)
+        batch, _ = self.sample(batch)
+        return batch
+     
 if __name__ == "__main__":
     server = Stable_Diffusion_3_i2i_Model("stabilityai/stable-diffusion-3-medium-diffusers")
     
