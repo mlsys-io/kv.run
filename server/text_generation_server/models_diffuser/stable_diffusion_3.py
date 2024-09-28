@@ -8,17 +8,8 @@ from server.text_generation_server.models_diffuser.models.pipeline_sd3 import St
 from PIL import Image
 from typing import Optional, List, Union
 from server.text_generation_server.models_diffuser.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-
-@dataclass
-class Stbale_Diffusion_Request():
-    id: str
-    prompt: str
-    negative_prompt: str
-    num_images_per_prompt: int = 1
-    num_inference_steps: int = 50
-    output_type: str = "pil"
-    output: Image.Image = None
-    nsfw: bool = False
+import io, base64
+from server.text_generation_server.models_diffuser import Stbale_Diffusion_Request
 
 @dataclass
 class StableDiffusion3Batch():
@@ -292,6 +283,14 @@ class Stable_Diffusion_3_Model:
                 latent = (latent / self.model.vae.config.scaling_factor) + self.model.vae.config.shift_factor
                 image = self.model.vae.decode(latent, return_dict=False)[0]
                 image = self.model.image_processor.postprocess(image, output_type=output_type)
+                # transfer into bytes
+                images = []
+                for _image in image:
+                    buffered = io.BytesIO()
+                    _image.save(buffered, format="PNG")
+                    img_bytes = base64.b64encode(buffered.getvalue())
+                    images.append(img_bytes)
+                return images
             return image
         
 if __name__ == "__main__":
@@ -305,4 +304,5 @@ if __name__ == "__main__":
             for request in requests:
                 print(request.output, request.nsfw)
                 for i, pic in enumerate(request.output):
+                    pic = Image.open(io.BytesIO(base64.b64decode(pic)))
                     pic.save(f"test_{request.id}_{i}.png")

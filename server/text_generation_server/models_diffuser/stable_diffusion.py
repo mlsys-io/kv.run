@@ -12,17 +12,8 @@ from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import (
 from PIL import Image
 from typing import Optional, List, Union
 from text_generation_server.models_diffuser.schedulers.scheduling_pndm import PNDMScheduler
-
-@dataclass
-class Stbale_Diffusion_Request():
-    id: int
-    prompt: str
-    negative_prompt: str
-    num_images_per_prompt: int = 1
-    num_inference_steps: int = 50
-    output_type: str = "pil"
-    output: Image.Image = None
-    nsfw: bool = False
+import base64, io
+from server.text_generation_server.models_diffuser import Stbale_Diffusion_Request
 
 @dataclass
 class StableDiffusionBatch():
@@ -352,7 +343,14 @@ class Stable_Diffusion_Model:
                 do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
             image = self.model.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-            return image, has_nsfw_concept
+            # transfer into bytes
+            images = []
+            for _image in image:
+                buffered = io.BytesIO()
+                _image.save(buffered, format="PNG")
+                img_bytes = base64.b64encode(buffered.getvalue())
+                images.append(img_bytes)
+            return images, has_nsfw_concept
         
 if __name__ == "__main__":
     server = Stable_Diffusion_Model("CompVis/stable-diffusion-v1-4")
@@ -363,6 +361,6 @@ if __name__ == "__main__":
         batch, t, requests = server.generate_token(batch)
         if requests is not None:
             for request in requests:
-                print(request.output, request.nsfw)
                 for i, pic in enumerate(request.output):
+                    pic = Image.open(io.BytesIO(base64.b64decode(pic)))
                     pic.save(f"test_{request.id}_{i}.png")

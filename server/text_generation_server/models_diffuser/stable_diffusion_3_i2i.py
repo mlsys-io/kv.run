@@ -8,20 +8,8 @@ from server.text_generation_server.models_diffuser.models.pipeline_sd3i2i import
 from PIL import Image
 from typing import Optional, List, Union
 from server.text_generation_server.models_diffuser.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
-
-
-@dataclass
-class Stbale_Diffusion_Request():
-    id: str
-    prompt: str
-    negative_prompt: str = ""
-    num_images_per_prompt: int = 1
-    num_inference_steps: int = 50
-    input_image: Optional[Image.Image] = None
-    strength: float = 0.6
-    output_type: str = "pil"
-    output: Image.Image = None
-    nsfw: Optional[bool] = False
+from server.text_generation_server.models_diffuser import Stbale_Diffusion_Request
+import io, base64
 
 @dataclass
 class StableDiffusion3ImageBatch():
@@ -63,9 +51,10 @@ class StableDiffusion3ImageBatch():
             prompts.append(request.prompt)
             negative_prompts.append(request.negative_prompt)
             num_images_per_prompt.append(request.num_images_per_prompt)
+            image = Image.open(io.BytesIO(base64.b64decode(request.input_image)))
             for i in range(request.num_images_per_prompt):
                 num_inference_steps.append(request.num_inference_steps)
-                input_images.append(request.input_image)
+                input_images.append(image)
                 strength.append(request.strength)
         return cls(requests, "prefill", prompts, negative_prompts, num_images_per_prompt, num_inference_steps, input_images, strength)
     
@@ -302,18 +291,33 @@ class Stable_Diffusion_3_i2i_Model:
                 latent = (latent / self.model.vae.config.scaling_factor) + self.model.vae.config.shift_factor
                 image = self.model.vae.decode(latent, return_dict=False)[0]
                 image = self.model.image_processor.postprocess(image, output_type=output_type)
+                # transfer into bytes
+                images = []
+                for _image in image:
+                    buffered = io.BytesIO()
+                    _image.save(buffered, format="PNG")
+                    img_bytes = base64.b64encode(buffered.getvalue())
+                    images.append(img_bytes)
+                return images
             return image
         
 if __name__ == "__main__":
     server = Stable_Diffusion_3_i2i_Model("stabilityai/stable-diffusion-3-medium-diffusers")
-    req = Stbale_Diffusion_Request(0, "painting", "", 1, 50, Image.open("server/examples/images/0.png"))
-    req2 = Stbale_Diffusion_Request(1, "scientific style", "", 1, 50, Image.open("server/examples/images/0.png"))
+    
+    image = Image.open("server/examples/images/0.png")
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    img_bytes = buffered.getvalue()
+    base64_bytes = base64.b64encode(img_bytes)
+    
+    req = Stbale_Diffusion_Request(0, "painting", "", 1, 50, base64_bytes)
+    req2 = Stbale_Diffusion_Request(1, "scientific style", "", 1, 50, base64_bytes)
     batch = StableDiffusion3ImageBatch.from_pb([req,req2])
     while batch is not None:
         batch, t, requests = server.generate_token(batch)
         if requests is not None:
             for request in requests:
-                print(request.output, request.nsfw)
                 for i, pic in enumerate(request.output):
+                    pic = Image.open(io.BytesIO(base64.b64decode(pic)))
                     pic.save(f"test_{request.id}_{i}.png")
     
