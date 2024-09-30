@@ -13,11 +13,20 @@ from PIL import Image
 from typing import Optional, List, Union
 from text_generation_server.models_diffuser.schedulers.scheduling_pndm import PNDMScheduler
 import base64, io
-from server.text_generation_server.models_diffuser import Stbale_Diffusion_Request
+from text_generation_server.pb import generate_pb2
+from opentelemetry import trace
+tracer = trace.get_tracer(__name__)
+from text_generation_server.models.types import (
+    Batch,
+    Tokens,
+    Generation,
+    GeneratedText,
+)
 
 @dataclass
 class StableDiffusionBatch():
-    requests: List[Stbale_Diffusion_Request]
+    batch_id: int
+    requests: List[generate_pb2.DiffusionRequest]
     stage: str
     prompts: list[str]
     negative_prompts: list[str]
@@ -42,8 +51,17 @@ class StableDiffusionBatch():
     ets: list[list[torch.Tensor]] = None
     cur_sample: list[torch.Tensor] = None
     
+    def to_pb(self) -> generate_pb2.CachedBatch:
+        return generate_pb2.CachedBatch(
+            id=self.batch_id,
+            request_ids=[r.id for r in self.requests],
+            size=len(self),
+            max_tokens=128, #ramdom number
+        )
+            
     @classmethod
-    def from_pb(cls, requests):
+    def from_pb(cls, pb: generate_pb2.DiffusionBatch) -> "StableDiffusionBatch":
+        requests = pb.requests
         prompts = []
         negative_prompts = []
         num_images_per_prompt = []
@@ -54,18 +72,72 @@ class StableDiffusionBatch():
             num_images_per_prompt.append(request.num_images_per_prompt)
             for i in range(request.num_images_per_prompt):
                 num_inference_steps.append(request.num_inference_steps)
-        return cls(requests, "prefill", prompts, negative_prompts, num_images_per_prompt, num_inference_steps)
+        return cls(pb.id, requests, "prefill", prompts, negative_prompts, num_images_per_prompt, num_inference_steps)
+    
+    @tracer.start_as_current_span("filter")
+    def filter(self, request_ids: List[int]):
+        return self
+    
+    @classmethod
+    @tracer.start_as_current_span("concatenate")
+    def concatenate(cls, batches: List["StableDiffusionBatch"]) -> "StableDiffusionBatch":
+        requests = []
+        prompts = []
+        negative_prompts = []
+        num_images_per_prompt = []
+        num_inference_steps = []
+        prompt_embeds = []
+        negative_prompt_embeds = []
+        time_steps = []
+        latents = []
+        counter = []
+        ets = []
+        cur_sample = []
+        
+        for batch in batches:
+            requests += batch.requests
+            prompts += batch.prompts
+            negative_prompts += batch.negative_prompts
+            num_images_per_prompt += batch.num_images_per_prompt
+            num_inference_steps += batch.num_inference_steps
+            prompt_embeds.append(batch.prompt_embeds)
+            negative_prompt_embeds.append(batch.negative_prompt_embeds)
+            time_steps += batch.timesteps
+            latents.append(batch.latents)
+            counter += batch.counter
+            ets += batch.ets
+            cur_sample += batch.cur_sample
+        
+        return cls(
+            batch_id = batches[0].batch_id,
+            requests = requests, 
+            stage = "sample", 
+            prompts = prompts, 
+            negative_prompts = negative_prompts, 
+            num_images_per_prompt = num_images_per_prompt, 
+            num_inference_steps = num_inference_steps, 
+            prompt_embeds = torch.cat(prompt_embeds, dim=0),
+            negative_prompt_embeds = torch.cat(negative_prompt_embeds, dim=0),
+            time_steps = time_steps,
+            latents = torch.cat(latents, dim=0),
+            counter = counter,
+            ets = ets,
+            cur_sample = cur_sample
+            )
+
+    def __len__(self):
+        return len(self.requests)     
     
     
 
 class Stable_Diffusion_Model:
     def __init__(
         self, 
-        model_path,
+        model_id: str,
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         dtype = torch.float16,
         ) -> None:
-        self.model = StableDiffusionPipeline.from_pretrained(model_path)
+        self.model = StableDiffusionPipeline.from_pretrained(model_id)
         
         self.device = device
         self.model.to(device)
@@ -91,10 +163,8 @@ class Stable_Diffusion_Model:
             timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)
-            print(timesteps.shape)
             # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
             timesteps = timesteps.expand(sample.shape[0])
-            print(timesteps.shape)
         else:
             timesteps = torch.cat([timesteps] * 2) if self.model.do_classifier_free_guidance else timesteps
         timesteps = timesteps.to(sample.device)
@@ -107,28 +177,30 @@ class Stable_Diffusion_Model:
         self, batch: StableDiffusionBatch,
     ):  
         if batch.stage == "prefill":
-            batch, time = self.prefill(batch)
+            batch, timing = self.prefill(batch)
             batch.stage = "sample"
+        else:
+            batch, timing = self.sample(batch)
             
-        batch, time = self.sample(batch)
-        
+        s_time = time.time()
         Stop = False
         i = 0
         j = 0
-        finished = []
         latents = []
         propmt_embeds = []
         negative_prompt_embeds = []
+        generations = []
         for r in range(len(batch.requests)):
             j += batch.num_images_per_prompt[r]
             if batch.counter[i] >= batch.num_inference_steps[i]:
-                request = batch.requests[r]
-                image, nsfw = self.decode(request, batch.latents[i:j], dtype = torch.float16)
-                request.output = image
-                request.nsfw = nsfw
-                finished.append(request)
-                
-                if Stop is not True:
+                image, nsfw = self.decode(batch.latents[i:j], dtype = torch.float16)
+                generated_text = GeneratedText(
+                    text = str(image),
+                    generated_tokens = nsfw,
+                    finish_reason = 0,
+                    seed = None,
+                    )
+                if not Stop:
                     Stop = True
                     requests = batch.requests[:r]
                     num_images_per_prompt = batch.num_images_per_prompt[:r]
@@ -140,12 +212,9 @@ class Stable_Diffusion_Model:
                     negative_prompt_embeds.append(batch.negative_prompt_embeds[:i])
                     ets = batch.ets[:i]
                     cur_sample = batch.cur_sample[:i]
-                i = j
             else:
-                if not Stop:
-                    i = j
-                    continue
-                else:
+                generated_text = None
+                if Stop:
                     requests.append(batch.requests[r])
                     num_images_per_prompt.append(batch.num_images_per_prompt[r])
                     num_inference_steps += batch.num_inference_steps[i:j]
@@ -156,7 +225,15 @@ class Stable_Diffusion_Model:
                     negative_prompt_embeds.append(batch.negative_prompt_embeds[i:j])
                     ets += batch.ets[i:j]
                     cur_sample += batch.cur_sample[i:j]
-                    i = j
+            generation = Generation(
+                request_id = batch.requests[r].id,
+                prefill_tokens = None,
+                tokens = None,
+                generated_text = generated_text,
+                top_tokens=None,
+                )
+            generations.append(generation)
+            i = j
                         
         if Stop:
             if len(counter) > 0:
@@ -173,7 +250,7 @@ class Stable_Diffusion_Model:
             else:
                 batch = None
         
-        return batch, time, finished
+        return generations, batch, (timing, time.time() - s_time)
     
     def prefill(self, batch: StableDiffusionBatch):
         s_time = time.time()
@@ -325,12 +402,11 @@ class Stable_Diffusion_Model:
     
     def decode(
         self, 
-        request: Stbale_Diffusion_Request, 
         latent,
+        output_type = "pil",
         dtype = torch.float16,
         ):
             latent = latent.unsqueeze(0) if len(latent.shape) == 3 else latent
-            output_type = request.output_type
             if not output_type == "latent":
                 image = self.model.vae.decode(latent / self.model.vae.config.scaling_factor, return_dict=False, generator=None)[0]
                 image, has_nsfw_concept = self.model.run_safety_checker(image, self.device, dtype)
@@ -349,6 +425,7 @@ class Stable_Diffusion_Model:
                 buffered = io.BytesIO()
                 _image.save(buffered, format="PNG")
                 img_bytes = base64.b64encode(buffered.getvalue())
+                #_image.save(f"test_{time.time()}.png")
                 images.append(img_bytes)
             return images, has_nsfw_concept
     
@@ -359,13 +436,24 @@ class Stable_Diffusion_Model:
         
 if __name__ == "__main__":
     server = Stable_Diffusion_Model("CompVis/stable-diffusion-v1-4")
-    req = Stbale_Diffusion_Request(0, "A cat", "", 1, 40)
-    req2 = Stbale_Diffusion_Request(1, "A dog", "", 2, 50)
-    batch = StableDiffusionBatch.from_pb([req,req2])
+    req = generate_pb2.DiffusionRequest(
+        id=0,
+        prompt="A cat",
+        negative_prompt="",
+        num_images_per_prompt=1,
+        num_inference_steps=40
+        )
+    req2 = generate_pb2.DiffusionRequest(
+        id=1,
+        prompt="A dog",
+        negative_prompt="",
+        num_images_per_prompt=1,
+        num_inference_steps=50
+        )
+    batch = generate_pb2.DiffusionBatch(requests=[req,req2])
+    batch = StableDiffusionBatch.from_pb(batch)
     while batch is not None:
-        batch, t, requests = server.generate_token(batch)
-        if requests is not None:
-            for request in requests:
-                for i, pic in enumerate(request.output):
-                    pic = Image.open(io.BytesIO(base64.b64decode(pic)))
-                    pic.save(f"test_{request.id}_{i}.png")
+        generations, batch, t = server.generate_token(batch)
+        for generation in generations:
+            if generation.generated_text is not None:
+                print(generation.generated_text.text)
