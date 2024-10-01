@@ -35,6 +35,7 @@ else:
     test = "baichuan"
     # test = "gemma"
     # test = 'mistral'
+    # test = 'phi'
     # test = 'qwen1.5-7'
     # test = 'qwen1.5-1.8'
     # test = 'qwen1.5-70'
@@ -289,18 +290,34 @@ elif test == "phi3":
 elif test == "baichuan":
     requests = [
         make_input(
-            "abcdabcd987/gsm8k-llama2-7b-lora-16",
+            "/scratch/hy2203/models/tjluyao/baichuan2-7b-chat-lora1",
             "base",
             id=0,
             promptOverride="why is deep learning so popular these days?",
         )
     ]
     service = FlashinferLlama(
-        model_id="baichuan-inc/Baichuan2-7B-Chat",
-        lora_ids=["tjluyao/baichuan2-7b-chat-lora1"],
+        model_id="/scratch/hy2203/models/baichuan-inc/Baichuan2-7B-Chat",
+        lora_ids=["/scratch/hy2203/models/tjluyao/baichuan2-7b-chat-lora1"],
         trust_remote_code=True,
         dtype=torch.bfloat16,
     )
+
+
+    # requests = [
+    #     make_input(
+    #         "abcdabcd987/gsm8k-llama2-7b-lora-16",
+    #         "base",
+    #         id=0,
+    #         promptOverride="why is deep learning so popular these days?",
+    #     )
+    # ]
+    # service = FlashinferLlama(
+    #     model_id="baichuan-inc/Baichuan2-7B-Chat",
+    #     lora_ids=["tjluyao/baichuan2-7b-chat-lora1"],
+    #     trust_remote_code=True,
+    #     dtype=torch.bfloat16,
+    # )
 elif test == "qwen2-7":
     # Todo: qwen2-7b instruct lora adapter
     requests = [

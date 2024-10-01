@@ -31,6 +31,18 @@ class Weights:
                             f"Key {k} was found in multiple files: {filename} and {routing[k]}"
                         )
                     routing[k] = filename
+
+        # for filename in filenames:
+        #     # Load the .bin file (assuming it's a dictionary of state_dict or similar tensors)
+        #     print(filename)
+        #     loaded_data = torch.load(filename)
+        #     # Iterate over keys in the loaded dictionary
+        #     for k in loaded_data.keys():
+        #         if k in routing:
+        #             raise RuntimeError(
+        #                 f"Key {k} was found in multiple files: {filename} and {routing[k]}"
+        #             )
+        #         routing[k] = filename
         if aliases is None:
             aliases = {}
         self.aliases = aliases
@@ -44,6 +56,7 @@ class Weights:
     def _get_handle(self, filename):
         if filename not in self._handles:
             f = safe_open(filename, framework="pytorch")
+            # f = torch.load(filename)
             self._handles[filename] = f
 
         return self._handles[filename]
