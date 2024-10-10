@@ -1,11 +1,11 @@
 from text_generation_server.pb import generate_pb2
-from text_generation_server.models_flashinfer.flashinfer_llava import LlavaLM, LlavaBatch
-import random, torch
+from text_generation_server.models_flashinfer.flashinfer_llava import FlashinferLlava
+import random
 import base64
 from collections import defaultdict
 
-service = LlavaLM(model_id="llava-hf/llava-v1.6-vicuna-7b-hf")
-tokenizer = service.language_model.tokenizer
+service = FlashinferLlava(model_id="llava-hf/llava-v1.6-vicuna-7b-hf")
+tokenizer = service.tokenizer
 
 prompts = [
     'How many people are in the image?',
@@ -51,15 +51,15 @@ def make_input(id = 0, prompt=None, image = None):
 requests = [make_input(i) for i in range(5)]
 batch = generate_pb2.Batch(id = 0, requests = requests, size = len(requests))
 display_results = defaultdict(lambda: [])
-
+service.warmup(batch)
 # Iterative generation: each step generates a token for each input in the batch
 isPrefill = True
 while True:
     if isPrefill:
-        generations, next_batch, _ = service.prefill_batch(batch)
+        generations, next_batch, info = service.prefill_batch(batch)
         isPrefill = False
     else:
-        generations, next_batch, _, _ = service.decode_batch([next_batch.to_pb()])
+        generations, next_batch, info = service.decode_batch([next_batch.to_pb()])
 
     for gen in generations:
         if gen.prefill_tokens:

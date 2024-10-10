@@ -16,7 +16,7 @@ from text_generation_server.models_flashinfer.flashinfer_qwen2 import Flashinfer
 from text_generation_server.models_flashinfer.flashinfer_chatglm import (
     FlashinferChatGLM,
 )
-from text_generation_server.models_flashinfer.flashinfer_llava import LlavaLM
+from text_generation_server.models_flashinfer.flashinfer_llava import FlashinferLlava
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
 # in PyTorch 1.12 and later.
@@ -188,7 +188,7 @@ def get_model(
             trust_remote_code=trust_remote_code,
         )
     elif model_type == LLAVA_NEXT:
-        return LlavaLM(
+        return FlashinferLlava(
             model_id,
             revision=revision,
             quantize=quantize,

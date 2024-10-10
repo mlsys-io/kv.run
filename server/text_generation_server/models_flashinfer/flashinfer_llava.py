@@ -5,35 +5,37 @@ import torch
 import time
 from opentelemetry import trace
 from typing import Optional, Tuple, List, Type, Iterable
-from text_generation_server.models import Model
+from transformers import AutoTokenizer, AutoConfig, AutoProcessor, GenerationConfig
+
 from text_generation_server.models.types import (
     Tokens,
     Generation,
     GeneratedText,
 )
-from dataclasses import dataclass
-from transformers import AutoConfig, AutoProcessor
-from loguru import logger
+
 from text_generation_server.pb import generate_pb2
 tracer = trace.get_tracer(__name__)
 
 from text_generation_server.models_flashinfer.flashinfer_causal_lm import (
     FlashinferBatch,
+    FlashinferLM,
     RequestContext, 
     RequestKvCache,
-    getKvCacheBatchPosition,
-    KvCacheBatchPosition,
-    find_padded_head_dim,
-    MEMORY_FRACTION,
-    PAGE_LEN,
+    DebugInfo,
     KvCachePool,
+    find_padded_head_dim,
+    PAGE_LEN,
+    MEMORY_FRACTION,
 )
-from text_generation_server.models_flashinfer.flashinfer_llama import (
-    FlashinferLlama,
+
+from text_generation_server.models_flashinfer.custom_modeling.flashinfer_llama_modeling import FlashLlamaForCausalLM
+
+from text_generation_server.utils import (
+    initialize_torch_distributed,
     weight_files,
     Weights,
-    initialize_torch_distributed,
 )
+
 from text_generation_server.models.vlm_causal_lm import (
     image_text_replacement,
     load_data_uri,
@@ -45,290 +47,117 @@ from text_generation_server.models.custom_modeling.llava_next import (
     load_vision_model,
     LlavaNextMultiModalProjector,
 )
-
-@dataclass(frozen=True)
-class LlavaBatch(FlashinferBatch):
-    pixel_values: Optional[List[torch.Tensor]]
-    pixel_attention_mask: Optional[List[torch.Tensor]]
-    image_sizes: Optional[List[Tuple[int, int]]]
-
-    @classmethod
-    @tracer.start_as_current_span("concatenate")
-    def concatenate(cls, batches):
-        batch = super(LlavaBatch, cls).concatenate(batches)
-        batch.pixel_values = None
-        batch.pixel_attention_mask = None
-        batch.image_sizes = None
-        return batch
-
-    @tracer.start_as_current_span("filter")
-    def filter(self, request_ids: List[int]):
-        batch = super().filter(request_ids)
-        batch.pixel_values = None
-        batch.pixel_attention_mask = None
-        batch.image_sizes = None
-        return batch
-        
-class LlavaLM(Model):
+       
+class FlashinferLlava(FlashinferLM):
     def __init__(
         self,
         model_id: str,
         revision: Optional[str] = None,
         quantize: Optional[str] = None,
         dtype: Optional[torch.dtype] = None,
-        trust_remote_code: bool = False
+        trust_remote_code: bool = False,
+        weights: Optional[Weights] = None,
     ):  
         # Initialize LlavaLM
-        self.config = AutoConfig.from_pretrained(model_id)
-        self.config.quantize = quantize
-        self.config.vision_config.quantize = quantize
+        config = AutoConfig.from_pretrained(model_id, revision=revision, trust_remote_code=trust_remote_code)
+        config.quantize = quantize
+        config.vision_config.quantize = quantize
+        config.speculator = None
+        if not hasattr(config, "rms_norm_eps"):
+            config.rms_norm_eps = 1e-05
+        
+        if not hasattr(config, "intermediate_size"):
+            config.intermediate_size = 11008
+        
+        if not hasattr(config, "hidden_act"):
+            config.hidden_act = "silu"
+            
+        if not hasattr(config, "num_hidden_layers"):
+            config.num_hidden_layers = 32
+            
+        if not hasattr(config, "hidden_size"):
+            config.hidden_size = 4096
+        
+        if not hasattr(config, "num_attention_heads"):
+            config.num_attention_heads = 32
+            
+        if not hasattr(config, "num_key_value_heads"):
+            config.num_key_value_heads = config.num_attention_heads
+
+        if not hasattr(config, "rope_theta"):
+            config.rope_theta = 1.0e4
+            
+        dtype = dtype or torch.float16
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         self.process_group, rank, world_size = initialize_torch_distributed()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch.distributed.barrier(group=self.process_group)
-        filenames = weight_files(model_id, revision=revision, extension=".safetensors")
-        weights = Weights(filenames, self.device, dtype, process_group=self.process_group)
+        
+        if not weights:
+            filenames = weight_files(model_id, revision=revision, extension=".safetensors")
+            weights = Weights(filenames, device, dtype, process_group=self.process_group)
+            if config.quantize in ["gptq", "awq"]:
+                weights._set_gptq_params(model_id, revision)
+                
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            revision=revision,
+            padding_side="left",
+            truncation_side="left",
+            trust_remote_code=trust_remote_code,
+        )
+
+        try:
+            generation_config = GenerationConfig.from_pretrained(
+                model_id, revision=revision, trust_remote_code=trust_remote_code
+            )
+            if isinstance(generation_config.eos_token_id, (list, set)):
+                # TODO Huge hack
+                tokenizer._eos_token_ids = set(generation_config.eos_token_id)
+        except Exception:
+            pass
+        
+        model = FlashLlamaForCausalLM("language_model", config, weights)
         
         self.vision_tower = load_vision_model(
             prefix="vision_tower",
-            config=self.config.vision_config,
+            config=config.vision_config,
             weights=weights,
         )
 
         self.multi_modal_projector = LlavaNextMultiModalProjector(
-            prefix="multi_modal_projector", config=self.config, weights=weights
+            prefix="multi_modal_projector", config=config, weights=weights
         )
         
         self.processor = AutoProcessor.from_pretrained(
             model_id, revision=revision, trust_remote_code=trust_remote_code
         )
-        self.vocab_size = self.config.text_config.vocab_size
         
-        self.language_model = FlashinferLlama(
-            model_id= model_id,
-            lora_ids= None, 
-            revision= revision,
-            quantize= quantize,
-            dtype= dtype,
-            trust_remote_code= trust_remote_code, 
-            weights= weights,
-        )
-        
-        self.image_newline = self.image_newline = weights.get_tensor("image_newline")
-        self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
-        self.id_embedder = self.language_model.model.embed_tokens
-        self.vision_feature_select_strategy = self.config.vision_feature_select_strategy
-        # Initialize KvCachePool
-        if not self.language_model.kvCachePool:
-            head_dim_padded = find_padded_head_dim(
-                self.language_model.model_config.hidden_size // self.language_model.model_config.num_attention_heads
-            )
-            dtype_size = torch.tensor([], dtype=self.language_model.dtype).element_size()
-            cache_page_size = (
-                2
-                * PAGE_LEN
-                * self.language_model.model_config.num_hidden_layers
-                * self.language_model.model_config.num_attention_heads
-                * head_dim_padded
-                * dtype_size
-            )
+        self.image_newline = weights.get_tensor("image_newline")
+        self.pad_token_id = config.pad_token_id if config.pad_token_id is not None else -1
+        self.id_embedder = model.embed_tokens
+        self.vision_feature_select_strategy = config.vision_feature_select_strategy
+        self.config = config
 
-            currentDevice = torch.cuda.current_device()
-            total_free_memory, _ = torch.cuda.mem_get_info(currentDevice)
-            total_gpu_memory = torch.cuda.get_device_properties(
-                currentDevice
-            ).total_memory
-            free_memory = max(
-                0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
-            )
-            num_pages_to_allocate = int(free_memory * 0.80 / cache_page_size)
-            print(
-                f"Cache allocation:\n"
-                f"  Cache Page Size: {cache_page_size / 1024 / 1024} MB\n"
-                f"  Dtype Size: {dtype_size}\n"
-                f"  Free Memory: {free_memory / 1024 / 1024 / 1024} GB\n"
-                f"  Total GPU Memory: {total_gpu_memory / 1024 / 1024 / 1024} GB\n"
-                f"  Number of Pages to Allocate: {num_pages_to_allocate}"
-            )
-
-            self.language_model.kvCachePool = KvCachePool(
-                max_pages=num_pages_to_allocate,
-                num_layers=self.language_model.model_config.num_hidden_layers,
-                num_heads=self.language_model.model_config.num_key_value_heads,
-                head_dim=head_dim_padded,
-                page_len=PAGE_LEN,
-                dtype=self.language_model.dtype,
-                device=self.language_model.device,
-            )
-
-        num_free_pages = self.language_model.kvCachePool.num_free_pages()
-        logger.info(f"Initialized LlavaLM with model_id: {model_id}")
-        
-    @property
-    def batch_type(self) -> Type[LlavaBatch]:
-        return LlavaBatch
-
-    def decode(self, generated_ids: List[int]) -> str:
-        return self.language_model.tokenizer.decode(
-            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
-        
-    @tracer.start_as_current_span("generate_token")
-    @torch.no_grad()
-    def generate_token(
-        self, 
-        batch: LlavaBatch,
-        embeddings: torch.Tensor = None,
-    ) -> Tuple[List[Generation], Optional[LlavaBatch], Tuple[int, int]]:
-        start = time.time_ns()
-        input_ids, lora_ids, lora_lens = [], [], []
-        request_kv_caches = []
-        all_input_ids_stacked: List[List[int]] = []
-        for request_context in batch.request_contexts:
-            if not request_context.is_stopped:
-                all_input_ids_stacked.append(request_context.output_ids)
-                if batch.is_prefill:
-                    input_ids.extend(request_context.output_ids)
-                else:
-                    input_ids.append(request_context.output_ids[-1])
-                request_kv_caches.append(request_context.request_kv_cache)
-                if not batch.is_prefill:
-                    request_context.request_kv_cache.increment()
-
-                if lora_ids and lora_ids[-1] == request_context.lora_id:
-                    lora_lens[-1] += 1
-                elif request_context.lora_id:
-                    lora_ids.append(request_context.lora_id)
-                    lora_lens.append(1)
-
-        all_input_ids_tensor = self.language_model._get_all_input_ids_tensor(
-            all_input_ids_stacked, batch.request_contexts
-        )
-        input_ids_tensor = torch.tensor(
-            input_ids,
-            dtype=torch.long,
-            device=self.language_model.device,
+        super(FlashinferLlava, self).__init__(
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            dtype=dtype,
+            device=device,
+            lora_ids=None,
         )
 
-        batch_position: KvCacheBatchPosition = getKvCacheBatchPosition(
-            request_kv_caches, isPrefill=batch.is_prefill, device=self.language_model.device
-        )
-
-        loraWeights = (
-            self.language_model.loraManager.get_lora_batched_weights(lora_ids, lora_lens)
-            if lora_ids
-            else None
-        )
-        
-        raw_logits, _ = self.language_model.model(
-            input_ids = input_ids_tensor if embeddings is None else None,
-            kvCachePool = self.language_model.kvCachePool,
-            is_prefill = batch.is_prefill,
-            batch_position = batch_position,
-            loraWeight = loraWeights,
-            input_embeddings = embeddings,
-        )
-
-        start_decode = time.time_ns()
-        logits = (
-            raw_logits[batch_position.seq_indptr[1:] - 1]
-            if batch.is_prefill
-            else raw_logits
-        )
-
-        all_stop = True
-        generations: List[Generation] = []
-        num_stopped_requests = 0
-        start_next_token_id = time.time_ns()
-
-        next_token_ids, next_token_logprobs, logprobs, _, _ = (
-            self.language_model._get_next_batch_token_id_heterogeneous(
-                batch.request_contexts, all_input_ids_tensor, logits
-            )
-        )
-        next_token_id_ns = time.time_ns() - start_next_token_id
-
-        for i, request_context in enumerate(batch.request_contexts):
-            if request_context.is_stopped:
-                num_stopped_requests += 1
-                continue
-            next_token_id = next_token_ids[i - num_stopped_requests]
-            request_context.append_token(next_token_id)
-            text = self.processor.decode(
-                next_token_id,
-                clean_up_tokenization_spaces=False,
-                skip_special_tokens=False,
-            )
-
-            stop_reason = request_context.get_stop_reason()
-            if stop_reason != None:
-                output_text = self.processor.decode(
-                    request_context.output_ids[request_context.prompt_len :],
-                    clean_up_tokenization_spaces=False,
-                    skip_special_tokens=True,
-                )
-                generated_text = GeneratedText(
-                    output_text,
-                    len(request_context.output_ids) - request_context.prompt_len + 1,
-                    stop_reason,
-                    None,
-                )
-                request_context.is_stopped = True
-                request_context.request_kv_cache.release()
-            else:
-                generated_text = None
-                all_stop = False
-
-            request_context.prefill_tokens = None
-
-            generation = Generation(
-                request_context.request_id,
-                request_context.prefill_tokens,
-                Tokens(
-                    [next_token_id],
-                    [0],  # prob
-                    [text],
-                    [next_token_id in self.language_model.all_special_ids],
-                ),
-                generated_text,
-                # top_tokens
-                None,
-            )
-            generations.append(generation)
-
-        forward_ns = start_decode - start
-        decode_ns = next_token_id_ns
-        # The router stops generation only when batch=None
-        if all_stop:
-            return generations, None, (forward_ns, decode_ns)
-        else:
-            return generations, batch, (forward_ns, decode_ns)
-        
-    def decode_batch(
-        self, cachedBatchesPb: Iterable[generate_pb2.CachedBatch]
-    ) -> Tuple[List[Generation], Optional[LlavaBatch], Tuple[int, int], int]:
-        start_concat = time.time_ns()
-        batch = self.language_model._convertCachedBatch(cachedBatchesPb)
-        concat_ns = time.time_ns() - start_concat
-        generations, next_batch, timings = self.generate_token(batch)
-        if next_batch:
-            self.language_model.batch_cache.set(next_batch)
-        return generations, next_batch, timings, concat_ns
-
-    def prefill_batch(
-        self, 
-        pb_batch: generate_pb2.Batch,
-    ) -> Tuple[List[Generation], Optional[LlavaBatch], Tuple[int, int]]:
-        batch_tokenized_inputs, image_inputs = self.batch_tokenized_inputs(
-            pb_batch.requests, 
-            self.language_model.tokenizer, 
+    def _convertPbBatch(self, batchPb: generate_pb2.Batch) -> FlashinferBatch:
+        batch_tokenized_inputs, image_inputs = self.batch_tokenize_inputs(
+            batchPb.requests, 
+            self.tokenizer, 
             self.processor, 
             self.config
         )
-
-        input_ids = [torch.tensor(_tokenized, device=self.language_model.device) for _tokenized in batch_tokenized_inputs]
         
         if image_inputs is not None:
-            pixel_values = image_inputs["pixel_values"].to(device=self.language_model.device)
+            pixel_values = image_inputs["pixel_values"].to(device=self.device)
             if "pixel_attention_mask" in image_inputs:
                 pixel_attention_mask = image_inputs["pixel_attention_mask"].to(
                     device=self.vision_tower.device
@@ -336,7 +165,7 @@ class LlavaLM(Model):
             else:
                 pixel_attention_mask = None
             if "image_sizes" in image_inputs:
-                image_sizes = image_inputs["image_sizes"].to(device=self.language_model.device)
+                image_sizes = image_inputs["image_sizes"].to(device=self.device)
             else:
                 image_sizes = None
         else:
@@ -345,7 +174,9 @@ class LlavaLM(Model):
             image_sizes = None
             
         # Embed the input
+        input_ids = [torch.tensor(_tokenized, device=self.device) for _tokenized in batch_tokenized_inputs]
         inputs_embeds = [self.id_embedder(_input_ids) for _input_ids in input_ids]
+        model_input = None
         
         if pixel_values is not None and len(pixel_values) > 0:
             num_images, num_patches, channels, height, width = pixel_values.shape
@@ -420,16 +251,46 @@ class LlavaLM(Model):
                 _input_embeds[mask] = _image_features.view(-1, _image_features.shape[-1])
                 model_input.append(_input_embeds.view(-1, _input_embeds.shape[-1]))
             model_input = torch.concat(model_input, dim=0)
-                
-        batch = self.batch_convert(pb_batch, input_ids)
-        
-        generations, next_batch, timings = self.generate_token(batch, model_input)
+            
+        #Inicialize the kvCache
+        request_contexts = []
+
+        for i,request in enumerate(batchPb.requests):
+            _input_ids = input_ids[i]
+            parameters = request.parameters
+            request_context = RequestContext(
+                request.id,
+                _input_ids,
+                next_token_chooser_parameter=parameters,
+                maxlen=min(request.stopping_parameters.max_new_tokens, 4096),
+                stop_token_id=self.tokenizer.eos_token_id,
+                is_stopped=False,
+                request_kv_cache=RequestKvCache(
+                    self.kvCachePool,
+                    self.kvCachePool.page_len,
+                    len(_input_ids),
+                ),
+                prefill_logprobs=request.prefill_logprobs,
+                lora_id=request.lora_id,
+            )
+
+            request_contexts.append(request_context)
+
+        return FlashinferBatch(
+            batch_id=batchPb.id, is_prefill=True, request_contexts=request_contexts
+        ), model_input
+    
+    def prefill_batch(
+        self, batchPb: generate_pb2.Batch, debug_mode: bool = False
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
+        batch, embeddings = self._convertPbBatch(batchPb)
+        generations, next_batch, debug_info = self.generate_token(batch, debug_mode, embeddings)
         if next_batch:
-            self.language_model.batch_cache.set(next_batch)
-        return generations, batch, timings
+            self.batch_cache.set(next_batch)
+        return generations, batch, debug_info
     
     @classmethod
-    def batch_tokenized_inputs(self, requests, tokenizer, processor, config):
+    def batch_tokenize_inputs(self, requests, tokenizer, processor, config):
         batch_inputs = []
         image_inputs = []
         max_truncation = 0
@@ -485,48 +346,126 @@ class LlavaLM(Model):
         else:
             image_inputs = None
         return batch_tokenized_inputs, image_inputs
+    
+    @tracer.start_as_current_span("generate_token")
+    @torch.no_grad()
+    def generate_token(
+        self, batch: FlashinferBatch, debug_mode: bool = False, embeddings: torch.Tensor = None
+    ) -> Tuple[List[Generation], Optional[FlashinferBatch], DebugInfo]:
+        start = time.time_ns()
+        input_ids_tensor, all_input_ids_tensor, batch_position, loraWeights = (
+            self._prepare_model_inputs(batch)
+        )
+        raw_logits, _ = self.model(
+            input_ids_tensor if embeddings is None else None,
+            self.kvCachePool,
+            batch.is_prefill,
+            batch_position,
+            loraWeights,
+            input_embeddings = embeddings,
+        )
+        torch.cuda.synchronize()
+        start_decode_token = time.time_ns()
 
-    def batch_convert(
-        self, 
-        batchPb: generate_pb2.Batch,
-        input_ids: torch.Tensor,
-        pixel_values: Optional[List[torch.Tensor]] = None,
-        pixel_attention_mask: Optional[List[torch.Tensor]] = None,
-        image_sizes: Optional[List[Tuple[int, int]]] = None,
-        ) -> LlavaBatch:
-        request_contexts = []
-
-        for i,request in enumerate(batchPb.requests):
-            _input_ids = input_ids[i]
-            
-            parameters = request.parameters
-            request_context = RequestContext(
-                request.id,
-                _input_ids,
-                next_token_chooser_parameter=parameters,
-                maxlen=min(request.stopping_parameters.max_new_tokens, 4096),
-                stop_token_id=self.language_model.tokenizer.eos_token_id,
-                is_stopped=False,
-                request_kv_cache=RequestKvCache(
-                    self.language_model.kvCachePool,
-                    self.language_model.kvCachePool.page_len,
-                    len(_input_ids),
-                ),
-                prefill_logprobs=request.prefill_logprobs,
-                lora_id=request.lora_id,
+        logits = (
+            raw_logits[batch_position.seq_indptr[1:] - 1]
+            if batch.is_prefill
+            else raw_logits
+        )
+        
+        next_token_ids, next_token_logprobs, alllogprobs, _, _ = (
+            self._get_next_batch_token_id_heterogeneous(
+                batch.request_contexts, all_input_ids_tensor, logits
             )
-
-            request_contexts.append(request_context)
-
-        return LlavaBatch(
-            batch_id=batchPb.id, 
-            is_prefill=True, 
-            request_contexts=request_contexts,
-            pixel_values=pixel_values,
-            pixel_attention_mask=pixel_attention_mask,
-            image_sizes=image_sizes,
         )
 
+        next_token_ids_list = next_token_ids.tolist()
+        next_token_logprobs_list = next_token_logprobs.tolist()
+        torch.cuda.synchronize()
+        start_decode_text = time.time_ns()
+        generations, all_stop = self._decode_text(
+            batch, next_token_ids_list, next_token_logprobs_list
+        )
+        torch.cuda.synchronize()
+        end = time.time_ns()
+
+        forward_ns = start_decode_token - start
+        decode_ns = start_decode_text - start_decode_token
+        total_ns = end - start
+        debug_info = (
+            DebugInfo(
+                forward_ns=forward_ns,
+                decode_ns=decode_ns,
+                total_ns=total_ns,
+                concat_ns=None,
+                all_log_probs=alllogprobs,
+            )
+            if debug_mode
+            else DebugInfo(
+                forward_ns=forward_ns,
+                decode_ns=decode_ns,
+                total_ns=total_ns,
+                concat_ns=None,
+                all_log_probs=None,
+            )
+        )
+
+        # The router stops generation only when batch=None
+        if all_stop:
+            return generations, None, debug_info
+        else:
+            return generations, batch, debug_info
+
+    def warmup(self, batchPb: generate_pb2.Batch):
+        if not self.kvCachePool:
+            head_dim_padded = find_padded_head_dim(
+                self.model_config.hidden_size // self.model_config.num_attention_heads
+            )
+            dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+            cache_page_size = (
+                2
+                * PAGE_LEN
+                * self.model_config.num_hidden_layers
+                * self.model_config.num_attention_heads
+                * head_dim_padded
+                * dtype_size
+            )
+
+            currentDevice = torch.cuda.current_device()
+            total_free_memory, _ = torch.cuda.mem_get_info(currentDevice)
+            total_gpu_memory = torch.cuda.get_device_properties(
+                currentDevice
+            ).total_memory
+            free_memory = max(
+                0, total_free_memory - (1 - MEMORY_FRACTION) * total_gpu_memory
+            )
+            num_pages_to_allocate = int(free_memory * 0.60 / cache_page_size)
+            print(
+                f"Cache allocation:\n"
+                f"  Cache Page Size: {cache_page_size / 1024 / 1024} MB\n"
+                f"  Dtype Size: {dtype_size}\n"
+                f"  Free Memory: {free_memory / 1024 / 1024 / 1024} GB\n"
+                f"  Total GPU Memory: {total_gpu_memory / 1024 / 1024 / 1024} GB\n"
+                f"  Number of Pages to Allocate: {num_pages_to_allocate}"
+            )
+
+            self.kvCachePool = KvCachePool(
+                max_pages=num_pages_to_allocate,
+                num_layers=self.model_config.num_hidden_layers,
+                num_heads=self.model_config.num_key_value_heads,
+                head_dim=head_dim_padded,
+                page_len=PAGE_LEN,
+                dtype=self.dtype,
+                device=self.device,
+            )
+
+        num_free_pages = self.kvCachePool.num_free_pages()
+        batch, _ = self._convertPbBatch(batchPb)
+        self.generate_token(batch)
+        for request_context in batch.request_contexts:
+            request_context.request_kv_cache.release()
+        return num_free_pages * PAGE_LEN
+  
 if __name__ == '__main__':
-    model = LlavaLM(model_id='llava-hf/llava-v1.6-vicuna-7b-hf')
+    model = FlashinferLlava(model_id='llava-hf/llava-v1.6-vicuna-7b-hf')
     print(model)

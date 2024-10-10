@@ -462,7 +462,7 @@ class FlashinferLM(Model):
                 output_text = self.tokenizer.decode(
                     request_context.output_ids[request_context.prompt_len :],
                     clean_up_tokenization_spaces=False,
-                    skip_special_tokens=False,
+                    skip_special_tokens=True,
                 )
                 generated_text = GeneratedText(
                     output_text,
@@ -492,7 +492,7 @@ class FlashinferLM(Model):
                 None,
             )
             generations.append(generation)
-            return generations, all_stop
+        return generations, all_stop
 
     @tracer.start_as_current_span("generate_token")
     @torch.no_grad()
