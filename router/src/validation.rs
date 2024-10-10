@@ -207,6 +207,10 @@ impl Validation {
             top_n_tokens,
             grammar,
             lora_id,
+            images_per_prompt,
+            inference_steps,
+            image_input,
+            image_strength,
             ..
         } = request.parameters;
 
@@ -393,6 +397,26 @@ impl Validation {
             }
         };
 
+        let images_per_prompt = match images_per_prompt {
+            Some(value) => value,
+            None => 0,
+        };
+
+        let inference_steps = match inference_steps {
+            Some(value) => value,
+            None => 0,
+        };
+
+        let image_input = match image_input {
+            Some(value) => value,
+            None => "".to_string(),
+        };
+
+        let image_strength = match image_strength {
+            Some(value) => value,
+            None => 0.0,
+        };
+
         Ok(ValidGenerateRequest {
             inputs,
             decoder_input_details,
@@ -402,6 +426,10 @@ impl Validation {
             stopping_parameters,
             top_n_tokens,
             lora_id: loraid,
+            images_per_prompt,
+            inference_steps,
+            image_input,
+            image_strength,
         })
     }
 
@@ -661,6 +689,10 @@ pub(crate) struct ValidGenerateRequest {
     pub stopping_parameters: StoppingCriteriaParameters,
     pub top_n_tokens: u32,
     pub lora_id: String,
+    pub images_per_prompt: u32,
+    pub inference_steps: u32,
+    pub image_input: String,
+    pub image_strength: f32,
 }
 
 #[derive(Error, Debug)]

@@ -24,9 +24,9 @@ from text_generation_server.models.types import (
 )
 
 @dataclass
-class StableDiffusionBatch():
+class StableDiffusionBatch:
     batch_id: int
-    requests: List[generate_pb2.DiffusionRequest]
+    requests: List[generate_pb2.Request]
     stage: str
     prompts: list[str]
     negative_prompts: list[str]
@@ -56,22 +56,22 @@ class StableDiffusionBatch():
             id=self.batch_id,
             request_ids=[r.id for r in self.requests],
             size=len(self),
-            max_tokens=128, #ramdom number
+            max_tokens=1024, #ramdom number
         )
             
     @classmethod
-    def from_pb(cls, pb: generate_pb2.DiffusionBatch) -> "StableDiffusionBatch":
+    def from_pb(cls, pb: generate_pb2.Batch) -> "StableDiffusionBatch":
         requests = pb.requests
         prompts = []
         negative_prompts = []
         num_images_per_prompt = []
         num_inference_steps = []
         for request in requests:
-            prompts.append(request.prompt)
-            negative_prompts.append(request.negative_prompt)
-            num_images_per_prompt.append(request.num_images_per_prompt)
-            for i in range(request.num_images_per_prompt):
-                num_inference_steps.append(request.num_inference_steps)
+            prompts.append(request.inputs)
+            negative_prompts.append("")
+            num_images_per_prompt.append(request.images_per_prompt)
+            for i in range(request.images_per_prompt):
+                num_inference_steps.append(request.inference_steps)
         return cls(pb.id, requests, "prefill", prompts, negative_prompts, num_images_per_prompt, num_inference_steps)
     
     @tracer.start_as_current_span("filter")
@@ -128,8 +128,6 @@ class StableDiffusionBatch():
     def __len__(self):
         return len(self.requests)     
     
-    
-
 class Stable_Diffusion_Model:
     def __init__(
         self, 
@@ -138,7 +136,7 @@ class Stable_Diffusion_Model:
         dtype = torch.float16,
         ) -> None:
         self.model = StableDiffusionPipeline.from_pretrained(model_id)
-        
+        self.dtype = dtype
         self.device = device
         self.model.to(device)
         self.model._guidance_scale = 7.5
@@ -149,7 +147,21 @@ class Stable_Diffusion_Model:
         
         self.model.unet.get_time_embed = self.get_time_embed
         self.model.scheduler = PNDMScheduler.from_config(self.model.scheduler.config)
+    
+    @property
+    def info(self) -> generate_pb2.InfoResponse:
+        return generate_pb2.InfoResponse(
+            requires_padding=False,
+            dtype=str(self.dtype),
+            device_type=self.device.type,
+            window_size=None,
+            speculate=None,
+        )
         
+    @property 
+    def batch_type(self):
+        return StableDiffusionBatch
+    
     def get_time_embed(
         self, sample: torch.Tensor, timestep: Union[torch.Tensor, float, int]
     ) -> Optional[torch.Tensor]:
@@ -182,7 +194,7 @@ class Stable_Diffusion_Model:
         else:
             batch, timing = self.sample(batch)
             
-        s_time = time.time()
+        s_time = time.time_ns()
         Stop = False
         i = 0
         j = 0
@@ -196,10 +208,11 @@ class Stable_Diffusion_Model:
                 image, nsfw = self.decode(batch.latents[i:j], dtype = torch.float16)
                 generated_text = GeneratedText(
                     text = str(image),
-                    generated_tokens = nsfw,
-                    finish_reason = 0,
+                    generated_tokens = batch.num_inference_steps[i],
+                    finish_reason = 1,
                     seed = None,
                     )
+                
                 if not Stop:
                     Stop = True
                     requests = batch.requests[:r]
@@ -225,10 +238,16 @@ class Stable_Diffusion_Model:
                     negative_prompt_embeds.append(batch.negative_prompt_embeds[i:j])
                     ets += batch.ets[i:j]
                     cur_sample += batch.cur_sample[i:j]
+                    
             generation = Generation(
                 request_id = batch.requests[r].id,
                 prefill_tokens = None,
-                tokens = None,
+                tokens = Tokens(
+                    token_ids = [0],
+                    logprobs = [1.0],
+                    texts = ['-'],
+                    is_special = [True],
+                    ),
                 generated_text = generated_text,
                 top_tokens=None,
                 )
@@ -250,13 +269,14 @@ class Stable_Diffusion_Model:
             else:
                 batch = None
         
-        return generations, batch, (timing, time.time() - s_time)
+        return generations, batch, (timing, time.time_ns() - s_time)
     
     def prefill(self, batch: StableDiffusionBatch):
-        s_time = time.time()
+        s_time = time.time_ns()
         prompts = batch.prompts
         negative_prompts = batch.negative_prompts
         num_images_per_prompt = batch.num_images_per_prompt
+
         prompt_embeds = batch.prompt_embeds if batch.prompt_embeds is not None else None
         negative_prompt_embeds = batch.negative_prompt_embeds if batch.negative_prompt_embeds is not None else None
         lora_scale = (
@@ -347,12 +367,12 @@ class Stable_Diffusion_Model:
         batch.counter = [0] * batch_size
         batch.ets = [[]] * batch_size
         batch.cur_sample = [None] * batch_size
-
-        return batch,(s_time, time.time() - s_time)
+        
+        return batch, time.time_ns() - s_time
             
         
     def sample(self, batch: StableDiffusionBatch):
-        s_time = time.time()
+        s_time = time.time_ns()
         batch_size = len(batch.counter)
         latents = batch.latents
 
@@ -397,7 +417,7 @@ class Stable_Diffusion_Model:
             new_latents.append(prev_sample)
         
         batch.latents = torch.cat(new_latents)
-        return batch, (s_time, time.time() - s_time)    
+        return batch, time.time_ns() - s_time
 
     
     def decode(
@@ -431,26 +451,23 @@ class Stable_Diffusion_Model:
     
     def warmup(self, batch: StableDiffusionBatch):
         batch, _ = self.prefill(batch)
-        batch, _ = self.sample(batch)
-        return batch
+        return 102400
         
 if __name__ == "__main__":
     server = Stable_Diffusion_Model("CompVis/stable-diffusion-v1-4")
-    req = generate_pb2.DiffusionRequest(
+    req = generate_pb2.Request(
         id=0,
-        prompt="A cat",
-        negative_prompt="",
-        num_images_per_prompt=1,
-        num_inference_steps=40
+        inputs="A cat",
+        images_per_prompt=1,
+        inference_steps=40
         )
-    req2 = generate_pb2.DiffusionRequest(
+    req2 = generate_pb2.Request(
         id=1,
-        prompt="A dog",
-        negative_prompt="",
-        num_images_per_prompt=1,
-        num_inference_steps=50
+        inputs="A dog",
+        images_per_prompt=1,
+        inference_steps=50
         )
-    batch = generate_pb2.DiffusionBatch(requests=[req,req2])
+    batch = generate_pb2.Batch(requests=[req,req2])
     batch = StableDiffusionBatch.from_pb(batch)
     while batch is not None:
         generations, batch, t = server.generate_token(batch)

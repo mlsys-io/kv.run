@@ -148,6 +148,10 @@ impl Client {
                 prefill_logprobs: true,
                 top_n_tokens: 20,
                 lora_id: None,
+                images_per_prompt: None,
+                inference_steps: None,
+                image_input: None,
+                image_strength: None,
             });
             n_tokens += max_input_length;
 

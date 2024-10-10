@@ -284,6 +284,10 @@ impl State {
                 stopping_parameters: Some(entry.request.stopping_parameters.clone()),
                 top_n_tokens: entry.request.top_n_tokens,
                 lora_id: Some(entry.request.lora_id.clone()),
+                images_per_prompt: Some(entry.request.images_per_prompt),
+                inference_steps: Some(entry.request.inference_steps),
+                image_input: Some(entry.request.image_input.clone()),
+                image_strength: Some(entry.request.image_strength),
             });
             // Set batch_time
             entry.batch_time = Some(Instant::now());

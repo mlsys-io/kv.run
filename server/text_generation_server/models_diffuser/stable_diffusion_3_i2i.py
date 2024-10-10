@@ -20,9 +20,9 @@ from text_generation_server.models.types import (
 )
 
 @dataclass
-class StableDiffusion3ImageBatch():
+class StableDiffusion3ImageBatch:
     batch_id: int
-    requests: List[generate_pb2.DiffusionRequest]
+    requests: List[generate_pb2.Request]
     stage: str
     prompts: list[str]
     negative_prompts: list[str]
@@ -52,7 +52,7 @@ class StableDiffusion3ImageBatch():
             id=self.batch_id,
             request_ids=[r.id for r in self.requests],
             size=len(self),
-            max_tokens=128, #ramdom number
+            max_tokens=1024, #ramdom number
         )
         
     @classmethod
@@ -69,14 +69,14 @@ class StableDiffusion3ImageBatch():
         input_images = []
         strength = []
         for request in requests:
-            prompts.append(request.prompt)
-            negative_prompts.append(request.negative_prompt)
-            num_images_per_prompt.append(request.num_images_per_prompt)
-            image = Image.open(io.BytesIO(base64.b64decode(request.input_image)))
-            for i in range(request.num_images_per_prompt):
-                num_inference_steps.append(request.num_inference_steps)
+            prompts.append(request.inputs)
+            negative_prompts.append("")
+            num_images_per_prompt.append(request.images_per_prompt)
+            image = Image.open(io.BytesIO(base64.b64decode(request.image_input)))
+            for i in range(request.images_per_prompt):
+                num_inference_steps.append(request.inference_steps)
                 input_images.append(image)
-                strength.append(request.strength)
+                strength.append(request.image_strength)
         return cls(pb.id, requests, "prefill", prompts, negative_prompts, num_images_per_prompt, num_inference_steps, input_images, strength)
     
     @tracer.start_as_current_span("filter")
@@ -165,14 +165,28 @@ class Stable_Diffusion_3_i2i_Model:
         dtype = torch.float16,
         ) -> None:
         self.model = StableDiffusion3Img2ImgPipeline.from_pretrained(model_id, dtype=dtype)
-        
+        self.dtype = dtype
         self.device = device
         self.model.to(device)
         self.model._guidance_scale = 7.0
         self.model._clip_skip = None
         self.model._interrupt = False
         self.model.scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.model.scheduler.config)
-
+    
+    @property
+    def info(self) -> generate_pb2.InfoResponse:
+        return generate_pb2.InfoResponse(
+            requires_padding=False,
+            dtype=str(self.dtype),
+            device_type=self.device.type,
+            window_size=None,
+            speculate=None,
+        )
+        
+    @property 
+    def batch_type(self):
+        return StableDiffusion3ImageBatch
+    
     @torch.no_grad()
     def generate_token(
         self, batch: StableDiffusion3ImageBatch,
@@ -183,7 +197,7 @@ class Stable_Diffusion_3_i2i_Model:
         else:
             batch, timing = self.sample(batch)
             
-        s_time = time.time()    
+        s_time = time.time_ns()    
         Stop = False
         i = 0
         j = 0
@@ -200,8 +214,8 @@ class Stable_Diffusion_3_i2i_Model:
                 image = self.decode(batch.latents[i:j], dtype = torch.float16)
                 generated_text = GeneratedText(
                     text = str(image),
-                    generated_tokens = False,
-                    finish_reason = 0,
+                    generated_tokens = batch.num_inference_steps[i],
+                    finish_reason = 1,
                     seed = None,
                     )
                 
@@ -232,10 +246,16 @@ class Stable_Diffusion_3_i2i_Model:
                     negative_prompt_embeds.append(batch.negative_prompt_embeds[i:j])
                     pool_prompt_embeds.append(batch.pooled_prompt_embeds[i:j])
                     pool_negative_prompt_embeds.append(batch.negative_pooled_prompt_embeds[i:j])
+                    
             generation = Generation(
                 request_id = batch.requests[r].id,
                 prefill_tokens = None,
-                tokens = None,
+                tokens = Tokens(
+                    token_ids = [0],
+                    logprobs = [1.0],
+                    texts = ['-'],
+                    is_special = [True],
+                    ),
                 generated_text = generated_text,
                 top_tokens=None,
                 )
@@ -258,10 +278,10 @@ class Stable_Diffusion_3_i2i_Model:
             else:
                 batch = None
         
-        return generations, batch, (timing, time.time() - s_time)
+        return generations, batch, (timing, time.time_ns() - s_time)
     
     def prefill(self, batch: StableDiffusion3ImageBatch):
-        s_time = time.time()
+        s_time = time.time_ns()
         
         prompt = batch.prompts
         prompt_2 = batch.prompts_2
@@ -336,10 +356,10 @@ class Stable_Diffusion_3_i2i_Model:
         batch.pooled_prompt_embeds = pooled_prompt_embeds
         batch.negative_pooled_prompt_embeds = negative_pooled_prompt_embeds
 
-        return batch,(s_time, time.time() - s_time)
+        return batch, time.time_ns() - s_time
             
     def sample(self, batch: StableDiffusion3ImageBatch):
-        s_time = time.time()
+        s_time = time.time_ns()
         batch_size = len(batch.counter)
         latents = batch.latents
         
@@ -382,7 +402,7 @@ class Stable_Diffusion_3_i2i_Model:
                 latents = latents.to(latents_dtype)
 
         batch.latents = latents
-        return batch, (s_time, time.time() - s_time)    
+        return batch, time.time_ns() - s_time  
 
     
     def decode(
@@ -411,8 +431,7 @@ class Stable_Diffusion_3_i2i_Model:
         
     def warmup(self, batch: StableDiffusion3ImageBatch):
         batch, _ = self.prefill(batch)
-        batch, _ = self.sample(batch)
-        return batch
+        return 102400
      
 if __name__ == "__main__":
     server = Stable_Diffusion_3_i2i_Model("stabilityai/stable-diffusion-3-medium-diffusers")
@@ -422,26 +441,25 @@ if __name__ == "__main__":
     image.save(buffered, format="PNG")
     img_bytes = buffered.getvalue()
     base64_bytes = base64.b64encode(img_bytes)
+    byte_str = str(base64_bytes, "utf-8")
     
-    req = generate_pb2.DiffusionRequest(
+    req = generate_pb2.Request(
         id=0,
-        prompt="A painting",
-        negative_prompt="",
-        num_images_per_prompt=1,
-        num_inference_steps=28,
-        input_image=base64_bytes,
-        strength=0.6,
+        inputs="A painting",
+        images_per_prompt=1,
+        inference_steps=28,
+        image_input=byte_str,
+        image_strength=0.6,
         )
-    req2 = generate_pb2.DiffusionRequest(
+    req2 = generate_pb2.Request(
         id=1,
-        prompt="A scientific image",
-        negative_prompt="",
-        num_images_per_prompt=1,
-        num_inference_steps=28,
-        input_image=base64_bytes,
-        strength=0.7,
+        inputs="A scientific image",
+        images_per_prompt=1,
+        inference_steps=28,
+        image_input=byte_str,
+        image_strength=0.7,
         )
-    batch = generate_pb2.DiffusionBatch(requests=[req,req2])
+    batch = generate_pb2.Batch(requests=[req,req2])
     batch = StableDiffusion3ImageBatch.from_pb(batch)
     while batch is not None:
         generations, batch, t = server.generate_token(batch)

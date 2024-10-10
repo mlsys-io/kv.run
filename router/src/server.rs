@@ -675,6 +675,10 @@ async fn completions(
                 top_n_tokens: None,
                 grammar: None,
                 lora_id: None,
+                images_per_prompt: None,
+                inference_steps: None,
+                image_input: None,
+                image_strength: None,
             },
         })
         .collect();
@@ -1100,6 +1104,10 @@ async fn chat_completions(
             top_n_tokens: req.top_logprobs,
             grammar: typed_grammar,
             lora_id: None,
+            images_per_prompt: None,
+            inference_steps: None,
+            image_input: None,
+            image_strength: None,
         },
     };
 

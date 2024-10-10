@@ -28,6 +28,10 @@ def get_model(
     model_id: str,
     dtype: Optional[str] = "fp16",
     ):
+    try:
+        model_id, function = model_id.split(":")
+    except ValueError:
+        function = None
     model_index_path = hf_hub_download(repo_id=model_id, filename="model_index.json")
 
     with open(model_index_path, "r") as f:
@@ -39,14 +43,16 @@ def get_model(
             model_id=model_id
         )
     elif model_type == "StableDiffusion3Pipeline":
-        return Stable_Diffusion_3_Model(
-            model_id=model_id,
-            dtype=dtype
-        )
-    elif model_type == "StableDiffusion3Img2ImgPipeline":
-        return Stable_Diffusion_3_i2i_Model(
-            model_id=model_id,
-            dtype=dtype
-        )
+        if function == "i2i":
+            return Stable_Diffusion_3_i2i_Model(
+                model_id=model_id,
+                dtype=dtype
+            )
+        else:  
+            return Stable_Diffusion_3_Model(
+                model_id=model_id,
+                dtype=dtype
+            )
+     
     else:
         raise ValueError(f"Unknown model type: {model_type}")

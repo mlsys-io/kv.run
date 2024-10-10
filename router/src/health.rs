@@ -56,6 +56,10 @@ impl Health {
                 }),
                 top_n_tokens: 0,
                 lora_id: None,
+                images_per_prompt: None,
+                inference_steps: None,
+                image_input: None,
+                image_strength: None,
             };
             let batch = Batch {
                 id: BATCH_ID,

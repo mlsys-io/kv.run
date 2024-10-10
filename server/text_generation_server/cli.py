@@ -44,7 +44,7 @@ def serve(
     json_output: bool = False,
     otlp_endpoint: Optional[str] = None,
     disable_flashinfer: Optional[bool] = False,
-    diffusers: Optional[bool] = False,
+    diffusion: Optional[bool] = False,
 ):
     if sharded:
         assert (
@@ -101,7 +101,7 @@ def serve(
         serv = server
 
     from text_generation_server import server_diffusers
-    serv = server_diffusers if diffusers else serv
+    serv = server_diffusers if diffusion else serv
     
     serv.serve(
         model_id,

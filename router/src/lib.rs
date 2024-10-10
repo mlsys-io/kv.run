@@ -322,6 +322,23 @@ pub(crate) struct GenerateParameters {
     #[serde(default)]
     #[schema(nullable = true, default = "empty", example = "empty")]
     pub lora_id: Option<String>,
+
+    /// Diffusion parameters
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub images_per_prompt: Option<u32>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub inference_steps: Option<u32>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub image_input: Option<String>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub image_strength: Option<f32>,
 }
 
 fn default_max_new_tokens() -> Option<u32> {
@@ -349,6 +366,10 @@ fn default_parameters() -> GenerateParameters {
         top_n_tokens: None,
         grammar: None,
         lora_id: None,
+        images_per_prompt: None,
+        inference_steps: None,
+        image_input: None,
+        image_strength: None,
     }
 }
 
@@ -438,6 +459,23 @@ pub struct CompletionRequest {
     #[serde(default)]
     #[schema(nullable = true, default = "empty", example = "empty")]
     pub lora_id: Option<String>,
+
+    /// Diffusion parameters
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub images_per_prompt: Option<u32>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub inference_steps: Option<u32>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub image_input: Option<String>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub image_strength: Option<f32>,
 }
 
 #[derive(Clone, Deserialize, Serialize, ToSchema, Default)]
@@ -826,6 +864,23 @@ pub(crate) struct ChatRequest {
     #[serde(default)]
     #[schema(nullable = true, default = "empty", example = "empty")]
     pub lora_id: Option<String>,
+
+    /// Diffusion parameters
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub images_per_prompt: Option<u32>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub inference_steps: Option<u32>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub image_input: Option<String>,
+
+    #[serde(default)]
+    #[schema(nullable = true, default = "null", example = "null")]
+    pub image_strength: Option<f32>,
 }
 
 fn default_tool_prompt() -> Option<String> {
