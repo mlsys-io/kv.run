@@ -86,7 +86,7 @@ class StableDiffusion3Batch:
         negative_prompts_3 = []
         prompt_embeds = []
         negative_prompt_embeds = []
-        time_steps = []
+        timesteps = []
         latents = []
         generator = []
         height = []
@@ -108,7 +108,7 @@ class StableDiffusion3Batch:
             negative_prompts_3 += batch.negative_prompts_3
             prompt_embeds.append(batch.prompt_embeds)
             negative_prompt_embeds.append(batch.negative_prompt_embeds)
-            time_steps += batch.timesteps
+            timesteps += batch.timesteps
             latents.append(batch.latents)
             pooled_prompt_embeds.append(batch.pooled_prompt_embeds)
             negative_pooled_prompt_embeds.append(batch.negative_pooled_prompt_embeds)
@@ -129,7 +129,7 @@ class StableDiffusion3Batch:
             negative_prompts_3 = negative_prompts_3,
             prompt_embeds = torch.cat(prompt_embeds, dim=0),
             negative_prompt_embeds = torch.cat(negative_prompt_embeds, dim=0),
-            time_steps = time_steps,
+            timesteps = timesteps,
             latents = torch.cat(latents, dim=0),
             pooled_prompt_embeds = torch.cat(pooled_prompt_embeds, dim=0),
             negative_pooled_prompt_embeds = torch.cat(negative_pooled_prompt_embeds, dim=0),

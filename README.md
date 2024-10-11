@@ -126,7 +126,7 @@ text-generation-router
 ```
 - Then use python code to give your input:
 ```shell
-python clients/python/client_diffusion.py --prompt A painting of two people. [--input_image "server/examples/images/0.png"]
+python clients/python/client_diffusion.py --prompt "A painting of two people." [--input_image "server/examples/images/0.png"]
 ```
 
 ## Benchmarks

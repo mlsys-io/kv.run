@@ -8,6 +8,7 @@ from PIL import Image
 from io import BytesIO
 import base64
 import argparse
+import time
 
 class Request:
     def __init__(self, inputs: str, stream: bool, parameters: Dict):
@@ -27,7 +28,7 @@ class Client_diffsuion:
         base_url: str,
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
-        timeout: int = 10,
+        timeout: int = 20,
     ):
         self.base_url = base_url
         self.headers = headers
@@ -77,7 +78,7 @@ class Client_diffsuion:
         images = ast.literal_eval(image_str)
         for image in images:
             photo = Image.open(BytesIO(base64.b64decode(image)))
-            photo.save(f"image_{images.index(image)}.png")
+            photo.save(f"image_{images.index(image)}_{time.time()}.png")
         return 
     
 if __name__ == "__main__":
