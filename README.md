@@ -120,7 +120,7 @@ python clients/python/client_llava.py --prompt "What is in the picture?" --input
 #### Diffusion model support
 - To load Diffusion models, use this command:
 ```shell
-python server/text_generation_server/cli.py serve "CompVis/stable-diffusion-v1-4" / "stabilityai/stable-diffusion-3-medium" / "stabilityai/stable-diffusion-3-medium:i2i" --diffusion
+python server/text_generation_server/cli.py serve "CompVis/stable-diffusion-v1-4" / "stabilityai/stable-diffusion-3-medium-diffusers" / "stabilityai/stable-diffusion-3-medium-diffusers:i2i" --diffusion
 
 text-generation-router
 ```
@@ -201,4 +201,4 @@ Note: L = Language, I = Image
 | [Yi 1.5](https://huggingface.co/01-ai/Yi-1.5-9B-Chat)                        |     | 9B    | L ⇒ L   | ✔                   |         ✔  |
 | [ChatGLM 4](https://huggingface.co/THUDM/glm-4-9b-chat)                      |     | 9B    | L ⇒ L   | ✔                   | ✔          |
 | [Stable Diffusion v1.4](https://huggingface.co/CompVis/stable-diffusion-v1-4)     |     | 0.8B    | L ⇒ I |                 |           |
-| [Stable Diffusion 3 Medium](https://huggingface.co/stabilityai/stable-diffusion-3-medium)     |     | 2B    | L/L+I ⇒ I |                 |           |
+| [Stable Diffusion 3 Medium](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers)     |     | 2B    | L/L+I ⇒ I |                 |           |
