@@ -7,7 +7,7 @@
 | Deepspeed MII   | PyTorch           | Deepspeed (Python)   | [DeepSpeed-Kernels](https://github.com/microsoft/DeepSpeed-Kernels)                              | Language                    |
 | TensorRT-LLM    | TensorRT-LLM      | TensorRT-LLM (C++)   | [TensorRT XQA](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/blogs/XQA-kernel.md) | Language                    |
 | vLLM            | vLLM              | vLLM (Python)        | Paged + Flash attention                                                                          | Language                    |
-| kv.run          | PyTorch           | HF TGI + more (Rust) | Paged + Flash attention, [FlashInfer](https://github.com/flashinfer-ai/flashinfer)               | Language, Diffusion models(soon) |
+| kv.run          | PyTorch           | HF TGI + more (Rust) | Paged + Flash attention, [FlashInfer](https://github.com/flashinfer-ai/flashinfer)               | Language, Diffusion Models |
 
 
 
@@ -31,7 +31,7 @@ rm -f $PROTOC_ZIP
 ```shell
 # Install FlashInfer
 # For CUDA 12.1 & torch 2.3
-pip install flashinfer==0.1.1 -i https://flashinfer.ai/whl/cu121/torch2.3
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3
 # For other CUDA & torch versions, please check https://docs.flashinfer.ai/installation.html
 
 # Install Flash and Paged Attention
@@ -108,6 +108,26 @@ curl 127.0.0.1:3000/download_lora_adapter -X POST -d '{"lora_id":"tjluyao/llama-
 ```shell
 curl 127.0.0.1:3000/generate -X POST -d '{"inputs":"What is Deep Learning?","parameters":{"lora_id": "tjluyao/llama-3-8b-math", "max_new_tokens":20}}' -H 'Content-Type: application/json'
 ```
+#### Multimodal language model support
+- To load LLava models, use this command:
+```shell
+text-generation-launcher --model-id llava-hf/llava-v1.6-vicuna-7b-hf
+```
+- Then use python code to give your input:
+```shell
+python clients/python/client_llava.py --prompt "What is in the picture?" --input_image "server/examples/images/4.png"
+```
+#### Diffusion model support
+- To load Diffusion models, use this command:
+```shell
+python server/text_generation_server/cli.py serve "CompVis/stable-diffusion-v1-4" / "stabilityai/stable-diffusion-3-medium" / "stabilityai/stable-diffusion-3-medium:i2i" --diffusion
+
+text-generation-router
+```
+- Then use python code to give your input:
+```shell
+python clients/python/client_diffusion.py --prompt A painting of two people. [--input_image "server/examples/images/0.png"]
+```
 
 ## Benchmarks
 Testing Llama-2-7b on RTX 6000 ada (Vast AI):
@@ -152,6 +172,7 @@ Note: L = Language, I = Image
 |------------------------------------------------------------------------------|-----|-------|----------|---------------------|------------|
 | [Idefics](https://huggingface.co/HuggingFaceM4/idefics-9b)                   |     | 9B    | L, I ⇒ L | ✔                   |            |
 | [Idefics 2](https://huggingface.co/HuggingFaceM4/idefics2-8b)                |     | 8B    | L, I ⇒ L | ✔                   |            |
+| [Llava Next (1.6)](https://huggingface.co/llava-hf/llava-v1.6-vicuna-7b-hf) |     | 7B   | L, I ⇒ L | ✔                   | ✔          |
 | [Llava Next (1.6)](https://huggingface.co/llava-hf/llava-v1.6-vicuna-13b-hf) |     | 13B   | L, I ⇒ L | ✔                   |            |
 | [Llama 2](https://huggingface.co/meta-llama/Llama-2-7b-hf)                   |     | 7B    | L ⇒ L   | ✔                   | ✔          |
 | [Llama 3](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)        |     | 8B    | L ⇒ L   | ✔                   | ✔          |
@@ -179,3 +200,5 @@ Note: L = Language, I = Image
 | [Gpt Neox](https://huggingface.co/EleutherAI/gpt-neox-20b)                   |     | 20B   | L ⇒ L   | ✔                   |            |
 | [Yi 1.5](https://huggingface.co/01-ai/Yi-1.5-9B-Chat)                        |     | 9B    | L ⇒ L   | ✔                   |         ✔  |
 | [ChatGLM 4](https://huggingface.co/THUDM/glm-4-9b-chat)                      |     | 9B    | L ⇒ L   | ✔                   | ✔          |
+| [Stable Diffusion v1.4](https://huggingface.co/CompVis/stable-diffusion-v1-4)     |     | 0.8B    | L ⇒ I |                 |           |
+| [Stable Diffusion 3 Medium](https://huggingface.co/stabilityai/stable-diffusion-3-medium)     |     | 2B    | L/L+I ⇒ I |                 |           |

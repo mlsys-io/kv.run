@@ -84,14 +84,14 @@ if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--url", type=str, default="http://127.0.0.1:3000")
     argparser.add_argument("--prompt", type=str, default="A painting of two people.")
-    argparser.add_argument("--test_image", type=bool, default=False)
+    argparser.add_argument("--input_image", type=str, default=None)
     args = argparser.parse_args()
     
     client = Client_diffsuion(args.url)
-    test_image = args.test_image
+    input_image = args.input_image
     
-    if test_image:
-        image = Image.open("server/examples/images/0.png")
+    if input_image is not None:
+        image = Image.open(input_image)
         buffered = BytesIO()
         image.save(buffered, format="PNG")
         img_bytes = buffered.getvalue()
@@ -102,6 +102,6 @@ if __name__ == "__main__":
         prompt=args.prompt, 
         images_per_prompt=1, 
         inference_steps=10,
-        image_input=byte_str if test_image else None,
-        image_strength=0.5 if test_image else None,
+        image_input=byte_str if input_image else None,
+        image_strength=0.5 if input_image else None,
         )

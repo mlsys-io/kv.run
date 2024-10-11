@@ -452,6 +452,10 @@ struct Args {
     /// Using Flashinfer kernel or not
     #[clap(long, env)]
     disable_flashinfer: bool,
+
+    /// Using Diffusion models or not
+    #[clap(long, env)]
+    diffusion: bool,
 }
 
 #[derive(Debug)]
@@ -491,6 +495,7 @@ fn shard_manager(
     _shutdown_sender: mpsc::Sender<()>,
     lora_ids: String,
     disable_flashinfer: bool,
+    diffusion: bool,
 ) {
     // Enter shard-manager tracing span
     let _span = tracing::span!(tracing::Level::INFO, "shard-manager", rank = rank).entered();
@@ -521,6 +526,10 @@ fn shard_manager(
 
     if disable_flashinfer {
         shard_args.push("--disable-flashinfer".to_string());
+    }
+
+    if diffusion {
+        shard_args.push("--diffusion".to_string());
     }
 
     // Activate trust remote code
@@ -1165,6 +1174,7 @@ fn spawn_shards(
         let max_batch_size = args.max_batch_size;
         let lora_ids = args.lora_ids.clone();
         let disable_flashinfer = args.disable_flashinfer;
+        let diffusion = args.diffusion;
 
         thread::spawn(move || {
             shard_manager(
@@ -1197,6 +1207,7 @@ fn spawn_shards(
                 shutdown_sender,
                 lora_ids,
                 disable_flashinfer,
+                diffusion,
             )
         });
     }
