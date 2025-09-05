@@ -1,0 +1,70 @@
+apiVersion: mloc/v1
+kind: TrainingTask
+metadata:
+  name: sft-mistral-7b-on-dolly
+  owner: john-doe
+  project: llm-research
+  annotations:
+    description: "Supervised fine-tuning for Mistral-7B on the Dolly dataset."
+    
+spec:
+  # Task type - Worker will load the corresponding module
+  taskType: "sft"
+  
+  # Resource requirements - Orchestrator will schedule based on this
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "8"
+      memory: "64Gi"
+      gpu:
+        type: "nvidia-a100-80gb"  # Can be specific type or "any"
+        count: 4
+  
+  # Model configuration
+  model:
+    source:
+      type: "huggingface"
+      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
+      revision: "main"
+    # Adapter configuration (LoRA, QLoRA)
+    adapter:
+      type: "qlora"
+      r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      target_modules: ["q_proj", "v_proj"]
+  
+  # Dataset configuration
+  dataset:
+    source:
+      type: "huggingface"
+      identifier: "databricks/dolly-15k"
+      split: "train"
+    preprocessing:
+      # Data preprocessing configuration
+      prompt_template: "### Instruction:\n{instruction}\n\n### Response:\n{response}"
+      max_seq_length: 2048
+  
+  # SFT training hyperparameters (maps directly to TRL SFTTrainer's TrainingArguments)
+  hyperparameters:
+    output_dir: "/artifacts/sft-mistral-7b-dolly"  # Worker internal temp path
+    num_train_epochs: 3
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 2
+    learning_rate: 2e-4
+    logging_steps: 10
+    fp16: true
+    save_steps: 500
+    save_total_limit: 2
+  
+  # Task output configuration
+  output:
+    destination:
+      type: "s3"
+      bucket: "my-ml-models"
+      path: "checkpoints/sft-mistral-7b-dolly-final"
+    # Output types: adapter_weights, full_model, logs, etc.
+    artifacts:
+      - "adapter_weights"
+      - "training_logs"

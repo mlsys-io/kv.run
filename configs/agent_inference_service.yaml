@@ -1,0 +1,47 @@
+apiVersion: mloc/v1
+kind: TrainingTask
+metadata:
+  name: agent-coding-assistant
+  owner: dev-team
+  project: coding-assistant
+  annotations:
+    description: "Agent inference service for coding assistance with tool calling."
+    
+spec:
+  taskType: "agent_inference"
+  
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "4"
+      memory: "16Gi"
+      gpu:
+        type: "any"
+        count: 1
+  
+  # Base model for agent reasoning
+  model:
+    source:
+      type: "huggingface"
+      identifier: "microsoft/DialoGPT-large"
+      revision: "main"
+  
+  # Agent-specific parameters
+  hyperparameters:
+    agent_type: "react"  # ReAct, function_calling, etc.
+    max_iterations: 10
+    tools:
+      - "python_repl"
+      - "file_browser"
+      - "web_search"
+    max_tokens: 512
+    temperature: 0.3
+    port: 8081
+  
+  output:
+    destination:
+      type: "local" 
+      path: "/artifacts/agent_service"
+    artifacts:
+      - "service_logs"
+      - "conversation_history"
