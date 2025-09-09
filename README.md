@@ -28,14 +28,18 @@ MLOC is a distributed system for Large Language Model (LLM) inference and fine-t
 - **Orchestrator**: Central service for task scheduling and worker management
 - **Worker**: Execution nodes that process LLM tasks
 - **Redis**: Message broker and state store
-- **Executors**: Pluggable task execution modules (vLLM, custom executors)
+- **Executors**: Pluggable task execution modules
+  - **vLLM Executor**: High-performance LLM inference
+  - **PPO Executor**: Reinforcement learning training with Proximal Policy Optimization
 
 ## Features
 
 - **Distributed Task Execution**: Scale horizontally by adding more workers
 - **Resource-Aware Scheduling**: Intelligent task assignment based on hardware requirements
 - **Fault Tolerance**: Heartbeat monitoring and automatic cleanup of stale workers
-- **Pluggable Executors**: Support for different LLM frameworks (vLLM included)
+- **Multiple Executors**: Support for both inference and training workflows
+  - **vLLM Inference**: High-throughput text generation
+  - **PPO Training**: Reinforcement learning fine-tuning
 - **YAML Task Definitions**: Declarative task specification
 - **RESTful API**: HTTP endpoints for task submission and monitoring
 
@@ -57,8 +61,20 @@ MLOC is a distributed system for Large Language Model (LLM) inference and fine-t
    ```
 
 2. **Install dependencies**:
+   
+   For basic inference functionality:
    ```bash
    uv sync
+   ```
+   
+   For PPO training functionality:
+   ```bash
+   uv sync --extra ppo
+   ```
+   
+   For development:
+   ```bash
+   uv sync --extra ppo --extra dev
    ```
 
 3. **Start Redis** (if not already running):
@@ -81,6 +97,7 @@ The orchestrator will be available at `http://localhost:8000`
 
 ### 2. Start a Worker
 
+For inference tasks only:
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
 export TASK_TOPICS="tasks.inference"
@@ -89,17 +106,32 @@ export RESULTS_DIR="./results"
 python -m worker.listener
 ```
 
-### 3. Submit a Task
+For both inference and PPO training:
+```bash
+export REDIS_URL="redis://localhost:6379/0"
+# Note: Don't set TASK_TOPICS to use default (tasks.inference,tasks.ppo)
+export RESULTS_DIR="./results"
 
-Use the provided client script:
+python -m worker.listener
+```
 
+### 3. Submit Tasks
+
+#### For vLLM Inference:
 ```bash
 cd client
 ./vllm_inference.sh
 ```
 
-Or submit directly via curl:
+#### For PPO Training:
+```bash
+cd client
+./ppo_training.sh
+```
 
+#### Or submit directly via curl:
+
+Inference task:
 ```bash
 curl -X POST "http://localhost:8000/api/v1/tasks" \
   -H "Authorization: Bearer dev-token" \
@@ -107,9 +139,19 @@ curl -X POST "http://localhost:8000/api/v1/tasks" \
   --data-binary @templates/inference_vllm_mistral.yaml
 ```
 
+PPO training task:
+```bash
+curl -X POST "http://localhost:8000/api/v1/tasks" \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @templates/ppo_training_mistral.yaml
+```
+
 ## Task Definition
 
-Tasks are defined using YAML files. Here's an example for vLLM inference:
+Tasks are defined using YAML files.
+
+### vLLM Inference Task Example
 
 ```yaml
 apiVersion: mloc/v1
@@ -146,6 +188,58 @@ spec:
       - "Write a Python function to sort a list."
 ```
 
+### PPO Training Task Example
+
+```yaml
+apiVersion: mloc/v1
+kind: TrainingTask
+metadata:
+  name: mistral-7b-ppo-training
+  owner: alice
+
+spec:
+  taskType: "ppo"
+  
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "16"
+      memory: "64Gi"
+      gpu:
+        type: "any"
+        count: 1
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
+    config:
+      fp16: true
+      device_map_auto: true
+
+  reward_model:
+    identifier: "cardiffnlp/twitter-roberta-base-sentiment-latest"
+    type: "sentiment"
+
+  data:
+    prompts:
+      - "Write a helpful response: How can I improve my productivity?"
+      - "Create a motivational message for someone learning to code:"
+      - "Explain quantum computing in an encouraging way:"
+
+  training:
+    learning_rate: 1.41e-5
+    batch_size: 4
+    steps: 50
+    ppo_epochs: 4
+    target_kl: 0.1
+    save_model: true
+
+  generation:
+    max_new_tokens: 256
+    temperature: 0.7
+```
+
 ## Configuration
 
 ### Orchestrator Environment Variables
@@ -163,17 +257,18 @@ spec:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_URL` | Required | Redis connection URL |
-| `TASK_TOPICS` | "tasks.inference" | Comma-separated list of topics to subscribe |
+| `TASK_TOPICS` | "tasks.inference,tasks.ppo" | Comma-separated list of topics to subscribe |
 | `RESULTS_DIR` | "./results" | Directory for task results |
 | `HEARTBEAT_INTERVAL_SEC` | 30 | Heartbeat interval |
 | `WORKER_ID` | auto-generated | Fixed worker ID |
 | `WORKER_TAGS` | None | Comma-separated worker tags |
 
-### vLLM Executor Environment Variables
+### Executor Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `VLLM_MODEL` | Default model identifier |
+| `VLLM_MODEL` | Default vLLM model identifier |
+| `PPO_MODEL` | Default PPO training model identifier |
 
 ## API Reference
 
@@ -303,6 +398,96 @@ Task results are stored in `RESULTS_DIR/<task_id>/responses.json`:
 
 - Orchestrator logs: `orchestrator.log` (configurable)
 - Worker logs: stdout/stderr
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Worker Not Subscribing to PPO Tasks
+
+**Problem**: Worker only shows `subscribed to topics: ['tasks.inference']`
+
+**Solution**: 
+```bash
+# Clear any existing TASK_TOPICS environment variable
+unset TASK_TOPICS
+
+# Restart worker (it will use default topics: tasks.inference,tasks.ppo)
+export REDIS_URL="redis://localhost:6379/0"
+export RESULTS_DIR="./results"
+python -m worker.listener
+```
+
+**Root Cause**: Previously set `TASK_TOPICS` environment variable overrides the default configuration.
+
+#### 2. PPO Training Dependencies Missing
+
+**Problem**: `PPO dependencies not installed` error
+
+**Solution**:
+```bash
+# Install PPO dependencies
+uv sync --extra ppo
+# OR
+pip install trl transformers torch datasets accelerate
+```
+
+#### 3. Task Submission Successful But No Worker Response
+
+**Debug Steps**:
+1. **Check worker logs** - Should show task acceptance and executor selection
+2. **Verify topic subscription** - Worker should subscribe to correct topics
+3. **Check Redis connection** - Both orchestrator and worker need Redis access
+4. **Verify task assignment** - Check if task was assigned to the correct worker
+
+**Debug Commands**:
+```bash
+# Check Redis connectivity
+redis-cli ping
+
+# Check worker subscription
+# Look for: "subscribed to topics: ['tasks.inference', 'tasks.ppo']"
+
+# Check task assignment in orchestrator logs
+# Look for: "Publish to topic=tasks.ppo receivers=1"
+```
+
+#### 4. GPU Memory Issues During PPO Training
+
+**Problem**: CUDA out of memory errors
+
+**Solutions**:
+- Reduce `batch_size` in training config
+- Enable `fp16: true` in model config
+- Reduce `max_new_tokens` in generation config
+- Use `gradient_accumulation_steps` to simulate larger batches
+
+#### 5. Slow PPO Training
+
+**Optimization Tips**:
+- Use smaller models for experimentation
+- Reduce number of training steps
+- Use gradient accumulation instead of large batch sizes
+- Enable `optimize_cuda_cache: true`
+
+### Debug Mode
+
+To enable detailed debugging:
+
+```bash
+# Set debug logging level
+export LOG_LEVEL="DEBUG"
+
+# Start worker with debug output
+python -m worker.listener
+```
+
+Look for these key log messages:
+- `TASK_TOPICS environment variable: None`
+- `Using topics: ['tasks.inference', 'tasks.ppo']`
+- `Selected executor: PPOExecutor for task_type: ppo`
+- `Starting PPO training task`
+- `PPO Step 0/50: mean_reward=0.1234`
 
 ## Deployment
 

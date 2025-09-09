@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""
+PPOExecutor (YAML schema specific)
+
+- 从 spec.model 读取基础模型配置  
+- 从 spec.training 读取PPO训练参数
+- 从 spec.data 读取训练数据配置
+- 使用TRL的trainer.train()进行训练
+- 训练结果写到 out_dir/responses.json
+"""
+
+import os
+import time
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Callable
+
+from .base_executor import Executor, ExecutionError
+
+logger = logging.getLogger(__name__)
+
+try:
+    import torch
+    from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    from datasets import load_dataset, Dataset
+    import numpy as np
+    _HAS_PPO_DEPS = True
+except Exception:
+    torch = object  # type: ignore
+    PPOTrainer = object  # type: ignore
+    PPOConfig = object  # type: ignore
+    AutoModelForCausalLMWithValueHead = object  # type: ignore
+    AutoTokenizer = object  # type: ignore
+    AutoModelForCausalLM = object  # type: ignore
+    pipeline = object  # type: ignore
+    load_dataset = object  # type: ignore
+    Dataset = object  # type: ignore
+    np = object  # type: ignore
+    _HAS_PPO_DEPS = False
+
+
+class PPOExecutor(Executor):
+    name = "ppo"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._model = None
+        self._tokenizer = None
+        self._ref_model = None
+        self._model_name: Optional[str] = None
+        self._reward_fn: Optional[Callable] = None
+
+    def prepare(self) -> None:  # type: ignore[override]
+        if not _HAS_PPO_DEPS:
+            raise ExecutionError(
+                "PPO dependencies not installed. Install with: pip install trl transformers torch datasets"
+            )
+
+    def _load_model_and_tokenizer(self, spec: Dict[str, Any]) -> tuple:
+        """Load model and tokenizer"""
+        model_src = (spec.get("model") or {}).get("source", {})
+        ident = model_src.get("identifier") or os.getenv("PPO_MODEL")
+        if not ident:
+            raise ExecutionError("spec.model.source.identifier (or PPO_MODEL) required")
+
+        self._model_name = ident
+        
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            ident,
+            trust_remote_code=model_src.get("trust_remote_code", False)
+        )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # Load model with value head for PPO
+        model_config = spec.get("model", {}).get("config", {})
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            ident,
+            torch_dtype=torch.float16 if model_config.get("fp16", False) else torch.float32,
+            device_map="auto" if model_config.get("device_map_auto", True) else None,
+            trust_remote_code=model_src.get("trust_remote_code", False),
+            peft_config=None,  # Could add LoRA support here
+        )
+
+        # Load reference model (frozen)
+        ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            ident,
+            torch_dtype=torch.float16 if model_config.get("fp16", False) else torch.float32,
+            device_map="auto" if model_config.get("device_map_auto", True) else None,
+            trust_remote_code=model_src.get("trust_remote_code", False)
+        )
+        
+        return model, ref_model, tokenizer
+
+    def _setup_reward_function(self, spec: Dict[str, Any]) -> Callable:
+        """Setup reward function for PPO training"""
+        reward_config = spec.get("reward_model", {})
+        
+        if reward_config.get("type") == "custom" and "function" in reward_config:
+            # Custom reward function (could be implemented later)
+            return self._simple_reward_function
+        
+        # Setup sentiment-based reward model
+        model_name = reward_config.get("identifier", "cardiffnlp/twitter-roberta-base-sentiment-latest")
+        try:
+            reward_model = pipeline(
+                "sentiment-analysis",
+                model=model_name,
+                return_all_scores=True,
+                device=0 if torch.cuda.is_available() else -1
+            )
+            
+            def reward_function(samples: List[str]) -> List[float]:
+                rewards = []
+                for text in samples:
+                    try:
+                        result = reward_model(text[:512])  # Truncate for efficiency
+                        if isinstance(result, list) and len(result) > 0:
+                            # Use positive sentiment score as reward
+                            pos_score = next((r["score"] for r in result[0] if "POSITIVE" in r["label"].upper()), 0.0)
+                            rewards.append(float(pos_score))
+                        else:
+                            rewards.append(0.0)
+                    except Exception:
+                        rewards.append(0.0)
+                return rewards
+            
+            return reward_function
+            
+        except Exception:
+            # Fallback to simple reward function
+            return self._simple_reward_function
+
+    def _simple_reward_function(self, samples: List[str]) -> List[float]:
+        """Simple fallback reward function based on text length and quality"""
+        rewards = []
+        for text in samples:
+            # Simple heuristic: reward longer, more structured text
+            length_score = min(len(text) / 100.0, 1.0)
+            # Bonus for ending with punctuation
+            punct_bonus = 0.1 if text.strip().endswith(('.', '!', '?')) else 0.0
+            rewards.append(length_score + punct_bonus)
+        return rewards
+
+    def _load_dataset(self, spec: Dict[str, Any]) -> Dataset:
+        """Load training dataset"""
+        data_config = spec.get("data", {})
+        
+        if "dataset_name" in data_config:
+            # Load from Hugging Face datasets
+            dataset_name = data_config["dataset_name"]
+            split = data_config.get("split", "train")
+            config_name = data_config.get("config_name")
+            
+            dataset = load_dataset(dataset_name, config_name, split=split)
+            if data_config.get("max_samples"):
+                dataset = dataset.select(range(min(len(dataset), data_config["max_samples"])))
+            
+        elif "prompts" in data_config:
+            # Use provided prompts directly
+            prompts = data_config["prompts"]
+            dataset = Dataset.from_dict({"query": prompts})
+        else:
+            # Default demo dataset
+            prompts = [
+                "Write a positive review for a restaurant:",
+                "Describe a beautiful sunset:",
+                "Tell me about a helpful AI assistant:",
+                "Write a motivational quote:",
+                "Describe a successful day:"
+            ]
+            dataset = Dataset.from_dict({"query": prompts})
+
+        return dataset
+
+    def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:  # type: ignore[override]
+        logger.info("Starting PPO training task")
+        spec = (task or {}).get("spec") or {}
+        start_time = time.time()
+        
+        try:
+            logger.info("Loading model and tokenizer...")
+            # Load models and setup
+            model, ref_model, tokenizer = self._load_model_and_tokenizer(spec)
+            logger.info("Model loaded: %s", self._model_name)
+            
+            logger.info("Setting up reward function...")
+            reward_function = self._setup_reward_function(spec)
+            
+            logger.info("Loading dataset...")
+            dataset = self._load_dataset(spec)
+            logger.info("Dataset loaded with %d samples", len(dataset))
+        except Exception as e:
+            logger.exception("Failed during setup: %s", e)
+            raise
+        
+        # PPO Configuration
+        training_config = spec.get("training", {})
+        
+        # Setup output directory for checkpoints and logs
+        checkpoint_dir = out_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        ppo_config = PPOConfig(
+            model_name=self._model_name,
+            learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
+            batch_size=int(training_config.get("batch_size", 4)),
+            mini_batch_size=int(training_config.get("mini_batch_size", 1)),
+            gradient_accumulation_steps=int(training_config.get("gradient_accumulation_steps", 1)),
+            optimize_cuda_cache=training_config.get("optimize_cuda_cache", True),
+            early_stopping=training_config.get("early_stopping", False),
+            target_kl=float(training_config.get("target_kl", 0.1)),
+            ppo_epochs=int(training_config.get("ppo_epochs", 4)),
+            seed=int(training_config.get("seed", 42)),
+            steps=int(training_config.get("steps", 100)),
+            tracker_project_name=training_config.get("tracker_project_name", "ppo-training"),
+            log_with=training_config.get("log_with", None),  # Can be "tensorboard", "wandb", etc.
+            logging_dir=str(checkpoint_dir / "logs"),
+            save_freq=training_config.get("save_freq", 100),
+            output_dir=str(checkpoint_dir),
+        )
+
+        # Initialize PPO trainer
+        ppo_trainer = PPOTrainer(
+            config=ppo_config,
+            model=model,
+            ref_model=ref_model,
+            tokenizer=tokenizer,
+        )
+        
+        # Generation settings for the trainer
+        generation_config = spec.get("generation", {})
+        generation_kwargs = {
+            "max_new_tokens": int(generation_config.get("max_new_tokens", 128)),
+            "temperature": float(generation_config.get("temperature", 0.7)),
+            "do_sample": generation_config.get("do_sample", True),
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+        }
+
+        # Run PPO training loop
+        training_logs = []
+        try:
+            # Prepare dataset for training
+            def collate_fn(examples):
+                return {"query": [example["query"] for example in examples]}
+            
+            # Simple training loop using the dataset
+            for step in range(ppo_config.steps):
+                # Get a batch of queries
+                if step < len(dataset):
+                    batch = [dataset[step % len(dataset)]]
+                else:
+                    batch = [dataset[step % len(dataset)]]
+                
+                query_texts = [item["query"] for item in batch]
+                
+                # Tokenize queries
+                query_tensors = []
+                for query in query_texts:
+                    query_tensor = tokenizer.encode(query, return_tensors="pt", padding=True, truncation=True)
+                    query_tensors.append(query_tensor.squeeze())
+                
+                # Generate responses
+                response_tensors = ppo_trainer.generate(query_tensors, return_prompt=False, **generation_kwargs)
+                
+                # Decode responses
+                responses = []
+                for response_tensor in response_tensors:
+                    response_text = tokenizer.decode(response_tensor, skip_special_tokens=True)
+                    responses.append(response_text)
+                
+                # Compute rewards
+                full_texts = [q + " " + r for q, r in zip(query_texts, responses)]
+                rewards = reward_function(full_texts)
+                reward_tensors = [torch.tensor(r, dtype=torch.float) for r in rewards]
+                
+                # PPO step
+                stats = ppo_trainer.step(query_tensors, response_tensors, reward_tensors)
+                
+                # Log progress
+                step_log = {
+                    "step": step,
+                    "mean_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+                    "queries": query_texts,
+                    "responses": responses,
+                    "stats": stats if stats else {}
+                }
+                training_logs.append(step_log)
+                
+                # Log every 10 steps
+                if step % 10 == 0:
+                    logger.info(f"PPO Step {step}/{ppo_config.steps}: mean_reward={step_log['mean_reward']:.4f}")
+                
+            training_successful = True
+            error_msg = None
+            
+        except Exception as e:
+            training_successful = False
+            error_msg = str(e)
+            logger.exception("PPO training failed: %s", e)
+
+        training_time = time.time() - start_time
+
+        # Save model if requested and training was successful
+        save_model = training_config.get("save_model", False)
+        model_save_path = None
+        if save_model and training_successful:
+            model_save_path = out_dir / "trained_model"
+            model.save_pretrained(model_save_path)
+            tokenizer.save_pretrained(model_save_path)
+
+        # Calculate training metrics
+        training_metrics = {}
+        if training_successful and training_logs:
+            all_rewards = []
+            for log in training_logs:
+                all_rewards.append(log.get('mean_reward', 0.0))
+            
+            training_metrics = {
+                "total_steps": len(training_logs),
+                "mean_reward": sum(all_rewards) / len(all_rewards) if all_rewards else 0.0,
+                "final_reward": all_rewards[-1] if all_rewards else 0.0,
+            }
+
+        # Prepare results
+        result = {
+            "ok": training_successful,
+            "executor": self.name,
+            "model": self._model_name,
+            "training_config": {
+                "steps": ppo_config.steps,
+                "batch_size": ppo_config.batch_size,
+                "learning_rate": ppo_config.learning_rate,
+                "ppo_epochs": ppo_config.ppo_epochs,
+                "target_kl": ppo_config.target_kl,
+            },
+            "results": {
+                "training_successful": training_successful,
+                "training_time_sec": training_time,
+                "model_saved": save_model and training_successful,
+                "model_save_path": str(model_save_path) if model_save_path else None,
+                "checkpoint_dir": str(checkpoint_dir),
+                "training_metrics": training_metrics,
+                "recent_logs": training_logs[-10:] if training_logs else [],  # Last 10 steps
+                "error": error_msg,
+            },
+            "training_logs": training_logs if training_config.get("save_detailed_logs", False) else []
+        }
+
+        # Save results
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "responses.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2)
+        )
+
+        return result

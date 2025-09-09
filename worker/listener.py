@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 import redis
 
 # executors
-from worker.executors import VLLMExecutor
+from worker.executors import VLLMExecutor, PPOExecutor
 
 # -------------------------
 # Helpers
@@ -255,7 +255,14 @@ class Runner:
         self.topics = topics
         self.results_dir = results_dir
 
-        self.executor = VLLMExecutor()
+        # Initialize available executors
+        self.executors = {
+            "inference": VLLMExecutor(),
+            "ppo": PPOExecutor(),
+        }
+        
+        # Default executor for backward compatibility
+        self.executor = self.executors.get("inference")
 
     def start(self):
         pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
@@ -291,12 +298,19 @@ class Runner:
             logger.info("accepted task_id=%s type=%s", task_id, task_type)
             self.lifecycle.set_running(task_id)
             try:
-                if self.executor:
+                # Select appropriate executor based on task type
+                executor = self.executors.get(task_type, self.executor)
+                logger.info("Selected executor: %s for task_type: %s", executor.__class__.__name__ if executor else "None", task_type)
+                
+                if executor:
+                    logger.info("Starting task execution for task_id=%s", task_id)
                     out_dir = self.results_dir / task_id
-                    out = self.executor.run(task, out_dir)
-                    logger.info("task %s finished: %s", task_id, out)
+                    out = executor.run(task, out_dir)
+                    logger.info("task %s finished successfully", task_id)
                 else:
                     logger.warning("no executor configured for taskType=%s", task_type)
+            except Exception as e:
+                logger.exception("Task %s failed with error: %s", task_id, e)
             finally:
                 self.lifecycle.set_idle(task_id)
 
@@ -325,7 +339,13 @@ def main():
     lifecycle = Lifecycle(rworker, hb_interval, hb_ttl)
     lifecycle.start(env={}, hardware=collect_hw(), tags=tags)
 
-    topics = [t.strip() for t in (os.getenv("TASK_TOPICS") or "tasks.inference").split(",") if t.strip()]
+    task_topics_env = os.getenv("TASK_TOPICS")
+    default_topics = "tasks.inference,tasks.ppo"
+    topics_str = task_topics_env or default_topics
+    topics = [t.strip() for t in topics_str.split(",") if t.strip()]
+    
+    logger.info("TASK_TOPICS environment variable: %s", task_topics_env)
+    logger.info("Using topics: %s", topics)
     results_dir = Path(os.getenv("RESULTS_DIR", "./results"))
     results_dir.mkdir(parents=True, exist_ok=True)
 
