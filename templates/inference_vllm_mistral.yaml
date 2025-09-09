@@ -1,0 +1,56 @@
+apiVersion: mloc/v1
+kind: InferenceTask
+metadata:
+  name: mistral-7b-infer
+  owner: alice
+  annotations:
+    description: "Run text-generation inference using vLLM (Mistral-7B)"
+
+spec:
+  taskType: "inference"   # Worker will execute with the vLLM module
+
+  # Resource requirements used by the orchestrator scheduler
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "8"
+      memory: "32Gi"
+      gpu:
+        type: "any"       # or a specific model, e.g. "nvidia-a100-80gb"
+        count: 1
+
+  # Model configuration and vLLM runtime options
+  model:
+    source:
+      type: "huggingface"
+      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
+      revision: "main"
+    vllm:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.9
+      trust_remote_code: true
+
+  # Data resource
+  data:
+    type: "dataset"
+    url: "openai/gsm8k"
+    name: "main"
+    split: "train[:1%]"
+    column: "question"
+    shuffle: true
+    seed: 42
+
+  # Inference parameters
+  inference:
+    max_tokens: 128
+    temperature: 0.7
+    top_p: 0.95
+
+  # Output configuration (current worker writes locally to RESULTS_DIR/<task_id>/responses.json)
+  output:
+    destination:
+      type: "local"
+      path: "/ignored/by/current-worker"  # Placeholder; current worker writes to RESULTS_DIR
+    artifacts:
+      - "responses.json"
+      - "logs"

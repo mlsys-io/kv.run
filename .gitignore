@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+.DS_Store
+
+# Results
+results/
+
 # C extensions
 *.so
 
@@ -106,8 +111,10 @@ ipython_config.py
 #pdm.lock
 #   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
 #   in version control.
-#   https://pdm.fming.dev/#use-with-ide
+#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
 .pdm.toml
+.pdm-python
+.pdm-build/
 
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
@@ -127,9 +134,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
-# uv
-.uv/
 
 # Spyder project settings
 .spyderproject
@@ -157,124 +161,8 @@ cython_debug/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be added to the global gitignore or merged into this project gitignore.  For a PyCharm
-#  project, it is generally recommended to include the gitignore entries provided by the
-#  PyCharm IDE.
-.idea/
+#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#  and can be added to the global gitignore or merged into this file.  For a more nuclear
+#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+#.idea/
 
-# VS Code
-.vscode/
-
-# Operating System Files
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-Icon?
-._*
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-.AppleDB
-.AppleDesktop
-Network Trash Folder
-Temporary Items
-.apdisk
-
-# Windows
-Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-ehthumbs_vista.db
-*.tmp
-*.temp
-*.swp
-*.swo
-*~
-Desktop.ini
-$RECYCLE.BIN/
-*.cab
-*.msi
-*.msix
-*.msm
-*.msp
-*.lnk
-
-# Linux
-*~
-.fuse_hidden*
-.directory
-.Trash-*
-.nfs*
-
-# Docker
-.dockerignore
-
-# Logs and temporary files
-*.log
-logs/
-artifacts/
-tmp/
-temp/
-
-# ML/AI specific
-*.pkl
-*.pickle
-*.joblib
-*.h5
-*.hdf5
-*.ckpt
-*.pth
-*.pt
-*.safetensors
-models/
-checkpoints/
-wandb/
-mlruns/
-.neptune/
-
-# Data files
-data/
-datasets/
-*.csv
-*.json
-*.jsonl
-*.parquet
-*.arrow
-
-# GPU/CUDA
-*.cubin
-*.ptx
-
-# Jupyter
-.jupyter/
-
-# Redis dumps
-*.rdb
-dump.rdb
-
-# Local config files
-config.local.yaml
-.env.local
-secrets.yaml
-
-# Work directories
-/tmp/mloc_work/
-
-# Build artifacts
-*.whl
-*.tar.gz
-
-# Security
-*.key
-*.pem
-*.p12
-*.crt
-*.csr
-credentials.json
-service-account.json
-.secrets/

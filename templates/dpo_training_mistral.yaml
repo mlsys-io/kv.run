@@ -1,0 +1,72 @@
+apiVersion: mloc/v1
+kind: TrainingTask
+metadata:
+  name: mistral-7b-dpo-training
+  owner: alice
+  annotations:
+    description: DPO training for Mistral-7B using direct preference optimization
+spec:
+  taskType: dpo
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "16"
+      memory: "64Gi"
+      gpu:
+        type: any
+        count: 1
+  
+  model:
+    source:
+      type: huggingface
+      identifier: mistralai/Mistral-7B-Instruct-v0.1
+      revision: main
+      trust_remote_code: false
+    config:
+      fp16: true
+      device_map_auto: true
+
+  data:
+    # Option 1: Use Hugging Face dataset
+    # dataset_name: "trl-lib/ultrafeedback_binarized"
+    # split: "train[:100]"  # Use small subset for testing
+    # max_samples: 100
+    
+    # Option 2: Provide preference data directly
+    preferences:
+      - prompt: "Write a helpful response about Python programming:"
+        chosen: "Python is a versatile programming language known for its readability and extensive libraries. It's great for beginners and widely used in data science, web development, and automation."
+        rejected: "Python is just another programming language. Nothing special about it."
+      
+      - prompt: "Explain machine learning in simple terms:"
+        chosen: "Machine learning is like teaching computers to recognize patterns and make predictions from data, similar to how humans learn from experience."
+        rejected: "Machine learning is complicated math stuff that computers do."
+      
+      - prompt: "Give advice on learning to code:"
+        chosen: "Start with a beginner-friendly language like Python, practice regularly with small projects, and don't be afraid to make mistakes - they're part of learning!"
+        rejected: "Just memorize syntax and you'll be fine."
+      
+      - prompt: "Describe the importance of documentation:"
+        chosen: "Good documentation is essential for code maintainability, team collaboration, and helping future developers (including yourself) understand what the code does and why."
+        rejected: "Documentation is just extra work that slows down development."
+      
+      - prompt: "What's the best way to debug code?"
+        chosen: "Start by reading error messages carefully, use print statements or a debugger to trace the execution, and isolate the problem by testing small parts of your code."
+        rejected: "Just keep changing things randomly until it works."
+
+  training:
+    learning_rate: 5e-7        # Lower learning rate for DPO
+    batch_size: 4              # Batch size per device
+    gradient_accumulation_steps: 4
+    num_train_epochs: 1        # Number of epochs
+    save_model: true
+    save_freq: 500             # Save every N steps
+    
+  output:
+    destination:
+      type: local
+      path: /ignored/by/current-worker
+    artifacts:
+      - responses.json
+      - trained_model/
+      - logs

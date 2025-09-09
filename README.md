@@ -1,255 +1,532 @@
-# MLOC (Modular LLM Operations Container)
+# MLOC - Modular LLM Operations Container
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://docker.com)
-[![Kubernetes](https://img.shields.io/badge/kubernetes-ready-blue.svg)](https://kubernetes.io)
+[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.116+-green.svg)](https://fastapi.tiangolo.com)
+[![Redis](https://img.shields.io/badge/Redis-6.4+-red.svg)](https://redis.io)
+[![vLLM](https://img.shields.io/badge/vLLM-0.10+-purple.svg)](https://vllm.ai)
 
-MLOC (Modular LLM Operations Container) 是一个统一的容器化框架，旨在简化和标准化 LLM 的训练、微调、推理和应用流程。通过配置文件驱动，即可在异构硬件集群中一键部署，并执行指定的 LLM 任务。
+MLOC is a distributed system for Large Language Model (LLM) inference and fine-tuning operations. It provides a scalable, fault-tolerant architecture using an orchestrator-worker pattern with Redis as the message broker.
 
-## ✨ 核心特性
-
-- **🎯 配置驱动**: 节点角色和任务完全由 YAML 配置文件定义
-- **🧩 模块化架构**: 核心功能（SFT, PPO, RAG 等）作为可插拔模块
-- **🔧 开源集成**: 深度集成 TRL, vLLM, LangChain, Hugging Face 等优秀开源库  
-- **🖥️ 硬件感知**: 智能识别和调度不同型号的 GPU 资源
-- **☁️ 云原生**: 为 Kubernetes 设计，支持广域网分布式部署
-- **📊 可观测**: 内置监控、日志聚合和用量统计
-
-## 🏗️ 系统架构
-
-MLOC 采用 Orchestrator/Worker 架构：
-
-- **Orchestrator (主控节点)**: 负责任务调度、状态监控和资源管理
-- **Worker (工作节点)**: 负责执行具体的训练和推理任务
+## Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Orchestrator  │────│     Redis       │────│     Worker      │
-│                 │    │  (Message Queue)│    │                 │
-│ • API Server    │    │  • Task Queue   │    │ • Task Listener │
-│ • Scheduler     │    │  • Worker       │    │ • Module Loader │
-│ • Monitor       │    │    Registry     │    │ • Executor      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
++-------------+    HTTP API    +--------------+    Redis Pub/Sub    +-------------+
+|   Client    | -------------> | Orchestrator | -----------------> |   Worker    |
++-------------+                +--------------+                    +-------------+
+                                      |                                    |
+                                      |                                    |
+                                      v                                    v
+                              +-------------+                      +-------------+
+                              |    Redis    |                      |  Executors  |
+                              |  (Message   |                      |  (vLLM,     |
+                              |   Broker)   |                      |   etc.)     |
+                              +-------------+                      +-------------+
 ```
 
-## 🚀 快速开始
+### Core Components
 
-### 使用 Docker Compose (推荐开发环境)
+- **Orchestrator**: Central service for task scheduling and worker management
+- **Worker**: Execution nodes that process LLM tasks
+- **Redis**: Message broker and state store
+- **Executors**: Pluggable task execution modules
+  - **vLLM Executor**: High-performance LLM inference
+  - **PPO Executor**: Reinforcement learning training with Proximal Policy Optimization
 
-1. **克隆项目**
+## Features
+
+- **Distributed Task Execution**: Scale horizontally by adding more workers
+- **Resource-Aware Scheduling**: Intelligent task assignment based on hardware requirements
+- **Fault Tolerance**: Heartbeat monitoring and automatic cleanup of stale workers
+- **Multiple Executors**: Support for both inference and training workflows
+  - **vLLM Inference**: High-throughput text generation
+  - **PPO Training**: Reinforcement learning fine-tuning
+- **YAML Task Definitions**: Declarative task specification
+- **RESTful API**: HTTP endpoints for task submission and monitoring
+
+## Installation
+
+### Prerequisites
+
+- Python 3.12+
+- Redis server
+- NVIDIA GPU (for GPU inference)
+- CUDA toolkit (for GPU support)
+
+### Setup
+
+1. **Clone the repository**:
    ```bash
    git clone <repository-url>
-   cd mloc
+   cd kv.run
    ```
 
-2. **构建镜像**
-   ```bash
-   ./scripts/build.sh
-   ```
-
-3. **启动服务**
-   ```bash
-   docker-compose up -d
-   ```
-
-4. **验证部署**
-   ```bash
-   curl http://localhost:8000/health
-   ```
-
-### 使用 Kubernetes (推荐生产环境)
-
-1. **部署到 K8s 集群**
-   ```bash
-   ./scripts/deploy_k8s.sh
-   ```
-
-2. **访问 API**
-   ```bash
-   kubectl port-forward service/orchestrator 8000:8000 -n mloc
-   ```
-
-## 📋 支持的任务类型
-
-### 🎓 监督微调 (SFT)
-使用 TRL 库进行监督微调，支持 LoRA、QLoRA 等高效适配器方法。
-
-```yaml
-taskType: "sft"
-model:
-  source:
-    type: "huggingface"
-    identifier: "mistralai/Mistral-7B-Instruct-v0.1"
-  adapter:
-    type: "qlora"
-    r: 16
-    lora_alpha: 32
-```
-
-### 🏆 强化学习 (PPO)
-使用 TRL 进行 PPO 训练，实现人类反馈的强化学习（RLHF）。
-
-```yaml
-taskType: "ppo"
-hyperparameters:
-  reward_model: "OpenAssistant/reward-model-deberta-v3-large-v2"
-  ppo_epochs: 4
-  target_kl: 0.1
-```
-
-### 📚 检索增强生成 (RAG)
-使用 LangChain 构建 RAG 系统，支持向量数据库和文档索引。
-
-```yaml
-taskType: "rag_inference"
-hyperparameters:
-  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
-  vector_db: "chromadb"
-  retrieval_k: 5
-```
-
-### 🤖 智能代理 (Agent)
-使用 LangChain 构建智能代理，支持工具调用和多轮对话。
-
-```yaml
-taskType: "agent_inference"
-hyperparameters:
-  agent_type: "react"
-  tools: ["python_repl", "web_search"]
-```
-
-## 📝 提交任务
-
-1. **准备任务配置**
-   ```bash
-   cp configs/sft_mistral_7b.yaml my_task.yaml
-   # 编辑配置文件...
-   ```
-
-2. **提交任务**
-   ```bash
-   curl -X POST http://localhost:8000/api/v1/tasks \
-     -H "Content-Type: application/json" \
-     -d @my_task.yaml
-   ```
-
-3. **查看任务状态**
-   ```bash
-   curl http://localhost:8000/api/v1/tasks/<task_id>
-   ```
-
-## 📊 监控和统计
-
-### 查看任务列表
-```bash
-curl http://localhost:8000/api/v1/tasks?page=1&page_size=10
-```
-
-### 查看工作节点
-```bash
-curl http://localhost:8000/api/v1/workers
-```
-
-### 获取用量统计
-```bash
-curl "http://localhost:8000/api/v1/stats?user=john-doe&start_date=2024-01-01"
-```
-
-## ⚙️ 配置管理
-
-### 环境变量
-
-| 变量 | 默认值 | 描述 |
-|------|--------|------|
-| `MLOC_NODE_TYPE` | `WORKER` | 节点类型 (`ORCHESTRATOR` 或 `WORKER`) |
-| `MLOC_REDIS_URL` | `redis://localhost:6379` | Redis 连接 URL |
-| `MLOC_LOG_LEVEL` | `INFO` | 日志级别 |
-| `MLOC_HOST` | `0.0.0.0` | 服务监听地址 |
-| `MLOC_PORT` | `8000` | 服务端口 |
-
-### 本地开发
-
-1. **安装依赖**
-   ```bash
-   uv venv
-   source .venv/bin/activate
-   uv pip install -e .
-   ```
-
-2. **启动 Redis**
-   ```bash
-   docker run -d -p 6379:6379 redis:7-alpine
-   ```
-
-3. **启动 Orchestrator**
-   ```bash
-   mloc start --node-type orchestrator
-   ```
-
-4. **启动 Worker**
-   ```bash
-   mloc start --node-type worker
-   ```
-
-## 🔧 开发指南
-
-### 添加新的任务模块
-
-1. **创建模块类**
-   ```python
-   # src/mloc/modules/my_module.py
-   from .base_module import BaseModule
+2. **Install dependencies**:
    
-   class MyModule(BaseModule):
-       async def execute(self, progress_callback=None):
-           # 实现任务逻辑
-           pass
+   For basic inference functionality:
+   ```bash
+   uv sync
    ```
-
-2. **注册模块**
-   ```python
-   # src/mloc/modules/__init__.py
-   from .my_module import MyModule
    
-   MODULE_REGISTRY[TaskType.MY_TASK] = MyModule
+   For PPO training functionality:
+   ```bash
+   uv sync --extra ppo
+   ```
+   
+   For development:
+   ```bash
+   uv sync --extra ppo --extra dev
    ```
 
-### 项目结构
+3. **Start Redis** (if not already running):
+   ```bash
+   redis-server
+   ```
 
+## Quick Start
+
+### 1. Start the Orchestrator
+
+```bash
+export REDIS_URL="redis://localhost:6379/0"
+export ORCHESTRATOR_TOKEN="dev-token"  # Optional: for API authentication
+
+python -m orchestrator.server
 ```
-mloc/
-├── src/mloc/
-│   ├── common/           # 通用工具和定义
-│   ├── orchestrator/     # 主控节点实现
-│   ├── worker/          # 工作节点实现
-│   ├── modules/         # 任务执行模块
-│   └── integrations/    # 外部库集成
-├── configs/             # 示例配置文件
-├── docker/              # Docker 构建文件
-├── scripts/            # 部署和构建脚本
-└── tests/              # 测试用例
+
+The orchestrator will be available at `http://localhost:8000`
+
+### 2. Start a Worker
+
+For both inference and PPO training:
+```bash
+# Note: Don't set TASK_TOPICS to use default (tasks.inference,tasks.ppo)
+export REDIS_URL="redis://localhost:6379/0"
+export RESULTS_DIR="./results"
+
+python -m worker.listener
 ```
 
-## 🛠️ 依赖项目
+### 3. Submit Tasks
 
-- **[TRL](https://github.com/huggingface/trl)**: Transformer Reinforcement Learning
-- **[vLLM](https://github.com/vllm-project/vllm)**: 高性能 LLM 推理引擎
-- **[LangChain](https://github.com/langchain-ai/langchain)**: LLM 应用框架
-- **[Hugging Face](https://huggingface.co/)**: 模型和数据集生态
-- **[Redis](https://redis.io/)**: 消息队列和状态存储
-- **[FastAPI](https://fastapi.tiangolo.com/)**: 现代 Web API 框架
+#### For vLLM Inference:
+```bash
+cd client
+./vllm_inference.sh
+```
 
-## 📄 许可证
+#### For PPO Training:
+```bash
+cd client
+./ppo_training.sh
+```
 
-本项目采用 Apache License 2.0 许可证。详见 [LICENSE](LICENSE) 文件。
+#### Or submit directly via curl:
 
-## 🤝 贡献
+Inference task:
+```bash
+curl -X POST "http://localhost:8000/api/v1/tasks" \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @templates/inference_vllm_mistral.yaml
+```
 
-欢迎提交 Issue 和 Pull Request！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解更多信息。
+PPO training task:
+```bash
+curl -X POST "http://localhost:8000/api/v1/tasks" \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @templates/ppo_training_mistral.yaml
+```
 
-## 📞 支持
+## Task Definition
 
-- 📧 Email: support@mloc.dev
-- 💬 Discord: [MLOC Community](https://discord.gg/mloc)
-- 📖 Documentation: [docs.mloc.dev](https://docs.mloc.dev)
+Tasks are defined using YAML files.
+
+### vLLM Inference Task Example
+
+```yaml
+apiVersion: mloc/v1
+kind: InferenceTask
+metadata:
+  name: mistral-7b-infer
+  owner: alice
+
+spec:
+  taskType: "inference"
+  
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "8"
+      memory: "32Gi"
+      gpu:
+        type: "any"
+        count: 1
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
+    vllm:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.9
+
+  inference:
+    max_tokens: 128
+    temperature: 0.7
+    prompts:
+      - "Explain quantum computing in simple terms."
+      - "Write a Python function to sort a list."
+```
+
+### PPO Training Task Example
+
+```yaml
+apiVersion: mloc/v1
+kind: TrainingTask
+metadata:
+  name: mistral-7b-ppo-training
+  owner: alice
+
+spec:
+  taskType: "ppo"
+  
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "16"
+      memory: "64Gi"
+      gpu:
+        type: "any"
+        count: 1
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
+    config:
+      fp16: true
+      device_map_auto: true
+
+  reward_model:
+    identifier: "cardiffnlp/twitter-roberta-base-sentiment-latest"
+    type: "sentiment"
+
+  data:
+    prompts:
+      - "Write a helpful response: How can I improve my productivity?"
+      - "Create a motivational message for someone learning to code:"
+      - "Explain quantum computing in an encouraging way:"
+
+  training:
+    learning_rate: 1.41e-5
+    batch_size: 4
+    steps: 50
+    ppo_epochs: 4
+    target_kl: 0.1
+    save_model: true
+
+  generation:
+    max_new_tokens: 256
+    temperature: 0.7
+```
+
+## Configuration
+
+### Orchestrator Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_URL` | Required | Redis connection URL |
+| `ORCHESTRATOR_TOKEN` | None | Bearer token for API authentication |
+| `HEARTBEAT_TTL_SEC` | 120 | Worker heartbeat timeout |
+| `PORT` | 8000 | HTTP server port |
+| `LOG_LEVEL` | INFO | Logging level |
+
+### Worker Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_URL` | Required | Redis connection URL |
+| `TASK_TOPICS` | "tasks.inference,tasks.ppo" | Comma-separated list of topics to subscribe |
+| `RESULTS_DIR` | "./results" | Directory for task results |
+| `HEARTBEAT_INTERVAL_SEC` | 30 | Heartbeat interval |
+| `WORKER_ID` | auto-generated | Fixed worker ID |
+| `WORKER_TAGS` | None | Comma-separated worker tags |
+
+### Executor Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `VLLM_MODEL` | Default vLLM model identifier |
+| `PPO_MODEL` | Default PPO training model identifier |
+
+## API Reference
+
+### Orchestrator Endpoints
+
+#### Worker Management
+
+- `GET /workers` - List all workers
+- `GET /workers/{worker_id}` - Get worker details
+- `POST /admin/cleanup` - Clean up stale workers
+
+#### Task Management
+
+- `POST /api/v1/tasks` - Submit a new task
+- `GET /api/v1/tasks` - List all tasks
+- `GET /api/v1/tasks/{task_id}` - Get task details
+
+#### Health Check
+
+- `GET /healthz` - Health check endpoint
+
+### Task Submission Example
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/tasks" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: text/yaml" \
+  --data-binary @task.yaml
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "task_id": "123e4567-e89b-12d3-a456-426614174000",
+  "worker_id": "worker-001",
+  "topic": "tasks.inference"
+}
+```
+
+## Development
+
+### Adding Custom Executors
+
+1. Create a new executor class inheriting from `Executor`:
+
+```python
+from worker.executors.base_executor import Executor, ExecutionError
+
+class MyCustomExecutor(Executor):
+    name = "my-executor"
+    
+    def run(self, task: dict, out_dir: Path) -> dict:
+        # Your custom logic here
+        result = {"ok": True, "message": "Task completed"}
+        self.save_json(out_dir / "responses.json", result)
+        return result
+```
+
+2. Register the executor in `worker/listener.py`:
+
+```python
+from worker.executors import MyCustomExecutor
+
+# In Runner.__init__()
+self.executor = MyCustomExecutor()
+```
+
+### Running Tests
+
+```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/
+```
+
+### Code Formatting
+
+```bash
+# Format code
+black .
+isort .
+
+# Lint
+ruff check .
+```
+
+## Monitoring
+
+### Worker Status
+
+Check worker status via the API:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/workers"
+```
+
+### Task Results
+
+Task results are stored in `RESULTS_DIR/<task_id>/responses.json`:
+
+```json
+{
+  "ok": true,
+  "model": "mistralai/Mistral-7B-Instruct-v0.1",
+  "items": [
+    {
+      "index": 0,
+      "output": "Generated text response...",
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 155,
+    "total_tokens": 180,
+    "latency_sec": 0.85,
+    "num_requests": 1
+  }
+}
+```
+
+### Logs
+
+- Orchestrator logs: `orchestrator.log` (configurable)
+- Worker logs: stdout/stderr
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Worker Not Subscribing to PPO Tasks
+
+**Problem**: Worker only shows `subscribed to topics: ['tasks.inference']`
+
+**Solution**: 
+```bash
+# Clear any existing TASK_TOPICS environment variable
+unset TASK_TOPICS
+
+# Restart worker (it will use default topics: tasks.inference,tasks.ppo)
+export REDIS_URL="redis://localhost:6379/0"
+export RESULTS_DIR="./results"
+python -m worker.listener
+```
+
+**Root Cause**: Previously set `TASK_TOPICS` environment variable overrides the default configuration.
+
+#### 2. PPO Training Dependencies Missing
+
+**Problem**: `PPO dependencies not installed` error
+
+**Solution**:
+```bash
+# Install PPO dependencies
+uv sync --extra ppo
+# OR
+pip install trl transformers torch datasets accelerate
+```
+
+#### 3. Task Submission Successful But No Worker Response
+
+**Debug Steps**:
+1. **Check worker logs** - Should show task acceptance and executor selection
+2. **Verify topic subscription** - Worker should subscribe to correct topics
+3. **Check Redis connection** - Both orchestrator and worker need Redis access
+4. **Verify task assignment** - Check if task was assigned to the correct worker
+
+**Debug Commands**:
+```bash
+# Check Redis connectivity
+redis-cli ping
+
+# Check worker subscription
+# Look for: "subscribed to topics: ['tasks.inference', 'tasks.ppo']"
+
+# Check task assignment in orchestrator logs
+# Look for: "Publish to topic=tasks.ppo receivers=1"
+```
+
+#### 4. GPU Memory Issues During PPO Training
+
+**Problem**: CUDA out of memory errors
+
+**Solutions**:
+- Reduce `batch_size` in training config
+- Enable `fp16: true` in model config
+- Reduce `max_new_tokens` in generation config
+- Use `gradient_accumulation_steps` to simulate larger batches
+
+#### 5. Slow PPO Training
+
+**Optimization Tips**:
+- Use smaller models for experimentation
+- Reduce number of training steps
+- Use gradient accumulation instead of large batch sizes
+- Enable `optimize_cuda_cache: true`
+
+### Debug Mode
+
+To enable detailed debugging:
+
+```bash
+# Set debug logging level
+export LOG_LEVEL="DEBUG"
+
+# Start worker with debug output
+python -m worker.listener
+```
+
+Look for these key log messages:
+- `TASK_TOPICS environment variable: None`
+- `Using topics: ['tasks.inference', 'tasks.ppo']`
+- `Selected executor: PPOExecutor for task_type: ppo`
+- `Starting PPO training task`
+- `PPO Step 0/50: mean_reward=0.1234`
+
+## Deployment
+
+### Docker Deployment
+
+1. **Build images**:
+```bash
+# Orchestrator
+docker build -t mloc-orchestrator -f docker/Dockerfile.orchestrator .
+
+# Worker
+docker build -t mloc-worker -f docker/Dockerfile.worker .
+```
+
+2. **Run with Docker Compose**:
+```bash
+docker-compose up -d
+```
+
+### Production Considerations
+
+- Use a Redis cluster for high availability
+- Set up proper logging aggregation
+- Monitor GPU utilization and memory usage
+- Configure resource limits for containers
+- Use a reverse proxy (nginx) for the orchestrator
+- Set up SSL/TLS for production deployments
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- [vLLM](https://vllm.ai) for high-performance LLM inference
+- [FastAPI](https://fastapi.tiangolo.com) for the web framework
+- [Redis](https://redis.io) for reliable message brokering
+
+## Support
+
+- Create an issue for bug reports or feature requests
+- Check the [documentation](docs/) for detailed guides
+- Join our community discussions

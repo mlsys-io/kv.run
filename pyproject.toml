@@ -1,139 +1,16 @@
-[build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "mloc"
 version = "0.1.0"
-description = "Modular LLM Operations Container - A unified containerized framework for LLM training, fine-tuning, inference and applications"
-authors = [
-    {name = "MLOC Team"}
-]
+description = "Modular LLM Operations Container - Distributed system for LLM inference and training"
 readme = "README.md"
-license = {text = "Apache-2.0"}
-requires-python = ">=3.9"
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-]
-
+requires-python = ">=3.12"
 dependencies = [
-    # Core framework
-    "fastapi>=0.100.0",
-    "uvicorn>=0.22.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    
-    # Message queue and async
-    "redis>=4.5.0",
-    "celery>=5.3.0",
-    "aioredis>=2.0.0",
-    
-    # Machine Learning
-    "torch>=2.0.0",
-    "transformers>=4.30.0",
-    "datasets>=2.12.0",
-    "trl>=0.7.0",
-    "peft>=0.4.0",
-    "accelerate>=0.20.0",
-    "bitsandbytes>=0.40.0",
-    
-    # Model serving
-    "vllm>=0.2.0",
-    
-    # RAG and vector databases
-    "langchain>=0.1.0",
-    "langchain-community>=0.0.20",
-    "chromadb>=0.4.0",
-    "sentence-transformers>=2.2.0",
-    
-    # Storage and data handling
-    "huggingface-hub>=0.16.0",
-    "boto3>=1.26.0",
-    "fsspec>=2023.6.0",
-    
-    # Utilities
-    "pyyaml>=6.0.0",
-    "click>=8.1.0",
-    "python-dotenv>=1.0.0",
-    "httpx>=0.24.0",
-    
-    # Monitoring
-    "prometheus-client>=0.17.0",
-    "structlog>=23.1.0",
-    
-    # Development
-    "typer>=0.9.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "flake8>=6.0.0",
-    "mypy>=1.3.0",
-    "pre-commit>=3.3.0",
-]
-
-all = [
-    "mloc[dev]",
-]
-
-[project.scripts]
-mloc = "mloc.main:app"
-
-[project.urls]
-Homepage = "https://github.com/your-org/mloc"
-Documentation = "https://mloc.readthedocs.io/"
-Repository = "https://github.com/your-org/mloc.git"
-Issues = "https://github.com/your-org/mloc/issues"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-mloc = ["py.typed"]
-
-[tool.black]
-line-length = 88
-target-version = ['py39']
-include = '\.pyi?$'
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-line_length = 88
-
-[tool.mypy]
-python_version = "3.9"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-strict_equality = true
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py", "*_test.py"]
-addopts = [
-    "--strict-markers",
-    "--strict-config",
-    "--cov=mloc",
-    "--cov-report=html",
-    "--cov-report=term-missing",
+    "fastapi>=0.116.1",
+    "pyyaml>=6.0.2",
+    "redis>=6.4.0",
+    "requests>=2.32.5",
+    "uvicorn>=0.35.0",
+    "vllm>=0.10.1.1",
+    "datasets>=4.0.0",
+    "trl>=0.8.0",
 ]
