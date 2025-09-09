@@ -58,7 +58,7 @@ MLOC is a distributed system for Large Language Model (LLM) inference and fine-t
 
 2. **Install dependencies**:
    ```bash
-   pip install -e .
+   uv sync
    ```
 
 3. **Start Redis** (if not already running):
