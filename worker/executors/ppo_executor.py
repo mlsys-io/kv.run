@@ -59,7 +59,6 @@ class PPOExecutor:
             
             logger.info("Creating PPOConfig...")
             ppo_config = PPOConfig(
-                model_name=self._model_name,
                 learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
                 batch_size=int(training_config.get("batch_size", 4)),
                 mini_batch_size=int(training_config.get("mini_batch_size", 1)),
