@@ -211,16 +211,12 @@ class PPOExecutor(Executor):
             batch_size=int(training_config.get("batch_size", 4)),
             mini_batch_size=int(training_config.get("mini_batch_size", 1)),
             gradient_accumulation_steps=int(training_config.get("gradient_accumulation_steps", 1)),
-            optimize_cuda_cache=training_config.get("optimize_cuda_cache", True),
-            early_stopping=training_config.get("early_stopping", False),
             target_kl=float(training_config.get("target_kl", 0.1)),
-            ppo_epochs=int(training_config.get("ppo_epochs", 4)),
+            num_ppo_epochs=int(training_config.get("ppo_epochs", 4)),
             seed=int(training_config.get("seed", 42)),
-            steps=int(training_config.get("steps", 100)),
             tracker_project_name=training_config.get("tracker_project_name", "ppo-training"),
-            log_with=training_config.get("log_with", None),  # Can be "tensorboard", "wandb", etc.
+            log_with=training_config.get("log_with", None),
             logging_dir=str(checkpoint_dir / "logs"),
-            save_freq=training_config.get("save_freq", 100),
             output_dir=str(checkpoint_dir),
         )
         logger.info("PPOConfig created successfully")
@@ -247,13 +243,14 @@ class PPOExecutor(Executor):
 
         # Run PPO training loop
         training_logs = []
+        max_steps = int(training_config.get("steps", 50))
         try:
             # Prepare dataset for training
             def collate_fn(examples):
                 return {"query": [example["query"] for example in examples]}
             
             # Simple training loop using the dataset
-            for step in range(ppo_config.steps):
+            for step in range(max_steps):
                 # Get a batch of queries
                 if step < len(dataset):
                     batch = [dataset[step % len(dataset)]]
@@ -297,7 +294,13 @@ class PPOExecutor(Executor):
                 
                 # Log every 10 steps
                 if step % 10 == 0:
-                    logger.info(f"PPO Step {step}/{ppo_config.steps}: mean_reward={step_log['mean_reward']:.4f}")
+                    logger.info(f"PPO Step {step}/{max_steps}: mean_reward={step_log['mean_reward']:.4f}")
+                
+                # Save model at intervals
+                save_freq = int(training_config.get("save_freq", 25))
+                if save_freq > 0 and (step + 1) % save_freq == 0:
+                    logger.info(f"Saving model at step {step + 1}")
+                    ppo_trainer.save_pretrained(checkpoint_dir / f"step_{step + 1}")
                 
             training_successful = True
             error_msg = None
