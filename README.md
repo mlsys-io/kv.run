@@ -97,19 +97,10 @@ The orchestrator will be available at `http://localhost:8000`
 
 ### 2. Start a Worker
 
-For inference tasks only:
-```bash
-export REDIS_URL="redis://localhost:6379/0"
-export TASK_TOPICS="tasks.inference"
-export RESULTS_DIR="./results"
-
-python -m worker.listener
-```
-
 For both inference and PPO training:
 ```bash
-export REDIS_URL="redis://localhost:6379/0"
 # Note: Don't set TASK_TOPICS to use default (tasks.inference,tasks.ppo)
+export REDIS_URL="redis://localhost:6379/0"
 export RESULTS_DIR="./results"
 
 python -m worker.listener
