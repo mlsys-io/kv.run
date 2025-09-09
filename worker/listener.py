@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 import redis
 
 # executors
-from worker.executors import VLLMExecutor, PPOExecutor
+from worker.executors import VLLMExecutor, PPOExecutor, DPOExecutor
 
 # -------------------------
 # Helpers
@@ -259,6 +259,7 @@ class Runner:
         self.executors = {
             "inference": VLLMExecutor(),
             "ppo": PPOExecutor(),
+            "dpo": DPOExecutor(),
         }
         
         # Default executor for backward compatibility
@@ -340,7 +341,7 @@ def main():
     lifecycle.start(env={}, hardware=collect_hw(), tags=tags)
 
     task_topics_env = os.getenv("TASK_TOPICS")
-    default_topics = "tasks.inference,tasks.ppo"
+    default_topics = "tasks.inference,tasks.ppo,tasks.dpo"
     topics_str = task_topics_env or default_topics
     topics = [t.strip() for t in topics_str.split(",") if t.strip()]
     
