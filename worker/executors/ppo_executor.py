@@ -42,10 +42,11 @@ class PPOExecutor:
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
             
-            # Load model - use AutoModelForCausalLMWithValueHead for PPO
+            # Load models - PPO requires policy model and reference model
             model = AutoModelForCausalLMWithValueHead.from_pretrained(self._model_name)
+            ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(self._model_name)
             
-            logger.info("Model loaded: %s", self._model_name)
+            logger.info("Models loaded: %s", self._model_name)
             
             # Load dataset
             logger.info("Loading dataset...")
@@ -66,13 +67,14 @@ class PPOExecutor:
             )
             logger.info("PPOConfig created successfully")
 
-            # Initialize PPO trainer
+            # Initialize PPO trainer with correct API
             logger.info("Creating PPOTrainer...")
             ppo_trainer = PPOTrainer(
-                config=ppo_config,
+                args=ppo_config,
+                processing_class=tokenizer,
                 model=model,
-                tokenizer=tokenizer,
-                dataset=dataset,
+                ref_model=ref_model,
+                train_dataset=dataset,
             )
             logger.info("PPOTrainer created successfully")
             
