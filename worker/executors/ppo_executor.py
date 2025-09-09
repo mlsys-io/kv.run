@@ -198,12 +198,14 @@ class PPOExecutor(Executor):
             raise
         
         # PPO Configuration
+        logger.info("Setting up PPO configuration...")
         training_config = spec.get("training", {})
         
         # Setup output directory for checkpoints and logs
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
+        logger.info("Creating PPOConfig...")
         ppo_config = PPOConfig(
             learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
             batch_size=int(training_config.get("batch_size", 4)),
@@ -221,14 +223,17 @@ class PPOExecutor(Executor):
             save_freq=training_config.get("save_freq", 100),
             output_dir=str(checkpoint_dir),
         )
+        logger.info("PPOConfig created successfully")
 
         # Initialize PPO trainer
+        logger.info("Creating PPOTrainer...")
         ppo_trainer = PPOTrainer(
             config=ppo_config,
             model=model,
             ref_model=ref_model,
             tokenizer=tokenizer,
         )
+        logger.info("PPOTrainer created successfully")
         
         # Generation settings for the trainer
         generation_config = spec.get("generation", {})
