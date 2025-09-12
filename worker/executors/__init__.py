@@ -1,5 +1,6 @@
-from worker.executors.vllm_executor import VLLMExecutor
-from worker.executors.ppo_executor import PPOExecutor
-from worker.executors.dpo_executor import DPOExecutor
+from executors.vllm_executor import VLLMExecutor
+from executors.ppo_executor import PPOExecutor
+from executors.dpo_executor import DPOExecutor
+from executors.transformers_executor import HFTransformersExecutor
 
-__all__ = ["VLLMExecutor", "PPOExecutor", "DPOExecutor"]
+__all__ = ["VLLMExecutor", "PPOExecutor", "DPOExecutor", "HFTransformersExecutor"]

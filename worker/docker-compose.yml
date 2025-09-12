@@ -1,0 +1,26 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports: ["6379:6379"]
+    restart: unless-stopped
+
+  mloc_worker:
+    image: mloc_worker:cuda12.6-py312
+    depends_on: [redis]
+    environment:
+      TZ: Asia/Singapore
+      LOG_LEVEL: INFO
+      HEARTBEAT_INTERVAL_SEC: "30"
+      TASK_TOPICS: "tasks.inference,tasks.ppo,tasks.dpo"
+      REDIS_URL: "redis://redis:6379/0"
+    volumes:
+      - ./results:/app/results
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

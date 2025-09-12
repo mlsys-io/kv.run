@@ -7,7 +7,7 @@ metadata:
     description: "Run text-generation inference using vLLM (Mistral-7B)"
 
 spec:
-  taskType: "inference"   # Worker will execute with the vLLM module
+  taskType: "inference-gpu"
 
   # Resource requirements used by the orchestrator scheduler
   resources:
