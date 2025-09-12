@@ -1,0 +1,293 @@
+apiVersion: mloc/v1
+kind: Workflow
+metadata:
+  name: multimodel-rag-inference
+  owner: alice
+  annotations:
+    description: "Multi-model RAG workflow with retrieval and inference using pre-built vector stores"
+
+spec:
+  # Define the workflow stages that will be executed sequentially
+  stages:
+    # Stage 1: RAG Retrieval - Retrieve relevant documents for user queries using pre-built vector store
+    - name: rag-retrieval
+      taskType: "rag"
+      dependencies: [] # No dependencies, using pre-built vector store
+
+      resources:
+        replicas: 1
+        hardware:
+          cpu: "4"
+          memory: "8Gi"
+          gpu:
+            type: "any"
+            count: 1
+
+      retrieval:
+        vector_store:
+          # Option 1: Use pre-built FAISS vector store
+          type: "faiss"
+          index_path: "/data/vector_stores/knowledge_base.faiss"
+          metadata_path: "/data/vector_stores/knowledge_base_metadata.json"
+
+          # Option 2: Use cloud vector database
+          # type: "pinecone"
+          # api_key: "${PINECONE_API_KEY}"
+          # environment: "us-west1-gcp"
+          # index_name: "knowledge-base"
+
+        embedding_model:
+          type: "huggingface"
+          identifier: "sentence-transformers/all-MiniLM-L6-v2"
+
+        parameters:
+          top_k: 5 # Retrieve top 5 most relevant documents
+          similarity_threshold: 0.7
+          rerank: true
+          rerank_model: "cross-encoder/ms-marco-MiniLM-L-2-v2"
+
+      data:
+        input_sources:
+          queries:
+            source: "manual"
+            questions:
+              - "What is machine learning and how does it work?"
+              - "Explain the difference between supervised and unsupervised learning"
+              - "How do neural networks process information?"
+              - "What are the main components of a transformer model?"
+              - "Describe the concept of gradient descent in optimization"
+              - "What is the purpose of attention mechanisms in deep learning?"
+              - "How does backpropagation work in neural network training?"
+              - "What are the advantages and disadvantages of different activation functions?"
+
+            # Alternative options (commented out):
+            # source: "dataset"
+            # dataset_config:
+            #   url: "squad"
+            #   split: "validation[:50]"
+            #   column: "question"
+            #
+            # source: "file"
+            # file_path: "/data/questions.json"
+
+      output:
+        destination:
+          type: "local"
+          path: "/shared/retrieved_docs"
+        artifacts:
+          - "retrieved_contexts.json" # Retrieved documents for each query
+          - "retrieval_scores.json" # Similarity scores
+          - "logs"
+
+    # Stage 2: LLM Inference - Generate final answers using retrieved context
+    - name: llm-inference
+      taskType: "inference"
+      dependencies: ["rag-retrieval"] # Wait for retrieval stage
+
+      resources:
+        replicas: 1
+        hardware:
+          cpu: "8"
+          memory: "32Gi"
+          gpu:
+            type: "any"
+            count: 1
+
+      model:
+        source:
+          type: "huggingface"
+          identifier: "mistralai/Mistral-7B-Instruct-v0.3" # More capable model for final inference
+          revision: "main"
+        vllm:
+          tensor_parallel_size: 1
+          gpu_memory_utilization: 0.9
+          trust_remote_code: true
+
+      # Data input configuration - supports multiple input types
+      data:
+        input_sources:
+          # Primary input: predefined test questions
+          queries:
+            source: "previous_stage"
+            stage_output: "/shared/retrieved_docs/queries.json"
+
+            # Alternative: manual questions (same as rag-retrieval stage)
+            # source: "manual"
+            # questions:
+            #   - "What is machine learning and how does it work?"
+            #   - "Explain the difference between supervised and unsupervised learning"
+            #   - "How do neural networks process information?"
+            #   - "What are the main components of a transformer model?"
+            #   - "Describe the concept of gradient descent in optimization"
+            #   - "What is the purpose of attention mechanisms in deep learning?"
+            #   - "How does backpropagation work in neural network training?"
+            #   - "What are the advantages and disadvantages of different activation functions?"
+
+            # Alternative: dataset source
+            # source: "dataset"
+            # dataset_config:
+            #   url: "squad"
+            #   split: "validation[:50]"
+            #   column: "question"
+
+          # Context source: retrieved documents from previous stage
+          contexts:
+            source: "previous_stage"
+            stage_output: "/shared/retrieved_docs/retrieved_contexts.json"
+            format: "json"
+            context_field: "retrieved_documents"
+
+        # Input processing configuration
+        processing:
+          prompt_template: |
+            Context: {context}
+
+            Question: {question}
+
+            Please provide a comprehensive answer based on the given context. If the context doesn't contain enough information, indicate what additional information would be needed.
+
+            Answer:
+
+          max_context_length: 2048 # Maximum tokens for context
+          context_truncation: "smart" # "smart", "head", "tail"
+          combine_contexts: true # Combine multiple context chunks
+          context_separator: "\n\n---\n\n"
+
+      # Inference parameters
+      inference:
+        max_tokens: 512
+        temperature: 0.3 # Lower temperature for more factual responses
+        top_p: 0.9
+        repetition_penalty: 1.1
+        stop_sequences: ["</s>", "\n\nQuestion:"]
+
+      output:
+        destination:
+          type: "local"
+          path: "/shared/final_results"
+        artifacts:
+          - "rag_responses.json" # Final generated answers
+          - "response_metadata.json" # Metadata including context used
+          - "logs"
+
+    # Stage 3: Answer Refinement - Review and improve the answers from stage 2
+    - name: answer-refinement
+      taskType: "inference"
+      dependencies: ["llm-inference"] # Wait for inference stage
+
+      resources:
+        replicas: 1
+        hardware:
+          cpu: "8"
+          memory: "32Gi"
+          gpu:
+            type: "any"
+            count: 1
+
+      model:
+        source:
+          type: "huggingface"
+          identifier: "mistralai/Mistral-7B-Instruct-v0.3" # Same or different model for refinement
+          revision: "main"
+        vllm:
+          tensor_parallel_size: 1
+          gpu_memory_utilization: 0.9
+          trust_remote_code: true
+
+      # Data input configuration for refinement task
+      data:
+        input_sources:
+          # Original questions from stage 1
+          queries:
+            source: "previous_stage"
+            stage_output: "/shared/retrieved_docs/queries.json"
+
+          # Retrieved contexts from stage 1
+          contexts:
+            source: "previous_stage"
+            stage_output: "/shared/retrieved_docs/retrieved_contexts.json"
+            format: "json"
+            context_field: "retrieved_documents"
+
+          # Initial answers from stage 2
+          initial_answers:
+            source: "previous_stage"
+            stage_output: "/shared/final_results/rag_responses.json"
+            format: "json"
+            answer_field: "generated_answer"
+
+        # Input processing configuration for refinement
+        processing:
+          prompt_template: |
+            You are an expert reviewer tasked with improving and refining answers. Please review the initial answer and provide an enhanced version.
+
+            Original Question: {question}
+
+            Reference Context: {context}
+
+            Initial Answer: {initial_answer}
+
+            Please provide a refined answer that:
+            1. Corrects any factual errors or inaccuracies
+            2. Adds missing important information from the context
+            3. Improves clarity and structure
+            4. Ensures completeness and accuracy
+            5. Maintains a helpful and professional tone
+
+            If the initial answer is already excellent, you may provide it with minor improvements or confirm its quality.
+
+            Refined Answer:
+
+          max_context_length: 1500 # Reduced to leave room for initial answer
+          context_truncation: "smart"
+          combine_inputs: true # Combine question, context, and initial answer
+          input_separator: "\n\n"
+
+      # Inference parameters for refinement
+      inference:
+        max_tokens: 600 # Slightly more tokens for refined answers
+        temperature: 0.2 # Lower temperature for more conservative refinement
+        top_p: 0.9
+        repetition_penalty: 1.15
+        stop_sequences:
+          ["</s>", "\n\nOriginal Question:", "\n\nRefined Answer:"]
+
+      output:
+        destination:
+          type: "local"
+          path: "/shared/refined_results"
+        artifacts:
+          - "refined_responses.json" # Refined answers
+          - "refinement_metadata.json" # Comparison metadata
+          - "improvement_analysis.json" # Analysis of improvements made
+          - "logs"
+
+  # Global workflow configuration
+  workflow_config:
+    # Execution strategy
+    execution_mode: "sequential" # Execute stages in order: rag-retrieval -> llm-inference -> answer-refinement
+    failure_strategy: "stop" # Stop workflow if any stage fails
+
+    # Resource sharing
+    shared_storage:
+      type: "local"
+      base_path: "/shared"
+      cleanup_on_completion: false # Keep intermediate results for analysis
+
+    # Output aggregation
+    final_output:
+      aggregation:
+        collect_all_artifacts: true
+        include_performance_metrics: true
+        # Collect outputs from all stages
+        stage_outputs:
+          - stage: "rag-retrieval"
+            path: "/shared/retrieved_docs"
+            description: "Retrieved documents and similarity scores"
+          - stage: "llm-inference"
+            path: "/shared/final_results"
+            description: "Initial RAG-based answers"
+          - stage: "answer-refinement"
+            path: "/shared/refined_results"
+            description: "Refined and improved answers"
+        primary_output: "/shared/refined_results/refined_responses.json" # Main output file
