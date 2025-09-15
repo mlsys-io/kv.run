@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Validate required env vars
+# -----------------------------
+# Redis defaults (override via env)
+# -----------------------------
+: "${REDIS_HOST:=redis}"
+: "${REDIS_PORT:=6379}"
+: "${REDIS_DB:=0}"
+
+# Build REDIS_URL from parts if not provided
 if [[ -z "${REDIS_URL:-}" ]]; then
-  echo "ERROR: REDIS_URL is required" >&2
-  exit 1
+  export REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/${REDIS_DB}"
 fi
 
-# Auto-generate worker ID if not provided
+# -----------------------------
+# Optional worker ID (leave empty to let app decide)
+# -----------------------------
 export WORKER_ID="${WORKER_ID:-}"
 
+# -----------------------------
 # Print key environment values
+# -----------------------------
 echo "Starting worker..."
-echo "REDIS_URL=$REDIS_URL"
-echo "TASK_TOPICS=${TASK_TOPICS:-unset}"
+echo "REDIS_URL=${REDIS_URL}"
+echo "TASK_TOPIC=${TASK_TOPIC:-unset}"
 echo "RESULTS_DIR=${RESULTS_DIR:-./results}"
 echo "HEARTBEAT_INTERVAL_SEC=${HEARTBEAT_INTERVAL_SEC:-30}"
 
+# -----------------------------
 # Run worker
+# -----------------------------
 exec python /app/main.py
