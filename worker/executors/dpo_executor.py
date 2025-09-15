@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DPO (Direct Preference Optimization) Executor using TRL's simple approach
+DPOt (Direct Preference Optimization) Executor using TRL's simple approach
 
 Simple implementation using TRL's DPOTrainer with built-in train() method.
 """
