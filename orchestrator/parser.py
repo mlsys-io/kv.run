@@ -1,32 +1,11 @@
 # parser.py
 """Task parsing and in-memory dependency tracking (supports stages).
 
-This module provides:
-- YAML parsing and validation for tasks.
-- An in-memory TaskStore that records tasks, auto-generates stage tasks,
-  and tracks dependencies.
-- For staged tasks (spec.stages), it generates one task per stage, assigns
-  task IDs, auto-chains dependencies (stage i depends on stage i-1), and
-  stores all tasks atomically in the store.
-
-Schema expectations (minimal and backward compatible):
-- REQUIRED_FIELDS must exist for the base task.
-- Optional single-task dependencies via: spec.dependsOn: [<task_id>, ...]
-- Optional staged pipeline via:
-    spec:
-      stages:
-        - name: "prepare"
-          spec: {...}        # optional overrides merged into base spec
-        - name: "train"
-          spec: {...}
-        - name: "infer"
-          spec: {...}
-
-Notes:
-- This store is process-local (in-memory). Persist to Redis/DB if durability
-  is required.
-- Dependency satisfaction is evaluated externally by the orchestrator via
-  a callback (e.g., check predecessor status == DONE).
+Unchanged core behavior:
+- REQUIRED_FIELDS, single-task validation, optional staged pipelines.
+- The scheduler may choose to shard at dispatch time; those child shards
+  are internal to the orchestrator and are NOT registered in TaskStore,
+  so downstream dependencies continue to track the parent logical task.
 """
 from __future__ import annotations
 
@@ -195,6 +174,7 @@ class TaskStore:
             return list(self._depends.get(task_id, set()))
 
     def list_waiting_tasks(self) -> List[str]:
+        """Tasks not yet 'released' to dispatcher (pending capacity/deps)."""
         with self._lock:
             return [tid for tid in self._parsed.keys() if tid not in self._released]
 

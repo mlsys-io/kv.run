@@ -48,7 +48,15 @@ class Runner:
 
             self.lifecycle.set_running(task_id)
             try:
-                executor = self.executors.get(task_type, self.default_executor)
+                if task_type == "inference":
+                    enforce_cpu = bool((task.get("spec") or {}).get("enforce_cpu", False))
+                    if enforce_cpu:
+                        executor = self.default_executor
+                    else:
+                        executor = self.executors.get("vllm", self.default_executor)
+                else:
+                    executor = self.executors.get(task_type, self.default_executor)
+
                 out = None
                 if executor:
                     out = executor.run(task, self.results_dir / task_id)

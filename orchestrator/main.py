@@ -1,24 +1,13 @@
 # main.py
-"""FastAPI app entrypoint for the Orchestrator service (stages + events-driven).
+"""FastAPI Orchestrator"""
 
-This app:
-- Provides admin and worker introspection endpoints.
-- Accepts YAML task submissions (single or staged).
-- Uses TaskStore to register tasks and track dependencies.
-- Runs:
-    * A dependency watcher (polling) to dispatch ready tasks, and
-    * A tasks.events listener to react immediately to DONE/FAILED events:
-        - On DONE/FINISH/SUCCEEDED: mark DONE, try to dispatch next tasks.
-        - On FAILED/ERROR: retry on a different worker (up to max_retries).
-"""
 from __future__ import annotations
 
 import os
 import json
-import uuid
 import threading
 import time
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional, Union, List, Set
 
 import redis
 from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, Body
@@ -31,12 +20,17 @@ from assigner import (
     list_workers_from_redis,
     get_worker_from_redis,
     cleanup_stale_workers,
-    pick_idle_worker,
-    pick_idle_worker_excluding,
     update_worker_status,
-    is_stale_by_redis,  
+    is_stale_by_redis,
 )
-
+from scheduler import (
+    estimate_queue_length,
+    choose_strategy,
+    select_workers_for_task,
+    make_shard_messages,
+    idle_satisfying_pool,
+    is_data_parallel_enabled,
+)
 
 # -------------------------
 # Logging & Redis setup
@@ -83,34 +77,38 @@ async def require_auth(request: Request):
 HB_TTL_SEC = parse_int_env("HEARTBEAT_TTL_SEC", 120)
 
 class TaskStatus(str):
-    PENDING = "PENDING"      # registered, waiting for deps or resources
-    DISPATCHED = "DISPATCHED"# sent to a worker
-    FAILED = "FAILED"        # dispatch error or worker-reported failure
-    DONE = "DONE"            # worker-reported success
+    PENDING = "PENDING"
+    DISPATCHED = "DISPATCHED"
+    FAILED = "FAILED"
+    DONE = "DONE"
 
 class TaskRecord(BaseModel):
     task_id: str
     raw_yaml: str
     parsed: Dict[str, Any]
     status: str = TaskStatus.PENDING
-    assigned_worker: Optional[str] = None
+    assigned_worker: Optional[str] = None  # "MULTI" for sharded parent
     topic: Optional[str] = None
     submitted_at: str = Field(default_factory=now_iso)
     error: Optional[str] = None
     retries: int = 0
     max_retries: int = 3
+    parent_task_id: Optional[str] = None
+    shard_index: Optional[int] = None
+    shard_total: Optional[int] = None
 
-# In-memory bookkeeping for submission view (orthogonal to TaskStore)
 TASKS: Dict[str, TaskRecord] = {}
 TASKS_LOCK = threading.RLock()
 
-# Task store: tracks parsed tasks + dependencies (supports stages)
+PARENT_SHARDS: Dict[str, Dict[str, Any]] = {}
+CHILD_TO_PARENT: Dict[str, str] = {}
+
 TASK_STORE = TaskStore()
 
 # -------------------------
 # App & routes
 # -------------------------
-app = FastAPI(title="Orchestrator", version="1.1.0")
+app = FastAPI(title="Orchestrator", version="1.3.0")
 
 @app.get("/healthz")
 async def healthz():
@@ -144,27 +142,128 @@ def _publish_task(topic: str, message: Dict[str, Any]) -> None:
 # -------------------------
 # Dispatch helpers
 # -------------------------
+def _try_dispatch_sharded(
+    parent_task_id: str,
+    base_task: Dict[str, Any],
+    parent_rec: TaskRecord,
+    exclude_ids: Optional[Set[str]] = None,
+) -> bool:
+    """Attempt data-parallel dispatch (only when inference+parallel.enabled)."""
+    # ---- Switch: Enable only when taskType=='inference' and parallel.enabled==true ----
+    if not is_data_parallel_enabled(base_task):
+        return False
+
+    queued = estimate_queue_length(TASK_STORE)
+    pool = idle_satisfying_pool(rds, base_task, exclude_ids=exclude_ids)
+    if not pool:
+        return False
+
+    strategy = choose_strategy(base_task, pool, queued)
+    if strategy.mode != "data_parallel":
+        return False
+
+    workers = select_workers_for_task(pool, shard_count=strategy.shard_count, prefer_best=strategy.prefer_best)
+    if len(workers) <= 1:
+        return False
+
+    child_msgs = make_shard_messages(parent_task_id, base_task, workers)
+
+    topic = "tasks"
+    created_children: List[str] = []
+    for idx, (child_id, child_task, worker) in enumerate(child_msgs):
+        message = {
+            "task_id": child_id,
+            "task": child_task,
+            "task_type": safe_get(child_task, "spec.taskType"),
+            "assigned_worker": worker.worker_id,
+            "dispatched_at": now_iso(),
+        }
+        try:
+            _publish_task(topic, message)
+            update_worker_status(rds, worker.worker_id, "RUNNING")
+            child_rec = TaskRecord(
+                task_id=child_id,
+                raw_yaml=parent_rec.raw_yaml,
+                parsed=child_task,
+                status=TaskStatus.DISPATCHED,
+                assigned_worker=worker.worker_id,
+                topic=topic,
+                parent_task_id=parent_task_id,
+                shard_index=idx,
+                shard_total=len(workers),
+                max_retries=parent_rec.max_retries,
+            )
+            with TASKS_LOCK:
+                TASKS[child_id] = child_rec
+                CHILD_TO_PARENT[child_id] = parent_task_id
+            created_children.append(child_id)
+        except Exception as e:
+            with TASKS_LOCK:
+                TASKS[child_id] = TaskRecord(
+                    task_id=child_id,
+                    raw_yaml=parent_rec.raw_yaml,
+                    parsed=child_task,
+                    status=TaskStatus.FAILED,
+                    error=f"Publish failed: {e}",
+                    parent_task_id=parent_task_id,
+                    shard_index=idx,
+                    shard_total=len(workers),
+                )
+            logger.exception("Shard publish failed")
+
+    if not created_children:
+        return False
+
+    with TASKS_LOCK:
+        PARENT_SHARDS[parent_task_id] = {
+            "total": len(created_children),
+            "done": 0,
+            "failed": 0,
+            "children": set(created_children),
+        }
+        parent_rec.status = TaskStatus.DISPATCHED
+        parent_rec.assigned_worker = "MULTI"
+        parent_rec.topic = topic
+
+    TASK_STORE.mark_released(parent_task_id)
+    return True
+
 def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
                       exclude_worker_id: Optional[str] = None) -> None:
-    """Attempt to pick a worker and dispatch a single task (idempotent per rec)."""
+    """Scheduler-only dispatch: data-parallel if capacity allows, else single."""
     with TASKS_LOCK:
         if rec.status == TaskStatus.DISPATCHED:
             return
 
-    # Use assigner helpers
+    exclude_ids: Set[str] = set()
     if exclude_worker_id:
-        worker = pick_idle_worker_excluding(rds, task, exclude_worker_id=exclude_worker_id)
-    else:
-        worker = pick_idle_worker(rds, task)
+        exclude_ids.add(exclude_worker_id)
 
-    if not worker:
+    # Try data-parallel first
+    if _try_dispatch_sharded(task_id, task, rec, exclude_ids=exclude_ids):
+        return
+
+    # Single-worker path via scheduler
+    queued = estimate_queue_length(TASK_STORE)
+    pool = idle_satisfying_pool(rds, task, exclude_ids=exclude_ids)
+    if not pool:
         with TASKS_LOCK:
             rec.status = TaskStatus.FAILED
             rec.error = "No suitable IDLE worker"
         logger.warning("Schedule failed: %s", rec.error)
         return
 
-    topic = "tasks"  # unified channel
+    strategy = choose_strategy(task, pool, queued)  # decides best-fit vs first-fit
+    worker_list = select_workers_for_task(pool, shard_count=1, prefer_best=strategy.prefer_best)
+    if not worker_list:
+        with TASKS_LOCK:
+            rec.status = TaskStatus.FAILED
+            rec.error = "No suitable IDLE worker after selection"
+        logger.warning("Schedule failed: %s", rec.error)
+        return
+
+    worker = worker_list[0]
+    topic = "tasks"
     message = {
         "task_id": task_id,
         "task": task,
@@ -179,7 +278,7 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
             rec.status = TaskStatus.DISPATCHED
             rec.assigned_worker = worker.worker_id
             rec.topic = topic
-        TASK_STORE.mark_released(task_id)  # avoid re-dispatch by watcher
+        TASK_STORE.mark_released(task_id)
     except Exception as e:
         with TASKS_LOCK:
             rec.status = TaskStatus.FAILED
@@ -187,13 +286,11 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
         logger.exception("Publish failed")
 
 def _is_dep_satisfied(dep_task_id: str) -> bool:
-    """A dependency is satisfied only when the predecessor task is DONE."""
     with TASKS_LOCK:
         dep = TASKS.get(dep_task_id)
         return bool(dep and dep.status == TaskStatus.DONE)
 
 def _dispatch_ready_tasks() -> None:
-    """Scan and dispatch tasks whose dependencies are satisfied."""
     ready_ids = TASK_STORE.ready_to_dispatch(_is_dep_satisfied)
     for tid in ready_ids:
         with TASKS_LOCK:
@@ -209,7 +306,6 @@ def _dispatch_ready_tasks() -> None:
 # Background loops
 # -------------------------
 def _dependency_watcher_loop(interval_sec: int = 2) -> None:
-    """Periodic fallback scan (keeps behavior if events are delayed)."""
     while True:
         try:
             _dispatch_ready_tasks()
@@ -218,10 +314,10 @@ def _dependency_watcher_loop(interval_sec: int = 2) -> None:
         time.sleep(interval_sec)
 
 def _tasks_events_loop() -> None:
-    """Subscribe to tasks.events and react to DONE/FAILED to chain/retarget."""
+    """Subscribe to tasks.events and handle shard aggregation & retries."""
     while True:
         try:
-            sub_rds = redis.from_url(REDIS_URL, decode_responses=True)  # separate connection
+            sub_rds = redis.from_url(REDIS_URL, decode_responses=True)
             pubsub = sub_rds.pubsub(ignore_subscribe_messages=True)
             pubsub.subscribe("tasks.events")
             logger.info("Subscribed to tasks.events")
@@ -238,54 +334,98 @@ def _tasks_events_loop() -> None:
                 ev_type = str(data.get("type", "")).upper()
                 task_id = str(data.get("task_id") or "")
                 worker_id = data.get("worker_id")
+                err_msg = data.get("error")
 
                 if not task_id:
                     continue
 
                 with TASKS_LOCK:
                     rec = TASKS.get(task_id)
-
-                if not rec:
-                    # Unknown or already GC'd; ignore
-                    continue
+                parent_id = CHILD_TO_PARENT.get(task_id)
 
                 if ev_type == 'TASK_SUCCEEDED':
-                    # Mark DONE and attempt to dispatch any newly-unblocked tasks
                     logger.info("Task succeeded: %s", task_id)
-                    with TASKS_LOCK:
-                        rec.status = TaskStatus.DONE
-                        rec.error = None
-                    # Optionally flip worker status; worker typically sets itself IDLE already
+                    if rec:
+                        with TASKS_LOCK:
+                            rec.status = TaskStatus.DONE
+                            rec.error = None
                     if worker_id:
                         try:
                             update_worker_status(rds, worker_id, "IDLE")
                         except Exception:
                             pass
-                    # Immediately attempt to dispatch following stages / dependents
-                    _dispatch_ready_tasks()
+
+                    if parent_id:
+                        with TASKS_LOCK:
+                            aggr = PARENT_SHARDS.get(parent_id)
+                            if aggr:
+                                aggr["done"] += 1
+                                if aggr["done"] >= aggr["total"]:
+                                    parent_rec = TASKS.get(parent_id)
+                                    if parent_rec:
+                                        parent_rec.status = TaskStatus.DONE
+                                        parent_rec.error = None
+                                    _dispatch_ready_tasks()
+                        continue
+                    else:
+                        _dispatch_ready_tasks()
+                        continue
 
                 elif ev_type == 'TASK_FAILED':
                     logger.info("Task failed: %s", task_id)
-                    # Mark FAILED, then try retry on a different worker (bounded retries)
-                    err_msg = data.get("error") or "worker failed"
-                    with TASKS_LOCK:
-                        rec.status = TaskStatus.FAILED
-                        rec.error = str(err_msg)
-                        rec.retries += 1
-                        retries_left = rec.max_retries - rec.retries
+                    retries_left = -1
+                    if rec:
+                        with TASKS_LOCK:
+                            rec.status = TaskStatus.FAILED
+                            rec.error = str(err_msg or "worker failed")
+                            rec.retries += 1
+                            retries_left = rec.max_retries - rec.retries
 
-                    if retries_left >= 0:
+                    if parent_id:
+                        parsed = rec.parsed if rec else None
+                        if parsed and retries_left >= 0:
+                            pool = idle_satisfying_pool(rds, parsed, exclude_ids={worker_id} if worker_id else None)
+                            new_list = select_workers_for_task(pool, shard_count=1, prefer_best=True)
+                            if new_list:
+                                new_worker = new_list[0]
+                                message = {
+                                    "task_id": task_id,  # retry same child id
+                                    "task": parsed,
+                                    "task_type": safe_get(parsed, "spec.taskType"),
+                                    "assigned_worker": new_worker.worker_id,
+                                    "dispatched_at": now_iso(),
+                                }
+                                try:
+                                    _publish_task("tasks", message)
+                                    update_worker_status(rds, new_worker.worker_id, "RUNNING")
+                                    with TASKS_LOCK:
+                                        rec.status = TaskStatus.DISPATCHED
+                                        rec.assigned_worker = new_worker.worker_id
+                                    continue
+                                except Exception as e:
+                                    with TASKS_LOCK:
+                                        rec.status = TaskStatus.FAILED
+                                        rec.error = f"Publish failed (retry): {e}"
+                                    logger.exception("Shard retry publish failed")
+
+                        with TASKS_LOCK:
+                            parent_rec = TASKS.get(parent_id)
+                            if parent_rec:
+                                parent_rec.status = TaskStatus.FAILED
+                                parent_rec.error = f"Child shard failed: {task_id}"
+                        continue
+
+                    if rec and retries_left >= 0:
                         parsed = TASK_STORE.get_parsed(task_id)
                         if parsed:
                             _try_dispatch_one(task_id, parsed, rec, exclude_worker_id=worker_id)
-                    # If no parsed or no candidates, the rec remains FAILED
+
                 else:
-                    # Other event types can be ignored or logged
                     logger.debug("tasks.events ignoring type=%s payload=%s", ev_type, data)
 
         except Exception as e:
             logger.warning("tasks.events listener error: %s; reconnecting soon...", e)
-            time.sleep(2)  # backoff then reconnect
+            time.sleep(2)
 
 @app.on_event("startup")
 def _start_background_threads():
@@ -293,18 +433,11 @@ def _start_background_threads():
     threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True).start()
 
 # -------------------------
-# Task submission
+# Task submission & queries
 # -------------------------
 @app.post("/api/v1/tasks")
 async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="text/yaml"),
                       _: Any = Depends(require_auth)):
-    """Submit YAML of a single task or a staged pipeline.
-
-    - If spec.stages exists: generates N stage tasks with auto dependencies.
-    - If not: registers a single task, honoring spec.dependsOn if present.
-
-    Returns a summary for all created task_ids.
-    """
     if isinstance(raw, dict) and "yaml" in raw:
         yml = str(raw["yaml"])
     elif isinstance(raw, str):
@@ -312,7 +445,7 @@ async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="te
     else:
         raise HTTPException(status_code=400, detail='Expected YAML string or {"yaml":"..."}')
 
-    entries = TASK_STORE.parse_and_register(yml)  # List of stage or single entries
+    entries = TASK_STORE.parse_and_register(yml)
     results: List[Dict[str, Any]] = []
 
     for entry in entries:
@@ -320,11 +453,9 @@ async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="te
         task = entry["parsed"]
         depends_on = entry["depends_on"]
 
-        # Keep a record visible via query APIs
         with TASKS_LOCK:
             TASKS[task_id] = TaskRecord(task_id=task_id, raw_yaml=yml, parsed=task)
 
-        # If no dependencies, try immediate dispatch; else report as waiting
         if not depends_on:
             with TASKS_LOCK:
                 rec = TASKS[task_id]
@@ -344,9 +475,6 @@ async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="te
 
     return {"ok": True, "count": len(entries), "tasks": results}
 
-# -------------------------
-# Task queries
-# -------------------------
 @app.get("/api/v1/tasks")
 async def list_tasks(_: Any = Depends(require_auth)):
     with TASKS_LOCK:
@@ -360,9 +488,6 @@ async def get_task(task_id: str = ApiPath(..., min_length=1), _: Any = Depends(r
             raise HTTPException(status_code=404, detail="task not found")
         return t.model_dump()
 
-# -------------------------
-# Entrypoint
-# -------------------------
 if __name__ == "__main__":
     import uvicorn
     port = parse_int_env("PORT", 8080)

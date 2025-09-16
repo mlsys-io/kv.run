@@ -8,8 +8,9 @@ metadata:
 
 spec:
   # Route to the Transformers-based executor
-  taskType: "inference-cpu"
-
+  taskType: "inference"
+  enforce_cpu: true        # optional; reject GPU workers if true
+  
   # Resource requirements used by the orchestrator scheduler
   resources:
     replicas: 1

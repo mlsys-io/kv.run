@@ -26,7 +26,7 @@ def main():
     lifecycle.start(env={}, hardware=collect_hw(), tags=cfg.tags)
 
     executors = {
-        "transformers": HFTransformersExecutor(),   # CPU ok
+        "default": HFTransformersExecutor(),   # CPU ok
     }
 
     # Try to add vLLM only if usable
@@ -50,7 +50,7 @@ def main():
         logger.info("PPO/DPO not available; skipping (%s)", e)
 
     # Pick a safe default
-    default_executor = executors.get("transformers")
+    default_executor = executors.get("default")
 
     Runner(lifecycle, rds, cfg.topic, cfg.results_dir, executors, default_executor, logger).start()
 
