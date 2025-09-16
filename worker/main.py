@@ -8,7 +8,7 @@ from redis_worker import RedisWorker
 from runner import Runner
 
 # Always available CPU path
-from executors import HFTransformersExecutor
+from executors import HFTransformersExecutor, RAGExecutor
 
 def main():
     cfg = WorkerConfig.from_env()
@@ -27,6 +27,7 @@ def main():
 
     executors = {
         "default": HFTransformersExecutor(),   # CPU ok
+        "rag": RAGExecutor(),
     }
 
     # Try to add vLLM only if usable
