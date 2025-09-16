@@ -13,4 +13,6 @@ dependencies = [
     "vllm>=0.10.1.1",
     "datasets>=4.0.0",
     "trl>=0.8.0",
+    "qdrant-client>=1.15.1",
+    "fastembed>=0.7.3",
 ]

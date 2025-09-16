@@ -1,2 +1,3 @@
 redis
 trl
+qdrant-client>=1.15.1
