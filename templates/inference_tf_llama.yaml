@@ -1,0 +1,65 @@
+apiVersion: mloc/v1
+kind: InferenceTask
+metadata:
+  name: tinyllama-cpu-infer
+  owner: alice
+  annotations:
+    description: "Run text-generation inference on CPU using Transformers (Llama 3.2 1B Instruct model)"
+
+spec:
+  # Route to the Transformers-based executor
+  taskType: "inference"
+  enforce_cpu: true        # optional; reject GPU workers if true
+  
+  # Resource requirements used by the orchestrator scheduler
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "8"
+      memory: "16Gi"
+      # gpu:  # GPU is optional; omit or set count: 0 for CPU-only
+      #   type: "any"
+      #   count: 0
+
+  # Model configuration and Transformers runtime options
+  model:
+    source:
+      type: "huggingface"
+      identifier: "meta-llama/Llama-3.2-1B-Instruct"
+      revision: "main"
+    transformers:
+      device_map: "cpu"            # force CPU
+      dtype: "float32"             # safest on CPU
+      trust_remote_code: false
+      low_cpu_mem_usage: true
+      # load_in_8bit: false         # optional; requires bitsandbytes if true
+      # load_in_4bit: false         # optional; requires bitsandbytes if true
+
+  # Data resource (same shape as before)
+  data:
+    type: "dataset"
+    url: "openai/gsm8k"
+    name: "main"
+    split: "train[:1%]"
+    column: "question"
+    shuffle: true
+    seed: 42
+
+  # Inference parameters
+  inference:
+    max_new_tokens: 128            # HF executor prefers max_new_tokens; falls back from max_tokens if not set
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 50
+    do_sample: true
+    repetition_penalty: 1.0
+    # stop: ["</s>"]               # optional: post-process stop strings
+
+  # Output configuration (current worker writes locally to RESULTS_DIR/<task_id>/responses.json)
+  output:
+    destination:
+      type: "local"
+      path: "/ignored/by/current-worker"
+    artifacts:
+      - "responses.json"
+      - "logs"

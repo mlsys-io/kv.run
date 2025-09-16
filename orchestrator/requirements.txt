@@ -1,0 +1,5 @@
+fastapi
+redis
+pydantic
+uvicorn
+pyyaml

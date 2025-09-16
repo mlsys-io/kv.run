@@ -7,7 +7,13 @@ metadata:
     description: "Run text-generation inference using vLLM (Mistral-7B)"
 
 spec:
-  taskType: "inference"   # Worker will execute with the vLLM module
+  # New: scheduler only enables data-parallel when taskType=='inference'
+  taskType: "inference"
+
+  # New: data-parallel switch (set enabled: true to allow sharding)
+  parallel:
+    enabled: true           # false or remove to disable data-parallel
+    max_shards: 8           # optional cap; scheduler also considers capacity/ratio
 
   # Resource requirements used by the orchestrator scheduler
   resources:
@@ -16,7 +22,7 @@ spec:
       cpu: "8"
       memory: "32Gi"
       gpu:
-        type: "any"       # or a specific model, e.g. "nvidia-a100-80gb"
+        type: "any"         # or a specific model, e.g. "nvidia-a100-80gb"
         count: 1
 
   # Model configuration and vLLM runtime options
@@ -30,17 +36,17 @@ spec:
       gpu_memory_utilization: 0.9
       trust_remote_code: true
 
-  # Data resource
+  # Data resource (this split will be evenly partitioned across shards when parallel.enabled=true)
   data:
     type: "dataset"
     url: "openai/gsm8k"
     name: "main"
-    split: "train[:1%]"
+    split: "train[:1%]"     # scheduler will produce per-shard sub-splits like train[0%:0.5%], train[0.5%:1%], ...
     column: "question"
     shuffle: true
     seed: 42
 
-  # Inference parameters
+  # Inference parameters (vLLM accepts max_tokens)
   inference:
     max_tokens: 128
     temperature: 0.7
@@ -50,7 +56,7 @@ spec:
   output:
     destination:
       type: "local"
-      path: "/ignored/by/current-worker"  # Placeholder; current worker writes to RESULTS_DIR
+      path: "/ignored/by/current-worker"  # worker writes to RESULTS_DIR
     artifacts:
       - "responses.json"
       - "logs"

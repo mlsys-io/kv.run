@@ -131,6 +131,9 @@ class VLLMExecutor(Executor):
 
         # Inference params are copied as-is (validated where used)
         self._inf = spec.get("inference", {}) or {}
+        system_prompt = self._inf.get("system_prompt")
+        if system_prompt:
+            self._prompts = [f"{system_prompt}\n{p}" for p in self._prompts]
 
     # --------------------------------------------------------------------- #
     # Execution
