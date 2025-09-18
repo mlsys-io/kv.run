@@ -1,0 +1,6 @@
+name: github
+mode: builtin
+activated_tools: null
+config: 
+  github_token: "${oc.env:GITHUB_TOKEN}"
+config_llm: null

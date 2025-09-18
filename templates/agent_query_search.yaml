@@ -1,0 +1,32 @@
+apiVersion: mloc/v1
+kind: AgentTask
+metadata:
+  name: search-task
+  owner: researcher
+  annotations:
+    description: "Search agent configuration for query processing and information retrieval."
+
+spec:
+  taskType: "agent"
+  configName: "simple_search"
+  task: "Search for the latest trends in artificial intelligence and summarize 3 key points"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "1"
+      memory: "2Gi"
+      gpu:
+        type: "any"
+        count: 0  
+  
+  agent:
+    timeout: 120
+
+  output:
+    destination:
+      type: "local"
+      path: "agent_output"
+    artifacts:
+      - "responses.json"
+      - "agent_output.txt"
