@@ -300,7 +300,4 @@ class HFTransformersExecutor(Executor):
             },
         }
 
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
         return result

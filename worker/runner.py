@@ -17,10 +17,34 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
 
-    def _write_results(self, task_id: str, result: Optional[Dict[str, Any]]):
+    def _resolve_output_dir(self, task_id: str, task: Dict[str, Any]) -> Path:
+        """Pick the destination directory for task outputs.
+
+        Priority: spec.output.destination.path -> default RESULTS_DIR.
+        Relative paths under spec are resolved against the configured RESULTS_DIR
+        so users can safely provide per-task subfolders.
+        """
+        spec = (task or {}).get("spec") or {}
+        output_cfg = spec.get("output") or {}
+        dest = (output_cfg.get("destination") or {})
+        dest_type = str(dest.get("type") or "local").lower()
+        dest_path = dest.get("path")
+
+        if dest_type == "local" and dest_path:
+            chosen = Path(dest_path)
+            if not chosen.is_absolute():
+                chosen = self.results_dir / chosen
+        else:
+            chosen = self.results_dir / task_id
+
+        # Ensure each task still gets an isolated directory
+        if chosen.name != task_id:
+            chosen = chosen / task_id
+        return chosen
+
+    def _write_results(self, out_dir: Path, result: Optional[Dict[str, Any]]):
         if result is None:
             return
-        out_dir = self.results_dir / task_id
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -46,6 +70,7 @@ class Runner:
             task = data.get("task") or {}
             task_type = (task.get("spec") or {}).get("taskType")
 
+            out_dir = self._resolve_output_dir(task_id, task)
             self.lifecycle.set_running(task_id)
             try:
                 if task_type == "inference":
@@ -59,8 +84,8 @@ class Runner:
 
                 out = None
                 if executor:
-                    out = executor.run(task, self.results_dir / task_id)
-                self._write_results(task_id, out)
+                    out = executor.run(task, out_dir)
+                self._write_results(out_dir, out)
                 self.lifecycle.set_succeeded(task_id)
                 self.logger.info("Task %s completed successfully", task_id)
             except Exception as e:
@@ -68,4 +93,3 @@ class Runner:
                 self.logger.error("Task %s failed: %s", task_id, e)
             finally:
                 self.lifecycle.set_idle(task_id)
-

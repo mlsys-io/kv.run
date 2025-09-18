@@ -113,11 +113,6 @@ class PPOExecutor:
             "output_dir": str(out_dir),
         }
         
-        # Save results
-        results_file = out_dir / "responses.json"
-        with open(results_file, "w") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        
         logger.info("PPO training task completed in %.2f seconds", training_time)
         return results
 

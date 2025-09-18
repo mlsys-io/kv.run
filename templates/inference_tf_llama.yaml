@@ -59,7 +59,7 @@ spec:
   output:
     destination:
       type: "local"
-      path: "/ignored/by/current-worker"
+      path: "/mnt/mloc-results"   # this should match the NFS mount path on the worker nodes
     artifacts:
       - "responses.json"
       - "logs"
