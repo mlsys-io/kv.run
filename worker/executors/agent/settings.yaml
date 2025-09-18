@@ -1,0 +1,25 @@
+# Agent General Settings
+# This file can be version-controlled (no secrets)
+
+browser:
+  headless: true
+  timeout: 30000
+  user_agent: "Mozilla/5.0 (compatible; MLOC-Agent/1.0)"
+
+data_collection:
+  default_sample_size: 10
+  max_retries: 2
+  output_format: "jsonl"
+
+generation:
+  default_creativity: "balanced"
+  include_examples: true
+  validate_output: true
+
+context:
+  default_max_turns: 20
+  default_memory_window: 10000
+
+performance:
+  batch_size: 5
+  concurrent_tasks: 3

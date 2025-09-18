@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - /model/base@model
+  - /tools/search@toolkits.search
+  - _self_
+
+agent:
+  name: simple-search-agent
+  type: simple
+  instructions: |
+    You are a helpful search assistant. Your task is to:
+    1. Use web search to find relevant information
+    2. Provide clear, concise answers based on your search results
+    3. Always cite your sources
+    4. Keep responses focused and to the point
+
+    Be efficient and practical in your searches.
