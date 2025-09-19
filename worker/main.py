@@ -8,7 +8,7 @@ from redis_worker import RedisWorker
 from runner import Runner
 
 # Always available CPU path
-from executors import HFTransformersExecutor, RAGExecutor, AgentExecutor
+from executors import HFTransformersExecutor, RAGExecutor, AgentExecutor, SFTExecutor, LoRASFTExecutor
 
 def main():
     cfg = WorkerConfig.from_env()
@@ -29,6 +29,8 @@ def main():
         "default": HFTransformersExecutor(),   # CPU ok
         "rag": RAGExecutor(),
         "agent": AgentExecutor(),              # Agent tasks
+        "sft": SFTExecutor(),                  # TRL supervised fine-tuning
+        "lora_sft": LoRASFTExecutor(),         # TRL LoRA supervised fine-tuning
     }
 
     # Try to add vLLM only if usable

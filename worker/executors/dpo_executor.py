@@ -76,7 +76,7 @@ class DPOExecutor:
                 ref_model=ref_model,
                 args=dpo_config,
                 train_dataset=dataset,
-                processing_class=tokenizer,  # Use processing_class instead of tokenizer
+                tokenizer=tokenizer,
             )
             logger.info("DPOTrainer created successfully")
             

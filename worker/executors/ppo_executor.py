@@ -71,7 +71,7 @@ class PPOExecutor:
             logger.info("Creating PPOTrainer...")
             ppo_trainer = PPOTrainer(
                 args=ppo_config,
-                processing_class=tokenizer,
+                tokenizer=tokenizer,
                 model=model,
                 ref_model=ref_model,
                 train_dataset=dataset,

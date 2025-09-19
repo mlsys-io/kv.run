@@ -1,15 +1,15 @@
-# sft_mistral_7b.yaml
+# lora_sft_mistral.yaml
 #
-# Example supervised fine-tuning task that uses the new TRL-based SFT executor.
-# Update the model identifier and dataset configuration to match your workload.
+# Example LoRA fine-tuning task using TRL SFTTrainer with PEFT configuration.
+# Update model identifier and dataset settings for your workload.
 
 apiVersion: mloc/v1
-kind: SFTTask
+kind: LoRATask
 metadata:
-  name: gpt2-sft-demo
+  name: gpt2-lora-demo
 
 spec:
-  taskType: "sft"
+  taskType: "lora_sft"
 
   resources:
     replicas: 1
@@ -26,16 +26,26 @@ spec:
       identifier: "mistralai/Mistral-7B-Instruct-v0.3"
 
   data:
-    prompts:
-      - "Summarise the benefits of distributed training for language models."
-      - "Provide three bullet points that explain prompt engineering best practices."
-      - "Write a short assistant-style reply that encourages safe AI usage."
+    dataset_name: "lvwerra/stack-exchange-paired"
+    split: "train[:1%]"
+    prompt_column: "question"
+    response_column: "chosen"
+    separator: "\n\nAssistant: "
+    max_samples: 200
+
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+      - "c_attn"
+      - "c_proj"
 
   training:
     num_train_epochs: 1
     batch_size: 2
     gradient_accumulation_steps: 4
-    learning_rate: 5.0e-5
+    learning_rate: 2.0e-4
     max_seq_length: 512
     logging_steps: 5
     save_steps: 50
@@ -47,4 +57,4 @@ spec:
       path: "/mnt/mloc-results"
     artifacts:
       - "responses.json"
-      - "final_model"
+      - "final_lora"
