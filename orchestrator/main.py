@@ -7,6 +7,7 @@ import os
 import json
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional, Union, List, Set
 
 import redis
@@ -47,6 +48,9 @@ logger = get_logger(
     backup_count=LOG_BACKUP_COUNT,
     level=LOG_LEVEL,
 )
+
+RESULTS_DIR = Path(os.getenv("ORCHESTRATOR_RESULTS_DIR", "./orchestrator-results")).expanduser().resolve()
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 try:
@@ -105,6 +109,14 @@ CHILD_TO_PARENT: Dict[str, str] = {}
 
 TASK_STORE = TaskStore()
 
+
+class ResultPayload(BaseModel):
+    task_id: str
+    result: Dict[str, Any]
+    worker_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    received_at: str = Field(default_factory=now_iso)
+
 # -------------------------
 # App & routes
 # -------------------------
@@ -138,6 +150,44 @@ def _publish_task(topic: str, message: Dict[str, Any]) -> None:
     payload = json.dumps(message, ensure_ascii=False)
     receivers = rds.publish(topic, payload)
     logger.info("Published to topic=%s receivers=%d", topic, receivers)
+
+
+def _result_file_path(task_id: str) -> Path:
+    """Return a filesystem path for a task's saved result (sanitize task_id)."""
+    safe_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in task_id)
+    return RESULTS_DIR / safe_id / "responses.json"
+
+# -------------------------
+# Result ingestion
+# -------------------------
+@app.post("/api/v1/results")
+async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
+    task_id = payload.task_id.strip()
+    if not task_id:
+        raise HTTPException(status_code=400, detail="task_id is required")
+
+    file_path = _result_file_path(task_id)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    content = {
+        "task_id": task_id,
+        "worker_id": payload.worker_id,
+        "metadata": payload.metadata,
+        "received_at": payload.received_at,
+        "result": payload.result,
+    }
+
+    file_path.write_text(json.dumps(content, ensure_ascii=False, indent=2))
+    logger.info("Stored result for task %s at %s", task_id, file_path)
+
+    with TASKS_LOCK:
+        rec = TASKS.get(task_id)
+        if rec:
+            rec.status = TaskStatus.DONE
+            rec.error = None
+
+    return {"ok": True, "path": str(file_path)}
+
 
 # -------------------------
 # Dispatch helpers

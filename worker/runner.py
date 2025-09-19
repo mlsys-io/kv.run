@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
+
 
 class Runner:
     def __init__(self, lifecycle, rds, topic: str, results_dir: Path, executors: Dict[str, Any], default_executor: Any, logger: Any):
@@ -42,11 +44,50 @@ class Runner:
             chosen = chosen / task_id
         return chosen
 
-    def _write_results(self, out_dir: Path, result: Optional[Dict[str, Any]]):
+    def _write_results(self, task_id: str, task: Dict[str, Any], out_dir: Path, result: Optional[Dict[str, Any]]):
         if result is None:
             return
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        self._maybe_emit_http(task_id, task, result)
+
+    def _maybe_emit_http(self, task_id: str, task: Dict[str, Any], result: Dict[str, Any]) -> None:
+        """Send task results to an HTTP endpoint when requested by the spec."""
+        spec = (task or {}).get("spec") or {}
+        output_cfg = spec.get("output") or {}
+        destination = output_cfg.get("destination") or {}
+
+        dest_type = str(destination.get("type") or "local").lower()
+        if dest_type != "http":
+            return
+
+        url = destination.get("url")
+        if not url:
+            raise RuntimeError("spec.output.destination.url is required when type is 'http'")
+
+        method = str(destination.get("method") or "POST").upper()
+        headers = destination.get("headers") or {}
+        timeout = float(destination.get("timeoutSec") or 15)
+
+        rworker = getattr(self.lifecycle, "rworker", None)
+        payload = {
+            "task_id": task_id,
+            "result": result,
+            "worker_id": getattr(rworker, "worker_id", None),
+        }
+
+        try:
+            response = requests.request(method, url, json=payload, headers=headers, timeout=timeout)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Failed to deliver task {task_id} result to {url}: {exc}") from exc
+
+        if response.status_code >= 400:
+            snippet = response.text[:200]
+            raise RuntimeError(
+                f"HTTP delivery for task {task_id} returned status {response.status_code}: {snippet}"
+            )
+
+        self.logger.info("Task %s result delivered to %s (%s)", task_id, url, response.status_code)
 
     def start(self):
         pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
@@ -85,7 +126,7 @@ class Runner:
                 out = None
                 if executor:
                     out = executor.run(task, out_dir)
-                self._write_results(out_dir, out)
+                self._write_results(task_id, task, out_dir, out)
                 self.lifecycle.set_succeeded(task_id)
                 self.logger.info("Task %s completed successfully", task_id)
             except Exception as e:

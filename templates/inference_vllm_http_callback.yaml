@@ -1,0 +1,56 @@
+# inference_vllm_http_callback.yaml
+#
+# Sample single-shot inference task that delivers results both to the worker's
+# RESULTS_DIR and to an external HTTP endpoint. The worker will POST the
+# `task_id` and the executor's JSON result payload to the specified URL once the
+# run finishes successfully.
+
+apiVersion: mloc/v1
+kind: InferenceTask
+metadata:
+  name: mistral-http-callback
+
+spec:
+  taskType: "inference"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "4"
+      memory: "16GiB"
+      gpu:
+        count: 1
+        type: "any"            # let the scheduler pick any available GPU
+
+  parallel:
+    enabled: false             # data-parallel sharding not required for this demo
+
+  model:
+    source:
+      identifier: "mistralai/Mistral-7B-Instruct-v0.3"
+    vllm:
+      tensor_parallel_size: 1
+      max_model_len: 4096
+
+  data:
+    type: "list"
+    items:
+      - "Explain the key differences between superconductors and regular conductors."
+      - "Summarise the advantages of distributed inference for LLM workloads."
+
+  inference:
+    max_tokens: 256
+    temperature: 0.6
+    top_p: 0.9
+
+  output:
+    destination:
+      type: "http"
+      url: "http://orchestrator:8080/api/v1/results"   # update host/port to your orchestrator endpoint
+      method: "POST"
+      timeoutSec: 10
+      headers:
+        Authorization: "Bearer replace-with-orchestrator-token"
+        Content-Type: "application/json"
+    artifacts:
+      - "responses.json"       # still persisted locally under RESULTS_DIR/<task_id>/
