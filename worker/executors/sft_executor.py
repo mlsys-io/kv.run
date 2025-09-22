@@ -9,13 +9,15 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTTrainer, SFTConfig
+
+from .base_executor import Executor, ExecutionError
 
 logger = logging.getLogger("worker.sft")
 
 
-class SFTExecutor:
+class SFTExecutor(Executor):
     """Execute supervised fine-tuning jobs with TRL's SFTTrainer."""
 
     def __init__(self) -> None:
@@ -50,7 +52,7 @@ class SFTExecutor:
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
-            training_args = TrainingArguments(
+            sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
                 num_train_epochs=float(training_cfg.get("num_train_epochs", 1.0)),
                 per_device_train_batch_size=int(training_cfg.get("batch_size", 2)),
@@ -59,20 +61,23 @@ class SFTExecutor:
                 warmup_steps=int(training_cfg.get("warmup_steps", 0)),
                 logging_steps=int(training_cfg.get("logging_steps", 10)),
                 save_steps=int(training_cfg.get("save_steps", 100)),
-                save_strategy=training_cfg.get("save_strategy", "steps"),
+                save_strategy=str(training_cfg.get("save_strategy", "steps")),
                 report_to=[],  # disable default wandb reporting
                 fp16=bool(training_cfg.get("fp16", False)),
                 bf16=bool(training_cfg.get("bf16", False)),
+                dataset_text_field=text_field,
+                max_length=int(training_cfg.get("max_seq_length", 1024)),
+                packing=bool(training_cfg.get("packing", False)),
+                gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
+                pad_token=tokenizer.pad_token,
+                eos_token=tokenizer.eos_token,
             )
 
             trainer = SFTTrainer(
                 model=model,
-                tokenizer=tokenizer,
-                args=training_args,
+                args=sft_config,
                 train_dataset=train_dataset,
-                dataset_text_field=text_field,
-                packing=bool(training_cfg.get("packing", False)),
-                max_seq_length=int(training_cfg.get("max_seq_length", 1024)),
+                processing_class=tokenizer,
             )
 
             logger.info("Starting supervised fine-tuning run")

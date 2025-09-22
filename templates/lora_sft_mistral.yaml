@@ -23,14 +23,15 @@ spec:
   model:
     source:
       type: "huggingface"
-      identifier: "mistralai/Mistral-7B-Instruct-v0.3"
+      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
 
   data:
-    dataset_name: "lvwerra/stack-exchange-paired"
+    dataset_name: "openai/gsm8k"
+    config_name: "main"
     split: "train[:1%]"
     prompt_column: "question"
-    response_column: "chosen"
-    separator: "\n\nAssistant: "
+    response_column: "answer"
+    separator: "\n\nAnswer: "
     max_samples: 200
 
   lora:
@@ -38,8 +39,10 @@ spec:
     alpha: 32
     dropout: 0.05
     target_modules:
-      - "c_attn"
-      - "c_proj"
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
 
   training:
     num_train_epochs: 1
@@ -49,12 +52,12 @@ spec:
     max_seq_length: 512
     logging_steps: 5
     save_steps: 50
-    save_model: true
+    save_model: false
 
   output:
     destination:
       type: "local"
-      path: "/mnt/mloc-results"
+      path: "./results/lora_sft_mistral"
     artifacts:
       - "responses.json"
       - "final_lora"

@@ -9,13 +9,21 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTTrainer, SFTConfig
+
+from .base_executor import Executor, ExecutionError
+
+try:
+    from peft import LoraConfig, TaskType
+except ImportError:  # pragma: no cover - surfaced during runtime when LoRA runs
+    LoraConfig = None  # type: ignore[assignment]
+    TaskType = None  # type: ignore[assignment]
 
 logger = logging.getLogger("worker.sft.lora")
 
 
-class LoRASFTExecutor:
+class LoRASFTExecutor(Executor):
     """Execute LoRA-based supervised fine-tuning using TRL's SFTTrainer."""
 
     def __init__(self) -> None:
@@ -26,6 +34,11 @@ class LoRASFTExecutor:
         start_time = time.time()
         training_successful = False
         error_msg: Optional[str] = None
+
+        if LoraConfig is None or TaskType is None:
+            raise ExecutionError(
+                "peft is required for LoRA SFT tasks. Install the 'peft' package in the worker environment."
+            )
 
         training_cfg = spec.get("training", {}) or {}
         lora_cfg = spec.get("lora", {}) or {}
@@ -50,16 +63,26 @@ class LoRASFTExecutor:
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
             lora_target_modules = lora_cfg.get("target_modules", ["q_proj", "v_proj"])
-            peft_config = {
-                "r": int(lora_cfg.get("r", 16)),
-                "lora_alpha": int(lora_cfg.get("alpha", 32)),
-                "lora_dropout": float(lora_cfg.get("dropout", 0.05)),
-                "bias": lora_cfg.get("bias", "none"),
-                "target_modules": lora_target_modules,
-                "task_type": lora_cfg.get("task_type", "CAUSAL_LM"),
-            }
+            if not isinstance(lora_target_modules, (list, tuple)):
+                raise ValueError("lora.target_modules must be a list of module names")
+            lora_target_modules = [str(mod) for mod in lora_target_modules]
 
-            training_args = TrainingArguments(
+            task_type_raw = str(lora_cfg.get("task_type", "CAUSAL_LM")).upper()
+            try:
+                task_type = TaskType[task_type_raw]
+            except KeyError as exc:
+                raise ValueError(f"Unsupported LoRA task_type '{task_type_raw}'") from exc
+
+            peft_config = LoraConfig(
+                r=int(lora_cfg.get("r", 16)),
+                lora_alpha=int(lora_cfg.get("alpha", 32)),
+                lora_dropout=float(lora_cfg.get("dropout", 0.05)),
+                bias=str(lora_cfg.get("bias", "none")),
+                target_modules=lora_target_modules,
+                task_type=task_type,
+            )
+
+            sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
                 num_train_epochs=float(training_cfg.get("num_train_epochs", 1.0)),
                 per_device_train_batch_size=int(training_cfg.get("batch_size", 2)),
@@ -68,20 +91,22 @@ class LoRASFTExecutor:
                 warmup_steps=int(training_cfg.get("warmup_steps", 0)),
                 logging_steps=int(training_cfg.get("logging_steps", 10)),
                 save_steps=int(training_cfg.get("save_steps", 100)),
-                save_strategy=training_cfg.get("save_strategy", "steps"),
+                save_strategy=str(training_cfg.get("save_strategy", "steps")),
                 report_to=[],
                 fp16=bool(training_cfg.get("fp16", True)),
                 bf16=bool(training_cfg.get("bf16", False)),
+                dataset_text_field=text_field,
+                max_length=int(training_cfg.get("max_seq_length", 1024)),
+                packing=bool(training_cfg.get("packing", False)),
+                pad_token=tokenizer.pad_token,
+                eos_token=tokenizer.eos_token,
             )
 
             trainer = SFTTrainer(
                 model=model,
-                tokenizer=tokenizer,
-                args=training_args,
+                args=sft_config,
                 train_dataset=train_dataset,
-                dataset_text_field=text_field,
-                packing=bool(training_cfg.get("packing", False)),
-                max_seq_length=int(training_cfg.get("max_seq_length", 1024)),
+                processing_class=tokenizer,
                 peft_config=peft_config,
             )
 

@@ -26,10 +26,13 @@ spec:
       identifier: "mistralai/Mistral-7B-Instruct-v0.3"
 
   data:
-    prompts:
-      - "Summarise the benefits of distributed training for language models."
-      - "Provide three bullet points that explain prompt engineering best practices."
-      - "Write a short assistant-style reply that encourages safe AI usage."
+    dataset_name: "openai/gsm8k"
+    config_name: "main"
+    split: "train[:1%]"
+    prompt_column: "question"
+    response_column: "answer"
+    separator: "\n\nAnswer: "
+    max_samples: 200
 
   training:
     num_train_epochs: 1

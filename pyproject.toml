@@ -16,7 +16,6 @@ dependencies = [
     "trl>=0.8.0",
     "qdrant-client>=1.15.1",
     "fastembed>=0.7.3",
-
     # Agent Framework Dependencies (from youtu-agent)
     "aiofiles>=24.1.0",
     "aiohttp>=3.12.15",
@@ -31,33 +30,28 @@ dependencies = [
     "jinja2>=3.1.6",
     "matplotlib>=3.10.3",
     "mcp>=1.12.3",
-
     # OpenAI & Agents Dependencies
     "openai==1.99.6",
     "openai-agents==0.2.8",
-
     # OpenInference Tracing
     "openinference-instrumentation-openai>=0.1.30",
     "openinference-instrumentation-openai-agents>=1.1.1",
-
     # Data Processing
     "openpyxl>=3.1.5",
     "pandas>=2.3.0",
     "pexpect>=4.9.0",
     "psycopg2-binary>=2.9.10",
     "pymupdf>=1.25.3",
-
     # UI and Display
     "rich>=14.1.0",
     "prompt-toolkit>=3.0.0",
-
     # Utilities
     "sqlmodel>=0.0.24",
     "tiktoken>=0.9.0",
     "toml>=0.10.2",
     "wikipedia-api>=0.8.1",
-
     # Phoenix Tracing (dev dependencies from youtu-agent)
     "arize-phoenix-client>=1.14.1",
     "arize-phoenix-otel>=0.11.0",
+    "peft>=0.17.1",
 ]
