@@ -7,8 +7,10 @@ import os
 import json
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Union, List, Set
+
 
 import redis
 from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, Body
@@ -24,6 +26,8 @@ from assigner import (
     update_worker_status,
     is_stale_by_redis,
 )
+from retry_queue import RetryQueueManager
+from worker_events import log_worker_event
 from scheduler import (
     estimate_queue_length,
     choose_strategy,
@@ -79,12 +83,16 @@ async def require_auth(request: Request):
 # Models
 # -------------------------
 HB_TTL_SEC = parse_int_env("HEARTBEAT_TTL_SEC", 120)
+RETRY_BASE_DELAY_SEC = parse_int_env("RETRY_BASE_DELAY_SEC", 5)
+RETRY_MAX_DELAY_SEC = parse_int_env("RETRY_MAX_DELAY_SEC", 300)
+QUEUE_LOG_INTERVAL_SEC = parse_int_env("QUEUE_LOG_INTERVAL_SEC", 60)
 
 class TaskStatus(str):
     PENDING = "PENDING"
     DISPATCHED = "DISPATCHED"
     FAILED = "FAILED"
     DONE = "DONE"
+    WAITING = "WAITING"
 
 class TaskRecord(BaseModel):
     task_id: str
@@ -100,6 +108,8 @@ class TaskRecord(BaseModel):
     parent_task_id: Optional[str] = None
     shard_index: Optional[int] = None
     shard_total: Optional[int] = None
+    next_retry_at: Optional[str] = None
+    last_failed_worker: Optional[str] = None
 
 TASKS: Dict[str, TaskRecord] = {}
 TASKS_LOCK = threading.RLock()
@@ -108,6 +118,15 @@ PARENT_SHARDS: Dict[str, Dict[str, Any]] = {}
 CHILD_TO_PARENT: Dict[str, str] = {}
 
 TASK_STORE = TaskStore()
+RETRY_MANAGER = RetryQueueManager(
+    tasks=TASKS,
+    tasks_lock=TASKS_LOCK,
+    task_store=TASK_STORE,
+    logger=logger,
+    task_status=TaskStatus,
+    base_delay_sec=RETRY_BASE_DELAY_SEC,
+    max_delay_sec=RETRY_MAX_DELAY_SEC,
+)
 
 
 class ResultPayload(BaseModel):
@@ -297,19 +316,15 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
     queued = estimate_queue_length(TASK_STORE)
     pool = idle_satisfying_pool(rds, task, exclude_ids=exclude_ids)
     if not pool:
-        with TASKS_LOCK:
-            rec.status = TaskStatus.FAILED
-            rec.error = "No suitable IDLE worker"
-        logger.warning("Schedule failed: %s", rec.error)
+        logger.info("No suitable IDLE worker for %s; scheduling retry", task_id)
+        RETRY_MANAGER.schedule(task_id, rec, "No suitable IDLE worker; retrying shortly")
         return
 
     strategy = choose_strategy(task, pool, queued)  # decides best-fit vs first-fit
     worker_list = select_workers_for_task(pool, shard_count=1, prefer_best=strategy.prefer_best)
     if not worker_list:
-        with TASKS_LOCK:
-            rec.status = TaskStatus.FAILED
-            rec.error = "No suitable IDLE worker after selection"
-        logger.warning("Schedule failed: %s", rec.error)
+        logger.info("Worker selection failed for %s; scheduling retry", task_id)
+        RETRY_MANAGER.schedule(task_id, rec, "No worker passed selection; retrying shortly")
         return
 
     worker = worker_list[0]
@@ -328,12 +343,12 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
             rec.status = TaskStatus.DISPATCHED
             rec.assigned_worker = worker.worker_id
             rec.topic = topic
+            rec.next_retry_at = None
+            rec.last_failed_worker = None
         TASK_STORE.mark_released(task_id)
     except Exception as e:
-        with TASKS_LOCK:
-            rec.status = TaskStatus.FAILED
-            rec.error = f"Publish failed: {e}"
-        logger.exception("Publish failed")
+        logger.warning("Publish failed for %s; scheduling retry", task_id)
+        RETRY_MANAGER.schedule(task_id, rec, f"Publish failed: {e}")
 
 def _is_dep_satisfied(dep_task_id: str) -> bool:
     with TASKS_LOCK:
@@ -356,12 +371,20 @@ def _dispatch_ready_tasks() -> None:
 # Background loops
 # -------------------------
 def _dependency_watcher_loop(interval_sec: int = 2) -> None:
+    last_log = 0.0
     while True:
         try:
             _dispatch_ready_tasks()
         except Exception as e:
             logger.warning("dependency watcher error: %s", e)
+        now = time.time()
+        if QUEUE_LOG_INTERVAL_SEC > 0 and now - last_log >= QUEUE_LOG_INTERVAL_SEC:
+            RETRY_MANAGER.log_snapshot()
+            last_log = now
         time.sleep(interval_sec)
+
+def _retry_queue_loop() -> None:
+    RETRY_MANAGER.run_loop(_try_dispatch_one)
 
 def _tasks_events_loop() -> None:
     """Subscribe to tasks.events and handle shard aggregation & retries."""
@@ -429,46 +452,39 @@ def _tasks_events_loop() -> None:
                             rec.status = TaskStatus.FAILED
                             rec.error = str(err_msg or "worker failed")
                             rec.retries += 1
+                            rec.last_failed_worker = worker_id
                             retries_left = rec.max_retries - rec.retries
 
                     if parent_id:
-                        parsed = rec.parsed if rec else None
-                        if parsed and retries_left >= 0:
-                            pool = idle_satisfying_pool(rds, parsed, exclude_ids={worker_id} if worker_id else None)
-                            new_list = select_workers_for_task(pool, shard_count=1, prefer_best=True)
-                            if new_list:
-                                new_worker = new_list[0]
-                                message = {
-                                    "task_id": task_id,  # retry same child id
-                                    "task": parsed,
-                                    "task_type": safe_get(parsed, "spec.taskType"),
-                                    "assigned_worker": new_worker.worker_id,
-                                    "dispatched_at": now_iso(),
-                                }
-                                try:
-                                    _publish_task("tasks", message)
-                                    update_worker_status(rds, new_worker.worker_id, "RUNNING")
-                                    with TASKS_LOCK:
-                                        rec.status = TaskStatus.DISPATCHED
-                                        rec.assigned_worker = new_worker.worker_id
-                                    continue
-                                except Exception as e:
-                                    with TASKS_LOCK:
-                                        rec.status = TaskStatus.FAILED
-                                        rec.error = f"Publish failed (retry): {e}"
-                                    logger.exception("Shard retry publish failed")
+                        if rec and retries_left >= 0:
+                            reason = rec.error or "Shard failed; retrying"
+                            RETRY_MANAGER.schedule(task_id, rec, reason, exclude_worker_id=worker_id)
+                            with TASKS_LOCK:
+                                parent_rec = TASKS.get(parent_id)
+                                if parent_rec:
+                                    parent_rec.status = TaskStatus.WAITING
+                                    parent_rec.error = f"Waiting on shard retry: {task_id}"
+                            continue
 
                         with TASKS_LOCK:
                             parent_rec = TASKS.get(parent_id)
                             if parent_rec:
                                 parent_rec.status = TaskStatus.FAILED
                                 parent_rec.error = f"Child shard failed: {task_id}"
+                            if rec:
+                                rec.next_retry_at = None
                         continue
 
                     if rec and retries_left >= 0:
                         parsed = TASK_STORE.get_parsed(task_id)
                         if parsed:
-                            _try_dispatch_one(task_id, parsed, rec, exclude_worker_id=worker_id)
+                            reason = rec.error or "Task failed; retrying"
+                            RETRY_MANAGER.schedule(task_id, rec, reason, exclude_worker_id=worker_id)
+                        continue
+
+                    if rec:
+                        with TASKS_LOCK:
+                            rec.next_retry_at = None
 
                 else:
                     logger.debug("tasks.events ignoring type=%s payload=%s", ev_type, data)
@@ -477,10 +493,39 @@ def _tasks_events_loop() -> None:
             logger.warning("tasks.events listener error: %s; reconnecting soon...", e)
             time.sleep(2)
 
-@app.on_event("startup")
-def _start_background_threads():
+
+def _workers_events_loop() -> None:
+    """Listen to workers.events for registration/heartbeat updates."""
+    while True:
+        try:
+            sub_rds = redis.from_url(REDIS_URL, decode_responses=True)
+            pubsub = sub_rds.pubsub(ignore_subscribe_messages=True)
+            pubsub.subscribe("workers.events")
+            logger.info("Subscribed to workers.events")
+            for msg in pubsub.listen():
+                if msg.get("type") != "message":
+                    continue
+                raw = msg.get("data")
+                try:
+                    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "ignore"))
+                except Exception as exc:
+                    logger.debug("Bad workers.events payload: %s", exc)
+                    continue
+                log_worker_event(logger, data)
+        except Exception as exc:
+            logger.warning("workers.events listener error: %s; reconnecting soon...", exc)
+            time.sleep(2)
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
     threading.Thread(target=_dependency_watcher_loop, name="deps-watcher", daemon=True).start()
     threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True).start()
+    threading.Thread(target=_retry_queue_loop, name="retry-queue", daemon=True).start()
+    threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True).start()
+    yield
+
+
+app.router.lifespan_context = _lifespan
 
 # -------------------------
 # Task submission & queries

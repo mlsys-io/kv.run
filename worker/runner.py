@@ -110,6 +110,12 @@ class Runner:
             task_id = str(data.get("task_id"))
             task = data.get("task") or {}
             task_type = (task.get("spec") or {}).get("taskType")
+            self.logger.info(
+                "Received task %s (type=%s) with spec keys %s",
+                task_id,
+                task_type or "unknown",
+                sorted((task.get("spec") or {}).keys()),
+            )
 
             out_dir = self._resolve_output_dir(task_id, task)
             self.lifecycle.set_running(task_id)

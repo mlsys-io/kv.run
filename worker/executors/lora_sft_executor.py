@@ -8,17 +8,20 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import SFTTrainer, SFTConfig
+from trl import SFTConfig
 
 from .base_executor import Executor, ExecutionError
+from .sft_executor import _SafeSFTTrainer, SFTExecutor
 
 try:
-    from peft import LoraConfig, TaskType
+    from peft import LoraConfig, TaskType, get_peft_model
 except ImportError:  # pragma: no cover - surfaced during runtime when LoRA runs
     LoraConfig = None  # type: ignore[assignment]
     TaskType = None  # type: ignore[assignment]
+    get_peft_model = None  # type: ignore[assignment]
 
 logger = logging.getLogger("worker.sft.lora")
 
@@ -35,12 +38,13 @@ class LoRASFTExecutor(Executor):
         training_successful = False
         error_msg: Optional[str] = None
 
-        if LoraConfig is None or TaskType is None:
+        if LoraConfig is None or TaskType is None or get_peft_model is None:
             raise ExecutionError(
                 "peft is required for LoRA SFT tasks. Install the 'peft' package in the worker environment."
             )
 
         training_cfg = spec.get("training", {}) or {}
+        SFTExecutor._configure_devices(training_cfg)
         lora_cfg = spec.get("lora", {}) or {}
 
         checkpoint_dir = out_dir / "checkpoints"
@@ -59,10 +63,13 @@ class LoRASFTExecutor(Executor):
             model = AutoModelForCausalLM.from_pretrained(self._model_name)
             model.config.use_cache = False
 
+            if bool(training_cfg.get("gradient_checkpointing", False)):
+                model.gradient_checkpointing_enable()
+
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
-            lora_target_modules = lora_cfg.get("target_modules", ["q_proj", "v_proj"])
+            lora_target_modules = lora_cfg.get("target_modules") or ["q_proj", "k_proj", "v_proj", "o_proj"]
             if not isinstance(lora_target_modules, (list, tuple)):
                 raise ValueError("lora.target_modules must be a list of module names")
             lora_target_modules = [str(mod) for mod in lora_target_modules]
@@ -80,7 +87,11 @@ class LoRASFTExecutor(Executor):
                 bias=str(lora_cfg.get("bias", "none")),
                 target_modules=lora_target_modules,
                 task_type=task_type,
+                use_rslora=bool(lora_cfg.get("use_rslora", False)),
             )
+
+            model = get_peft_model(model, peft_config)
+            logger.info("LoRA adapters attached: %s", lora_target_modules)
 
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
@@ -93,7 +104,7 @@ class LoRASFTExecutor(Executor):
                 save_steps=int(training_cfg.get("save_steps", 100)),
                 save_strategy=str(training_cfg.get("save_strategy", "steps")),
                 report_to=[],
-                fp16=bool(training_cfg.get("fp16", True)),
+                fp16=bool(training_cfg.get("fp16", False)),
                 bf16=bool(training_cfg.get("bf16", False)),
                 dataset_text_field=text_field,
                 max_length=int(training_cfg.get("max_seq_length", 1024)),
@@ -102,12 +113,11 @@ class LoRASFTExecutor(Executor):
                 eos_token=tokenizer.eos_token,
             )
 
-            trainer = SFTTrainer(
+            trainer = _SafeSFTTrainer(
                 model=model,
                 args=sft_config,
                 train_dataset=train_dataset,
                 processing_class=tokenizer,
-                peft_config=peft_config,
             )
 
             logger.info("Starting LoRA supervised fine-tuning run")
@@ -137,7 +147,12 @@ class LoRASFTExecutor(Executor):
             "output_dir": str(out_dir),
         }
 
-        return result
+        if training_successful:
+            return result
+
+        self.save_json(out_dir / "responses.json", result)
+        message = error_msg or "LoRA SFT training failed"
+        raise ExecutionError(message)
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
         data_cfg = spec.get("data", {}) or {}

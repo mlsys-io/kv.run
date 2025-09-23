@@ -4,17 +4,116 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from datasets import Dataset, load_dataset
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
+from trl.trainer.utils import entropy_from_logits
 
 from .base_executor import Executor, ExecutionError
 
 logger = logging.getLogger("worker.sft")
+
+
+class _SafeSFTTrainer(SFTTrainer):
+    """SFTTrainer variant with safer entropy aggregation under DataParallel."""
+
+    @staticmethod
+    def _entropy_from_mask(per_token_entropy: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        mask = attention_mask.to(device=per_token_entropy.device, dtype=per_token_entropy.dtype)
+
+        entropy_vals = per_token_entropy.reshape(-1)
+        mask_flat = mask.reshape(-1)
+
+        target_len = entropy_vals.size(0)
+        if mask_flat.size(0) != target_len:
+            if mask_flat.size(0) > target_len:
+                mask_flat = mask_flat[:target_len]
+            else:
+                pad = torch.zeros(target_len - mask_flat.size(0), device=mask_flat.device, dtype=mask_flat.dtype)
+                mask_flat = torch.cat((mask_flat, pad), dim=0)
+
+        mask_sum = mask_flat.sum()
+        if mask_sum <= 0:
+            return torch.tensor(0.0, device=mask_flat.device, dtype=per_token_entropy.dtype)
+
+        return torch.sum(entropy_vals * mask_flat) / mask_sum
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):  # type: ignore[override]
+        mode = "train" if self.model.training else "eval"
+        inputs["use_cache"] = False
+        loss, outputs = super(SFTTrainer, self).compute_loss(  # call into base Trainer
+            model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+        )
+
+        try:
+            if not self.args.use_liger_kernel:
+                with torch.no_grad():
+                    per_token_entropy = entropy_from_logits(outputs.logits)
+                    if "attention_mask" in inputs:
+                        attention_mask = inputs["attention_mask"]
+                        if self.num_virtual_tokens:
+                            virtual_mask = attention_mask.new_ones(attention_mask.size(0), self.num_virtual_tokens)
+                            attention_mask = torch.cat((virtual_mask, attention_mask), dim=1)
+                        entropy = self._entropy_from_mask(per_token_entropy, attention_mask)
+                    elif "position_ids" in inputs:
+                        entropy = torch.mean(per_token_entropy)
+                    else:
+                        raise ValueError("Expected 'attention_mask' or 'position_ids' in inputs.")
+                    entropy = self.accelerator.gather_for_metrics(entropy).mean().item()
+                self._metrics[mode]["entropy"].append(entropy)
+
+            if "attention_mask" in inputs:
+                num_tokens_in_batch = self.accelerator.gather_for_metrics(inputs["attention_mask"].sum()).sum().item()
+            elif "position_ids" in inputs:
+                local_num_tokens = torch.tensor(inputs["position_ids"].size(1), device=inputs["position_ids"].device)
+                num_tokens_in_batch = self.accelerator.gather_for_metrics(local_num_tokens).sum().item()
+            else:
+                raise ValueError("Expected 'attention_mask' or 'position_ids' in inputs.")
+            self._total_train_tokens += num_tokens_in_batch
+            self._metrics[mode]["num_tokens"] = [self._total_train_tokens]
+
+            if "labels" in inputs and not self.args.use_liger_kernel:
+                with torch.no_grad():
+                    shift_logits = outputs.logits[..., :-1, :].contiguous()
+                    shift_labels = inputs["labels"][..., 1:].contiguous()
+                    shift_logits = shift_logits[:, self.num_virtual_tokens :, :]
+
+                    batch_dim = shift_logits.size(0)
+                    if shift_labels.size(0) != batch_dim:
+                        shift_labels = shift_labels[:batch_dim]
+
+                    seq_dim = shift_logits.size(1)
+                    if shift_labels.size(1) != seq_dim:
+                        seq_dim = min(seq_dim, shift_labels.size(1))
+                        shift_logits = shift_logits[:, :seq_dim, :]
+                        shift_labels = shift_labels[:, :seq_dim]
+
+                    predictions = shift_logits.argmax(dim=-1)
+                    mask = shift_labels != -100
+                    if mask.size() != predictions.size():
+                        mask = mask[: predictions.size(0), : predictions.size(1)]
+                        shift_labels = shift_labels[: predictions.size(0), : predictions.size(1)]
+
+                    correct_predictions = (predictions == shift_labels) & mask
+                    total_tokens = mask.sum()
+                    correct_tokens = correct_predictions.sum()
+                    correct_tokens = self.accelerator.gather_for_metrics(correct_tokens)
+                    total_tokens = self.accelerator.gather_for_metrics(total_tokens)
+                    total_sum = total_tokens.sum()
+                    accuracy = (correct_tokens.sum() / total_sum).item() if total_sum > 0 else 0.0
+                    self._metrics[mode]["mean_token_accuracy"].append(accuracy)
+        except Exception as exc:  # defensive fallback for metric edge cases
+            logger.debug("Metric computation skipped: %s", exc)
+
+        if return_outputs:
+            return (loss, outputs)
+        return loss
 
 
 class SFTExecutor(Executor):
@@ -28,8 +127,10 @@ class SFTExecutor(Executor):
         start_time = time.time()
         training_successful = False
         error_msg: Optional[str] = None
+        caught_exc: Optional[Exception] = None
 
         training_cfg = spec.get("training", {}) or {}
+        self._configure_devices(training_cfg)
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,7 +174,7 @@ class SFTExecutor(Executor):
                 eos_token=tokenizer.eos_token,
             )
 
-            trainer = SFTTrainer(
+            trainer = _SafeSFTTrainer(
                 model=model,
                 args=sft_config,
                 train_dataset=train_dataset,
@@ -94,6 +195,7 @@ class SFTExecutor(Executor):
         except Exception as exc:  # pylint: disable=broad-except
             error_msg = str(exc)
             training_successful = False
+            caught_exc = exc
             logger.exception("SFT training failed: %s", exc)
 
         training_time = time.time() - start_time
@@ -107,7 +209,15 @@ class SFTExecutor(Executor):
             "output_dir": str(out_dir),
         }
 
-        return result
+        if training_successful:
+            return result
+
+        # Persist failure details for diagnostics and surface the failure upstream
+        self.save_json(out_dir / "responses.json", result)
+        message = error_msg or "SFT training failed"
+        if caught_exc is not None:
+            raise ExecutionError(message) from caught_exc
+        raise ExecutionError(message)
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
         data_cfg = spec.get("data", {}) or {}
@@ -157,3 +267,44 @@ class SFTExecutor(Executor):
             return dataset, "text"
 
         raise ValueError("spec.data must define dataset_name or prompts for SFT tasks")
+
+    @staticmethod
+    def _configure_devices(training_cfg: Dict[str, Any]) -> None:
+        if not torch.cuda.is_available():
+            return
+
+        allow_multi = bool(training_cfg.get("allow_multi_gpu", False))
+        requested = training_cfg.get("visible_devices")
+        if requested:
+            if isinstance(requested, (list, tuple)):
+                devices = ",".join(str(x) for x in requested)
+            else:
+                devices = str(requested)
+            os.environ["CUDA_VISIBLE_DEVICES"] = devices
+            logger.info("Using user-specified CUDA_VISIBLE_DEVICES=%s", devices)
+            return
+
+        if allow_multi:
+            return
+
+        preferred = training_cfg.get("primary_gpu")
+        try:
+            available = torch.cuda.device_count()
+        except Exception:  # pragma: no cover
+            available = 0
+
+        if available <= 1:
+            return
+
+        if preferred is None:
+            preferred = 0
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(preferred)
+        try:
+            torch.cuda.set_device(0)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("set_device failed after limiting GPUs: %s", exc)
+        logger.info(
+            "Multiple GPUs detected (%d); restrict training to device %s. Set training.allow_multi_gpu=true to opt-in.",
+            available,
+            preferred,
+        )

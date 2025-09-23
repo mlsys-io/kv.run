@@ -11,13 +11,24 @@ def get_logger(
     """Return a configured logger with a rotating file handler and console output."""
     logger = logging.getLogger(name)
     if logger.handlers:
-        # Already configured
-        return logger
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
 
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    logger.propagate = False
 
     # File handler (rotating)
-    fh = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+    fh = RotatingFileHandler(
+        log_file,
+        mode="w",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
     fh.setFormatter(fmt)
     logger.addHandler(fh)

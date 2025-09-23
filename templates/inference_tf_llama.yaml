@@ -59,7 +59,7 @@ spec:
   output:
     destination:
       type: "local"
-      path: "/mnt/mloc-results"   # this should match the NFS mount path on the worker nodes
+      path: "./cpu_inference_tf_llama"
     artifacts:
       - "responses.json"
       - "logs"

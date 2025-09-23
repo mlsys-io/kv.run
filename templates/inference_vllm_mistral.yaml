@@ -56,7 +56,7 @@ spec:
   output:
     destination:
       type: "local"
-      path: "/mnt/mloc-results"   # this should match the NFS mount path on the worker nodes
+      path: "./mistral_7b_infer"
     artifacts:
       - "responses.json"
       - "logs"

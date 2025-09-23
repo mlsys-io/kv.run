@@ -144,6 +144,8 @@ class AgentExecutor(Executor):
             logger.debug("Agent task completed successfully")
             return output
 
+        except ExecutionError:
+            raise
         except Exception as e:
             logger.exception(f"Agent task failed: {e}")
             error_output = {
@@ -154,7 +156,7 @@ class AgentExecutor(Executor):
                 "items": []
             }
             self.save_json(out_dir / "responses.json", error_output)
-            return error_output
+            raise ExecutionError(f"Agent task failed: {e}") from e
 
     async def _run_agent_task(self, config_name: str, task_input: str, out_dir: Path) -> Dict[str, Any]:
         """Execute agent task using utu framework with detailed logging and timeout control"""
@@ -321,4 +323,3 @@ class AgentExecutor(Executor):
             "log": execution_log,
             "usage": usage_stats
         }
-

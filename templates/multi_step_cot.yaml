@@ -147,7 +147,7 @@ spec:
         output:
           destination:
             type: "local"
-            path: "/ignored/by/current-worker"
+            path: "./multi_step_cot"
           artifacts:
             - "responses.json"
             - "logs"
