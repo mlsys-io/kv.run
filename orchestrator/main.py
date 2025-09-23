@@ -36,6 +36,8 @@ from scheduler import (
     idle_satisfying_pool,
     is_data_parallel_enabled,
 )
+from aggregation import maybe_aggregate_parent
+from results import write_result, read_result
 
 # -------------------------
 # Logging & Redis setup
@@ -171,11 +173,6 @@ def _publish_task(topic: str, message: Dict[str, Any]) -> None:
     logger.info("Published to topic=%s receivers=%d", topic, receivers)
 
 
-def _result_file_path(task_id: str) -> Path:
-    """Return a filesystem path for a task's saved result (sanitize task_id)."""
-    safe_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in task_id)
-    return RESULTS_DIR / safe_id / "responses.json"
-
 # -------------------------
 # Result ingestion
 # -------------------------
@@ -185,9 +182,6 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
     if not task_id:
         raise HTTPException(status_code=400, detail="task_id is required")
 
-    file_path = _result_file_path(task_id)
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-
     content = {
         "task_id": task_id,
         "worker_id": payload.worker_id,
@@ -196,7 +190,7 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
         "result": payload.result,
     }
 
-    file_path.write_text(json.dumps(content, ensure_ascii=False, indent=2))
+    file_path = write_result(RESULTS_DIR, task_id, content)
     logger.info("Stored result for task %s at %s", task_id, file_path)
 
     with TASKS_LOCK:
@@ -205,7 +199,42 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
             rec.status = TaskStatus.DONE
             rec.error = None
 
+    maybe_aggregate_parent(
+        task_id,
+        content,
+        child_to_parent=CHILD_TO_PARENT,
+        parent_shards=PARENT_SHARDS,
+        tasks=TASKS,
+        tasks_lock=TASKS_LOCK,
+        results_dir=RESULTS_DIR,
+        logger=logger,
+    )
+
     return {"ok": True, "path": str(file_path)}
+
+
+# -------------------------
+# Result retrieval
+# -------------------------
+@app.get("/api/v1/results/{task_id}")
+async def get_result(task_id: str, _: Any = Depends(require_auth)):
+    task_id = (task_id or "").strip()
+    if not task_id:
+        raise HTTPException(status_code=400, detail="task_id is required")
+
+    try:
+        content = read_result(RESULTS_DIR, task_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="result not found")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read result: {exc}") from exc
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return {"task_id": task_id, "raw": content}
+
+    return data
 
 
 # -------------------------
@@ -239,13 +268,28 @@ def _try_dispatch_sharded(
 
     topic = "tasks"
     created_children: List[str] = []
+    order_map: Dict[str, int] = {}
     for idx, (child_id, child_task, worker) in enumerate(child_msgs):
+        child_spec = child_task.get("spec") or {}
+        output_cfg = child_spec.get("output") or {}
+        destination = output_cfg.get("destination") or {}
+        if destination.get("type") and str(destination["type"]).lower() == "http":
+            child_spec = dict(child_spec)
+            new_output = dict(output_cfg)
+            new_output["destination"] = {"type": "local"}
+            child_spec["output"] = new_output
+            child_task = dict(child_task)
+            child_task["spec"] = child_spec
+
         message = {
             "task_id": child_id,
             "task": child_task,
             "task_type": safe_get(child_task, "spec.taskType"),
             "assigned_worker": worker.worker_id,
             "dispatched_at": now_iso(),
+            "parent_task_id": parent_task_id,
+            "shard_index": idx,
+            "shard_total": len(child_msgs),
         }
         try:
             _publish_task(topic, message)
@@ -266,6 +310,7 @@ def _try_dispatch_sharded(
                 TASKS[child_id] = child_rec
                 CHILD_TO_PARENT[child_id] = parent_task_id
             created_children.append(child_id)
+            order_map[child_id] = idx
         except Exception as e:
             with TASKS_LOCK:
                 TASKS[child_id] = TaskRecord(
@@ -289,6 +334,9 @@ def _try_dispatch_sharded(
             "done": 0,
             "failed": 0,
             "children": set(created_children),
+            "order": order_map,
+            "results": {},
+            "aggregated": False,
         }
         parent_rec.status = TaskStatus.DISPATCHED
         parent_rec.assigned_worker = "MULTI"
@@ -335,6 +383,7 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
         "task_type": safe_get(task, "spec.taskType"),
         "assigned_worker": worker.worker_id,
         "dispatched_at": now_iso(),
+        "parent_task_id": rec.parent_task_id,
     }
     try:
         _publish_task(topic, message)

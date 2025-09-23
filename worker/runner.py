@@ -110,10 +110,22 @@ class Runner:
             task_id = str(data.get("task_id"))
             task = data.get("task") or {}
             task_type = (task.get("spec") or {}).get("taskType")
+            parent_task_id = data.get("parent_task_id")
+            shard_index = data.get("shard_index")
+            shard_total = data.get("shard_total")
+
+            extra = []
+            if parent_task_id:
+                extra.append(f"parent={parent_task_id}")
+            if shard_index is not None and shard_total is not None:
+                extra.append(f"shard={shard_index}/{shard_total}")
+            extra_info = ", ".join(extra) if extra else "no-parent"
+
             self.logger.info(
-                "Received task %s (type=%s) with spec keys %s",
+                "Received task %s (type=%s, %s) with spec keys %s",
                 task_id,
                 task_type or "unknown",
+                extra_info,
                 sorted((task.get("spec") or {}).keys()),
             )
 
