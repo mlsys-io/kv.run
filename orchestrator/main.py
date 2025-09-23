@@ -18,6 +18,10 @@ from pydantic import BaseModel, Field
 
 from utils import parse_int_env, now_iso, get_logger, safe_get
 from parser import TaskStore
+try:  # Support running as package or as script
+    from template_resolver import resolve_graph_templates
+except ImportError:  # pragma: no cover - fallback when imported as package
+    from .template_resolver import resolve_graph_templates
 from assigner import (
     Worker,
     list_workers_from_redis,
@@ -112,6 +116,7 @@ class TaskRecord(BaseModel):
     shard_total: Optional[int] = None
     next_retry_at: Optional[str] = None
     last_failed_worker: Optional[str] = None
+    graph_node_name: Optional[str] = None
 
 TASKS: Dict[str, TaskRecord] = {}
 TASKS_LOCK = threading.RLock()
@@ -377,10 +382,11 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
 
     worker = worker_list[0]
     topic = "tasks"
+    task_payload = resolve_graph_templates(task, task_id, rec, TASK_STORE, TASKS, RESULTS_DIR, logger)
     message = {
         "task_id": task_id,
-        "task": task,
-        "task_type": safe_get(task, "spec.taskType"),
+        "task": task_payload,
+        "task_type": safe_get(task_payload, "spec.taskType"),
         "assigned_worker": worker.worker_id,
         "dispatched_at": now_iso(),
         "parent_task_id": rec.parent_task_id,
@@ -598,7 +604,12 @@ async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="te
         depends_on = entry["depends_on"]
 
         with TASKS_LOCK:
-            TASKS[task_id] = TaskRecord(task_id=task_id, raw_yaml=yml, parsed=task)
+            TASKS[task_id] = TaskRecord(
+                task_id=task_id,
+                raw_yaml=yml,
+                parsed=task,
+                graph_node_name=entry.get("graph_node_name"),
+            )
 
         if not depends_on:
             with TASKS_LOCK:

@@ -63,6 +63,7 @@ def maybe_aggregate_parent(
         parent_info.pop("results", None)
         for cid in list(parent_info.get("children", [])):
             child_to_parent.pop(cid, None)
+        parent_shards.pop(parent_id, None)
 
 
 def _build_aggregated_result(parent_rec: Any, shard_payloads: List[Dict[str, Any]]) -> Dict[str, Any]:

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from datasets import load_dataset
 
 from .base_executor import Executor, ExecutionError
+from .graph_templates import build_prompts_from_graph_template
 
 try:
     # vLLM is optional at import time; errors are raised in prepare()
@@ -92,6 +93,7 @@ class VLLMExecutor(Executor):
             raise ExecutionError("spec.data is required.")
 
         dtype = data.get("type")
+        append_system_prompt = True
         if dtype == "dataset":
             # Load dataset from URL / HF identifier
             data_url = data.get("url")
@@ -126,13 +128,18 @@ class VLLMExecutor(Executor):
                 raise ExecutionError("spec.data.items must be a list of strings for type == 'list'.")
             self._prompts = items
 
+        elif dtype == "graph_template":
+            self._prompts = build_prompts_from_graph_template(data, spec)
+            template_cfg = data.get("template") or {}
+            append_system_prompt = bool(template_cfg.get("append_system_prompt", False))
+
         else:
             raise ExecutionError(f"Unsupported spec.data.type: {dtype!r}")
 
         # Inference params are copied as-is (validated where used)
         self._inf = spec.get("inference", {}) or {}
         system_prompt = self._inf.get("system_prompt")
-        if system_prompt:
+        if system_prompt and append_system_prompt:
             self._prompts = [f"{system_prompt}\n{p}" for p in self._prompts]
 
     # --------------------------------------------------------------------- #

@@ -1,5 +1,5 @@
 # parser.py
-"""Task parsing and in-memory dependency tracking (supports stages).
+"""Task parsing and in-memory dependency tracking (supports stages and DAG graphs).
 
 Unchanged core behavior:
 - REQUIRED_FIELDS, single-task validation, optional staged pipelines.
@@ -103,45 +103,21 @@ class TaskStore:
         """
         base = _validate_yaml_to_dict(yaml_text)
         stages = safe_get(base, "spec.stages", None)
+        graph_nodes = safe_get(base, "spec.graph.nodes", None)
 
         # Base copy for children to inherit from
         base_clean = copy.deepcopy(base)
         if isinstance(safe_get(base_clean, "spec", {}), dict):
-            base_clean["spec"].pop("stages", None)  # remove stages from child tasks
+            base_clean["spec"].pop("stages", None)
+            base_clean["spec"].pop("graph", None)
 
         results: List[Dict[str, Any]] = []
 
-        if isinstance(stages, list) and len(stages) > 0:
-            # Staged pipeline
-            prev_task_id: str | None = None
-            base_name = str(safe_get(base, "metadata.name", "task"))
+        if isinstance(graph_nodes, list) and graph_nodes:
+            return self._register_graph(base, base_clean, graph_nodes)
 
-            for idx, stage in enumerate(stages):
-                stage_name = str(stage.get("name") or f"stage-{idx+1}")
-                stage_overrides = stage.get("spec") or {}
-
-                # Effective parsed task = deep-merge(base_clean, {"spec": stage_overrides})
-                effective = _deep_merge(base_clean, {"spec": stage_overrides})
-
-                # Give each stage task a unique and descriptive name
-                eff = copy.deepcopy(effective)
-                eff_md = eff.setdefault("metadata", {})
-                eff_md["name"] = f"{base_name}:{stage_name}"
-
-                # Generate task_id and dependencies (chain to previous stage)
-                tid = str(uuid.uuid4())
-                depends_on: List[str] = []
-                if prev_task_id:
-                    depends_on.append(prev_task_id)
-
-                with self._lock:
-                    self._parsed[tid] = eff
-                    self._depends[tid] = set(depends_on)
-
-                results.append({"task_id": tid, "parsed": eff, "depends_on": depends_on})
-                prev_task_id = tid
-
-            return results
+        if isinstance(stages, list) and stages:
+            return self._register_linear_stages(base, base_clean, stages)
 
         # Single-task path (no stages)
         depends_on_raw = safe_get(base, "spec.dependsOn", []) or []
@@ -154,7 +130,127 @@ class TaskStore:
             self._parsed[tid] = base
             self._depends[tid] = set(depends_on)
 
-        results.append({"task_id": tid, "parsed": base, "depends_on": depends_on})
+        results.append({"task_id": tid, "parsed": base, "depends_on": depends_on, "graph_node_name": None})
+        return results
+
+    def _register_linear_stages(
+        self,
+        base: Dict[str, Any],
+        base_clean: Dict[str, Any],
+        stages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        prev_task_id: str | None = None
+        base_name = str(safe_get(base, "metadata.name", "task"))
+
+        for idx, stage in enumerate(stages):
+            stage_name = str(stage.get("name") or f"stage-{idx+1}")
+            stage_overrides = stage.get("spec") or {}
+
+            effective = _deep_merge(base_clean, {"spec": stage_overrides})
+            eff = copy.deepcopy(effective)
+            eff_md = eff.setdefault("metadata", {})
+            eff_md["name"] = f"{base_name}:{stage_name}"
+
+            depends_on_names = stage.get("dependsOn", []) or []
+            if not isinstance(depends_on_names, list):
+                raise HTTPException(status_code=400, detail="stage.dependsOn must be a list")
+
+            depends_on: List[str] = [str(dep).strip() for dep in depends_on_names if str(dep).strip()]
+            if prev_task_id:
+                depends_on.insert(0, prev_task_id)
+
+            tid = str(uuid.uuid4())
+            with self._lock:
+                self._parsed[tid] = eff
+                self._depends[tid] = set(depends_on)
+
+            results.append({
+                "task_id": tid,
+                "parsed": eff,
+                "depends_on": depends_on,
+                "graph_node_name": stage_name,
+            })
+            prev_task_id = tid
+
+        return results
+
+    def _register_graph(
+        self,
+        base: Dict[str, Any],
+        base_clean: Dict[str, Any],
+        nodes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not nodes:
+            return []
+
+        name_to_node: Dict[str, Dict[str, Any]] = {}
+        base_name = str(safe_get(base, "metadata.name", "task"))
+
+        for idx, node in enumerate(nodes):
+            name = node.get("name") or node.get("id") or f"node-{idx+1}"
+            name = str(name).strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Each graph node requires a non-empty name")
+            if name in name_to_node:
+                raise HTTPException(status_code=400, detail=f"Duplicate graph node name '{name}'")
+            name_to_node[name] = dict(node)
+
+        unresolved = dict(name_to_node)
+        resolved_ids: Dict[str, str] = {}
+        results: List[Dict[str, Any]] = []
+
+        while unresolved:
+            progressed = False
+            for name, node in list(unresolved.items()):
+                depends_raw = node.get("dependsOn") or []
+                if not isinstance(depends_raw, list):
+                    raise HTTPException(status_code=400, detail=f"Node '{name}' dependsOn must be a list")
+
+                internal_deps = [d for d in depends_raw if d in unresolved]
+                if internal_deps:
+                    continue  # wait for dependencies to resolve
+
+                if any(d not in resolved_ids and d in name_to_node for d in depends_raw):
+                    continue
+
+                depends_on_task_ids: List[str] = []
+                for dep in depends_raw:
+                    dep = str(dep).strip()
+                    if not dep:
+                        continue
+                    if dep in resolved_ids:
+                        depends_on_task_ids.append(resolved_ids[dep])
+                    elif dep in name_to_node:
+                        # unresolved internal dependency; skip for now
+                        break
+                    else:
+                        depends_on_task_ids.append(dep)
+                else:
+                    stage_overrides = node.get("spec") or {}
+                    effective = _deep_merge(base_clean, {"spec": stage_overrides})
+                    eff = copy.deepcopy(effective)
+                    eff_md = eff.setdefault("metadata", {})
+                    eff_md["name"] = f"{base_name}:{name}"
+
+                    tid = str(uuid.uuid4())
+                    with self._lock:
+                        self._parsed[tid] = eff
+                        self._depends[tid] = set(depends_on_task_ids)
+
+                    results.append({
+                        "task_id": tid,
+                        "parsed": eff,
+                        "depends_on": depends_on_task_ids,
+                        "graph_node_name": name,
+                    })
+                    resolved_ids[name] = tid
+                    unresolved.pop(name)
+                    progressed = True
+            if not progressed:
+                unresolved_names = ", ".join(unresolved.keys())
+                raise HTTPException(status_code=400, detail=f"Graph contains cycles or unresolved deps: {unresolved_names}")
+
         return results
 
     def mark_released(self, task_id: str) -> None:
