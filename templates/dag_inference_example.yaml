@@ -60,6 +60,6 @@ spec:
   output:
     destination:
       type: "local"
-      path: "./dag_two_branch_outputs"
+      path: "./"
     artifacts:
       - "responses.json"

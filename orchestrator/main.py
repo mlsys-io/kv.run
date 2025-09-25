@@ -18,10 +18,7 @@ from pydantic import BaseModel, Field
 
 from utils import parse_int_env, now_iso, get_logger, safe_get
 from parser import TaskStore
-try:  # Support running as package or as script
-    from template_resolver import resolve_graph_templates
-except ImportError:  # pragma: no cover - fallback when imported as package
-    from .template_resolver import resolve_graph_templates
+from template_resolver import resolve_graph_templates
 from assigner import (
     Worker,
     list_workers_from_redis,
@@ -59,7 +56,11 @@ logger = get_logger(
     level=LOG_LEVEL,
 )
 
-RESULTS_DIR = Path(os.getenv("ORCHESTRATOR_RESULTS_DIR", "./orchestrator-results")).expanduser().resolve()
+results_dir_env = os.getenv("ORCHESTRATOR_RESULTS_DIR")
+if not results_dir_env:
+    # Fall back to the worker-style RESULTS_DIR for single-host setups
+    results_dir_env = os.getenv("RESULTS_DIR", "./results")
+RESULTS_DIR = Path(results_dir_env).expanduser().resolve()
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379/0"

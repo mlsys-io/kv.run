@@ -43,6 +43,8 @@ def resolve_graph_templates(
         except json.JSONDecodeError as exc:
             logger.debug("Failed to parse result for %s: %s", dep_id, exc)
             continue
+        if isinstance(data, dict) and "result" not in data:
+            data = {"result": data}
         context[node_name] = data
 
     resolved = copy.deepcopy(task)
