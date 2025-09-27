@@ -109,6 +109,7 @@ class Runner:
 
             task_id = str(data.get("task_id"))
             task = data.get("task") or {}
+            task.setdefault("task_id", task_id)
             task_type = (task.get("spec") or {}).get("taskType")
             parent_task_id = data.get("parent_task_id")
             shard_index = data.get("shard_index")

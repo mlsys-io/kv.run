@@ -31,8 +31,11 @@ training pipelines.
 - Declarative task definitions with optional `spec.stages` pipelines.
 - Resource-aware scheduling with optional data-parallel fan-out when
   `spec.parallel.enabled=true` for inference jobs.
-- Per-task output directory overrides via
-  `spec.output.destination.path` (relative paths resolve under `RESULTS_DIR`).
+- Flexible artifact delivery: Workers can persist to shared storage or upload
+  binaries (for example, fine-tuned checkpoints) back to the orchestrator over
+  HTTP after every training run.
+- Per-task output directory overrides via `spec.output.destination.path`
+  (relative paths resolve under the worker `RESULTS_DIR`).
 - Shared storage ready: Docker Compose sample mounts an NFS export so all
   workers write to the same location.
 
@@ -51,6 +54,7 @@ redis-server
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
 export ORCHESTRATOR_TOKEN="dev-token"  # optional auth
+export ORCHESTRATOR_RESULTS_DIR=./results_host
 python orchestrator/main.py
 # listens on 0.0.0.0:8080 (override with PORT)
 ```
@@ -58,7 +62,8 @@ python orchestrator/main.py
 ### 3. Run a Worker
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
-export RESULTS_DIR=./results    # or an NFS mount
+export RESULTS_DIR=./results_workers    # or an NFS mount
+export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8080"  # enable HTTP artifact uploads
 python worker/main.py
 ```
 Workers register with Redis, stream heartbeats, and execute incoming tasks.
@@ -83,13 +88,33 @@ spec:
   data:  { ... }
   output:
     destination:
-      type: local
-      path: /mnt/mloc/results   # worker creates <task_id>/responses.json here
+      type: http
+      url: http://127.0.0.1:8080/api/v1/results
+      headers:
+        Authorization: "Bearer dev-token"
 ```
 - Enable automatic sharding by setting `spec.parallel.enabled: true` with an
   appropriate dataset split.
 - Define multi-stage flows using `spec.stages`; the orchestrator chains them via
   dependencies.
+- When `spec.output.destination.type` is `http`, the worker will upload the
+  final model artifacts to the orchestrator (in addition to local persistence)
+  so that downstream stages can fetch them by ID.
+
+## Artifact Handling Overview
+
+- **Worker output root** defaults to `./results_workers`. Each task receives its
+  own subdirectory containing `responses.json`, checkpoints, and any archived
+  model directories.
+- **Orchestrator output root** defaults to `./results_host`. Results ingested by
+  `/api/v1/results` are stored under this tree, and the new endpoint
+  `POST /api/v1/results/{task_id}/files` accepts extra files (for example
+  `final_model.zip`).
+- Stage-to-stage pipelines can reference uploaded archives using
+  `checkpoint.load.url`, for example
+  `url: "${stage1.result.final_model_archive_url}"`.
+- If you prefer classic shared storage, point both `RESULTS_DIR` variables at a
+  common mount and skip HTTP uploads.
 
 ## Shared Storage via NFS (optional)
 1. Export an NFS directory on the orchestrator or storage host (instructions in
@@ -111,4 +136,3 @@ See also:
 - `orchestrator/README.md` for API and scheduling internals.
 - `worker/README.md` for worker configuration and runtime flow.
 - `worker/docker/README.md` for container-focused instructions.
-

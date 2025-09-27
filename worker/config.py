@@ -32,7 +32,7 @@ class WorkerConfig:
 
         topic = os.getenv("TASK_TOPIC", DEFAULT_TOPIC)
 
-        results_dir = Path(os.getenv("RESULTS_DIR", "./results")).absolute()
+        results_dir = Path(os.getenv("RESULTS_DIR", "./results_workers")).absolute()
         results_dir.mkdir(parents=True, exist_ok=True)
 
         hb_interval = int(os.getenv("HEARTBEAT_INTERVAL_SEC", "30"))

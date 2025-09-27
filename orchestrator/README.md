@@ -1,78 +1,81 @@
 # Orchestrator Service Guide
 
-Orchestrator 是整套系统的控制面，负责：
-- 解析 YAML 任务并构建依赖图 (`spec.stages` / `spec.dependsOn`)
-- 根据 Worker 资源、心跳与调度策略，派发任务或自动进行数据并行分片
-- 监听 `tasks.events`，更新任务状态、处理重试、聚合分片结果
-- 维护 Worker 注册信息，提供监控与清理接口
+The orchestrator is the control plane for the platform. It parses task YAML,
+tracks dependencies, schedules work to workers via Redis pub/sub, aggregates
+child results, and exposes an HTTP API for clients to submit jobs and retrieve
+artifacts.
 
-## 启动方式
+## Running the service
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
-export ORCHESTRATOR_TOKEN="dev-token"   # 可选：开启 Bearer 鉴权
-export LOG_LEVEL=INFO                     # 可选：调节日志级别
-
-python orchestrator/main.py              # 默认监听 0.0.0.0:8080
+export ORCHESTRATOR_TOKEN="dev-token"     # optional bearer auth
+export ORCHESTRATOR_RESULTS_DIR=./results_host
+python orchestrator/main.py                # listens on 0.0.0.0:8080 by default
 ```
-若需要自定义端口：`export PORT=8000`。
+Set `PORT` if you want to bind to a different TCP port.
 
-### 主要环境变量
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `REDIS_URL` | (必填) | Redis 连接串，例如 `redis://host:6379/0` |
-| `ORCHESTRATOR_TOKEN` | 空 | 若设置，则所有 API 请求需携带 `Authorization: Bearer <token>` |
-| `PORT` | `8080` | HTTP 服务端口 |
-| `LOG_LEVEL` | `INFO` | 日志级别（DEBUG/INFO/WARN/ERROR） |
-| `LOG_FILE` | `orchestrator.log` | 滚动日志文件路径 |
-| `LOG_MAX_BYTES` | `5_242_880` | 单个日志文件大小上限 |
-| `LOG_BACKUP_COUNT` | `5` | 日志轮转份数 |
-| `HEARTBEAT_TTL_SEC` | `120` | Worker 心跳 TTL，超时将被判定为 stale |
+### Runtime environment variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_URL` | – | Connection string for Redis (mandatory). |
+| `ORCHESTRATOR_TOKEN` | empty | If set, the API requires `Authorization: Bearer <token>`. |
+| `ORCHESTRATOR_RESULTS_DIR` | `./results_host` | Root directory where results and uploaded artifacts are stored. |
+| `PORT` | `8080` | HTTP port. |
+| `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+| `LOG_FILE` | `orchestrator.log` | Rolling log file path. |
+| `LOG_MAX_BYTES` | `5_242_880` | Max size of each log file before rotation. |
+| `LOG_BACKUP_COUNT` | `5` | Number of rotated log files to keep. |
+| `HEARTBEAT_TTL_SEC` | `120` | TTL for worker heartbeats before they are considered stale. |
 
-## API 概览
-| 方法 & 路径 | 说明 |
-|-------------|------|
-| `GET /healthz` | 健康检查 |
-| `GET /workers` | 列出所有 Worker（需鉴权）|
-| `GET /workers/{worker_id}` | 查看单个 Worker 详情（需鉴权）|
-| `POST /admin/cleanup` | 清理过期 Worker（需鉴权）|
-| `POST /api/v1/tasks` | 提交 YAML 任务（`Content-Type: text/yaml`）|
-| `GET /api/v1/tasks` | 查看任务列表（需鉴权）|
-| `GET /api/v1/tasks/{task_id}` | 查看单个任务详情（需鉴权）|
+## HTTP API
+| Method & Path | Description |
+|---------------|-------------|
+| `GET /healthz` | Liveness probe. |
+| `GET /workers` | List registered workers (auth required). |
+| `GET /workers/{worker_id}` | Inspect a worker (auth required). |
+| `POST /admin/cleanup` | Remove stale workers (auth required). |
+| `POST /api/v1/tasks` | Submit YAML task definitions (`Content-Type: text/yaml`). |
+| `GET /api/v1/tasks` | List all in-memory task records (auth required). |
+| `GET /api/v1/tasks/{task_id}` | Fetch a single task record (auth required). |
+| `POST /api/v1/results` | Ingest execution results (called by workers). |
+| `GET /api/v1/results/{task_id}` | Retrieve the stored JSON result. |
+| `POST /api/v1/results/{task_id}/files` | Upload an additional artifact (e.g., checkpoint archive). |
+| `GET /api/v1/results/{task_id}/files/{filename}` | Download a previously uploaded artifact. |
 
-> 注意：若配置了 `ORCHESTRATOR_TOKEN`，上述带鉴权接口需要在请求头增加 `Authorization: Bearer <token>`。
+All endpoints that mutate state or expose sensitive information require the
+optional bearer token if `ORCHESTRATOR_TOKEN` is configured.
 
-## 调度与分片
-- 调度器先筛选满足 `spec.resources` 的空闲 Worker，再根据可用度选择策略（best-fit / first-fit / data-parallel）。
-- 推理任务开启 `spec.parallel.enabled: true` 后，可在资源充足时按 `spec.data.split` 均分出多份子任务；子任务完成后会自动聚合。
-- 任务 `spec.output.destination.path` 会原样传递给 Worker，Orchestrator 不会改写路径，只负责下发到子任务中。
+## Scheduling
+- Workers publish their hardware info and heartbeats to Redis. The orchestrator
+  selects idle workers that satisfy requested resources (CPU, memory, GPU
+  requirements).
+- When `spec.parallel.enabled: true` on inference jobs, the scheduler can fan
+  out shards across multiple workers. Results are aggregated before the parent
+  task completes.
+- `spec.stages` pipelines are expanded into distinct tasks with automatically
+  inferred dependencies.
 
-## NFS 共享存储（可选）
-常见做法是在 Orchestrator 主机导出 NFS，方便集中存放 Worker 结果。
+## Artifact handling
+- Every task receives a directory under `ORCHESTRATOR_RESULTS_DIR/<task_id>/`.
+  `POST /api/v1/results` writes the canonical `responses.json` file.
+- Workers can upload additional binaries—such as `final_model.zip` or
+  `final_lora.zip`—by calling `POST /api/v1/results/{task_id}/files`. The new
+  `GET /api/v1/results/{task_id}/files/{filename}` endpoint serves those files to
+  downstream stages.
+- Templates that use staged fine-tuning can reference
+  `${stage.result.final_*_archive_url}` to pull the previous stage's archive via
+  HTTP rather than relying on shared storage.
 
-```bash
-# 1. 创建目录
-sudo mkdir -p /srv/mloc/results
+## Monitoring and maintenance
+- Logs are written to `orchestrator.log` and stdout. Increase `LOG_LEVEL`
+  to `DEBUG` for verbose scheduling details.
+- Redis pub/sub channels `workers.events` and `tasks.events` include lifecycle
+  notifications suitable for dashboards or alerting.
+- Use `POST /admin/cleanup` to remove workers that have missed their heartbeat
+  TTL.
 
-# 2. 安装 NFS server (Debian/Ubuntu)
-sudo apt install -y nfs-kernel-server
-
-# 3. 配置导出（示例：允许 172.28.176.0/24 网段）
-echo "/srv/mloc/results 172.28.176.0/24(rw,sync,no_root_squash)" | sudo tee -a /etc/exports
-sudo exportfs -rav
-
-# 4. 启动服务
-sudo systemctl enable --now nfs-server
-```
-在 Worker 侧挂载后，将 `RESULTS_DIR` 指向挂载点即可（详见 `worker/README.md`）。
-
-## 运行监控
-- 日志：`orchestrator.log`（支持滚动），同时输出到控制台。
-- Redis 中的 `workers.events` 与 `tasks.events` 频道可用于自建监控。
-- 需要更详细调试时，将 `LOG_LEVEL` 调为 `DEBUG`。
-
-## 常见排查
-1. **任务提交成功但无 Worker 执行**：检查 Worker 是否心跳正常、`TASK_TOPIC` 是否正确；调用 `/workers` 查看状态。
-2. **Worker 被判定为 stale**：确认 Worker 机器时间同步、网络稳定，或适当调高 `HEARTBEAT_TTL_SEC`。
-3. **分片任务未并行**：确认任务为 `taskType=inference` 且已设置 `parallel.enabled=true`，并检查是否有足够空闲 Worker。
-
-更多执行层细节和部署示例，请参考顶层 `README.md` 及 `worker/` 目录中的文档。
+## Shared storage (optional)
+If you prefer to bypass HTTP uploads, share a filesystem between the
+orchestrator and workers (for example, via NFS) and point both `RESULTS_DIR`
+variables to the same mount. In this configuration the new artifact endpoints
+are still available but the worker uploads become optional.

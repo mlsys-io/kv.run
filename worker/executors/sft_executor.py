@@ -16,6 +16,7 @@ from trl import SFTTrainer, SFTConfig
 from trl.trainer.utils import entropy_from_logits
 
 from .base_executor import Executor, ExecutionError
+from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
 
 logger = logging.getLogger("worker.sft")
 
@@ -139,12 +140,17 @@ class SFTExecutor(Executor):
             model_source = model_cfg.get("source", {}) or {}
             self._model_name = model_source.get("identifier", "gpt2")
 
-            logger.info("Loading tokenizer and model for SFT: %s", self._model_name)
-            tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+            resume_path = determine_resume_path(spec, training_cfg, out_dir)
+            resume_str = str(resume_path) if resume_path else None
+
+            if resume_path:
+                logger.info("Resuming SFT from %s", resume_path)
+            else:
+                logger.info("Loading tokenizer and model for SFT: %s", self._model_name)
+            tokenizer = AutoTokenizer.from_pretrained(resume_str or self._model_name)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
-
-            model = AutoModelForCausalLM.from_pretrained(self._model_name)
+            model = AutoModelForCausalLM.from_pretrained(resume_str or self._model_name)
             model.config.use_cache = False  # better compatibility with gradient checkpointing
 
             if bool(training_cfg.get("gradient_checkpointing", True)):
@@ -186,11 +192,36 @@ class SFTExecutor(Executor):
             training_successful = True
             logger.info("SFT training completed")
 
+            final_model_path: Optional[Path] = None
             if bool(training_cfg.get("save_model", True)):
                 model_path = out_dir / "final_model"
                 trainer.save_model(model_path)
                 tokenizer.save_pretrained(model_path)
+                final_model_path = model_path
                 logger.info("Saved fine-tuned model to %s", model_path)
+
+            training_time = time.time() - start_time
+            result_payload = {
+                "task_id": task.get("task_id"),
+                "training_successful": training_successful,
+                "training_time_seconds": training_time,
+                "error_message": error_msg,
+                "model_name": self._model_name,
+                "dataset_size": len(train_dataset) if "train_dataset" in locals() else 0,
+                "output_dir": str(out_dir),
+                "checkpoints_dir": str(checkpoint_dir),
+                "resume_from_path": resume_str,
+            }
+
+            if final_model_path is not None:
+                result_payload["final_model_path"] = str(final_model_path)
+                archive_path = archive_model_dir(final_model_path)
+                result_payload["final_model_archive"] = archive_path.name
+                result_payload["final_model_archive_path"] = str(archive_path)
+                logger.info("Prepared model archive at %s", archive_path)
+                self._upload_model_archive(task, archive_path, result_payload)
+
+            return result_payload
 
         except Exception as exc:  # pylint: disable=broad-except
             error_msg = str(exc)
@@ -201,12 +232,15 @@ class SFTExecutor(Executor):
         training_time = time.time() - start_time
 
         result = {
+            "task_id": task.get("task_id") if isinstance(task, dict) else None,
             "training_successful": training_successful,
             "training_time_seconds": training_time,
             "error_message": error_msg,
             "model_name": self._model_name,
             "dataset_size": len(train_dataset) if "train_dataset" in locals() else 0,
             "output_dir": str(out_dir),
+            "checkpoints_dir": str(checkpoint_dir),
+            "resume_from_path": str(resume_path) if 'resume_path' in locals() and resume_path else None,
         }
 
         if training_successful:
@@ -218,6 +252,36 @@ class SFTExecutor(Executor):
         if caught_exc is not None:
             raise ExecutionError(message) from caught_exc
         raise ExecutionError(message)
+
+    def _upload_model_archive(
+        self,
+        task: Dict[str, Any],
+        archive_path: Path,
+        payload: Dict[str, Any],
+    ) -> None:
+        destination = get_http_destination(task)
+        task_id = (task or {}).get("task_id")
+        if not destination or not task_id:
+            return
+
+        upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
+        try:
+            import requests
+
+            with archive_path.open("rb") as fh:
+                files = {"file": (archive_path.name, fh, "application/zip")}
+                response = requests.post(
+                    upload_url,
+                    files=files,
+                    headers=destination["headers"],
+                    timeout=destination["timeout"],
+                )
+                response.raise_for_status()
+            download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
+            payload["final_model_archive_url"] = download_url
+            logger.info("Uploaded SFT model archive to %s", upload_url)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("SFT model archive upload failed for %s: %s", task_id, exc)
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
         data_cfg = spec.get("data", {}) or {}

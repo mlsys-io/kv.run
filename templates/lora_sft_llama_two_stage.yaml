@@ -1,0 +1,100 @@
+# lora_sft_llama_two_stage.yaml
+#
+# Two-stage LoRA fine-tuning that first adapts on GSM8K and continues on
+# OpenAI Humaneval, reusing the adapter checkpoint path emitted by stage one.
+
+apiVersion: mloc/v1
+kind: LoRASFTTask
+metadata:
+  name: llama-lora-two-stage
+
+spec:
+  taskType: "lora_sft"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "8"
+      memory: "48GiB"
+      gpu:
+        count: 1
+        type: "any"
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "meta-llama/Llama-3.1-8B-Instruct"
+
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    bias: "none"
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+    task_type: "CAUSAL_LM"
+    use_rslora: false
+
+  output:
+    destination:
+      type: "http"
+      url: "http://127.0.0.1:8080/api/v1/results"
+      method: "POST"
+      timeoutSec: 15
+      headers:
+        Authorization: "Bearer dev-token"
+        Content-Type: "application/json"
+    artifacts:
+      - "responses.json"
+      - "final_lora"
+
+  stages:
+    - name: gsm8k-stage
+      spec:
+        data:
+          dataset_name: "openai/gsm8k"
+          config_name: "main"
+          split: "train[:2%]"
+          prompt_column: "question"
+          response_column: "answer"
+          separator: "\n\nAnswer: "
+          max_samples: 120
+        training:
+          num_train_epochs: 1
+          batch_size: 2
+          gradient_accumulation_steps: 4
+          learning_rate: 2.0e-4
+          max_seq_length: 512
+          logging_steps: 10
+          save_steps: 50
+          save_model: true
+          gradient_checkpointing: false
+          packing: false
+
+    - name: humaneval-stage
+      spec:
+        checkpoint:
+          load:
+            type: "http"
+            url: "${gsm8k-stage.result.final_lora_archive_url}"
+        data:
+          dataset_name: "openai/openai_humaneval"
+          split: "test"
+          prompt_column: "prompt"
+          response_column: "canonical_solution"
+          separator: "\n\nSolution:\n"
+          max_samples: 164
+        training:
+          num_train_epochs: 1
+          batch_size: 2
+          gradient_accumulation_steps: 4
+          learning_rate: 1.5e-4
+          max_seq_length: 768
+          logging_steps: 10
+          save_steps: 100
+          save_model: true
+          gradient_checkpointing: false
+          packing: false

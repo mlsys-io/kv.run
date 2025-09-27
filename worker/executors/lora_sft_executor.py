@@ -14,14 +14,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from .base_executor import Executor, ExecutionError
+from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
 from .sft_executor import _SafeSFTTrainer, SFTExecutor
 
 try:
-    from peft import LoraConfig, TaskType, get_peft_model
+    from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 except ImportError:  # pragma: no cover - surfaced during runtime when LoRA runs
     LoraConfig = None  # type: ignore[assignment]
     TaskType = None  # type: ignore[assignment]
     get_peft_model = None  # type: ignore[assignment]
+    PeftModel = None  # type: ignore[assignment]
 
 logger = logging.getLogger("worker.sft.lora")
 
@@ -38,7 +40,7 @@ class LoRASFTExecutor(Executor):
         training_successful = False
         error_msg: Optional[str] = None
 
-        if LoraConfig is None or TaskType is None or get_peft_model is None:
+        if LoraConfig is None or TaskType is None or get_peft_model is None or PeftModel is None:
             raise ExecutionError(
                 "peft is required for LoRA SFT tasks. Install the 'peft' package in the worker environment."
             )
@@ -63,35 +65,47 @@ class LoRASFTExecutor(Executor):
             model = AutoModelForCausalLM.from_pretrained(self._model_name)
             model.config.use_cache = False
 
+            resume_path = determine_resume_path(spec, training_cfg, out_dir)
+            resume_str = str(resume_path) if resume_path else None
+
             if bool(training_cfg.get("gradient_checkpointing", False)):
                 model.gradient_checkpointing_enable()
 
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
-            lora_target_modules = lora_cfg.get("target_modules") or ["q_proj", "k_proj", "v_proj", "o_proj"]
-            if not isinstance(lora_target_modules, (list, tuple)):
-                raise ValueError("lora.target_modules must be a list of module names")
-            lora_target_modules = [str(mod) for mod in lora_target_modules]
+            if resume_path:
+                logger.info("Resuming LoRA training from %s", resume_path)
+                model = PeftModel.from_pretrained(
+                    model,
+                    str(resume_path),
+                    is_trainable=True,
+                )
+                logger.info("Loaded existing LoRA adapters; continuing fine-tuning")
+            else:
+                lora_target_modules = lora_cfg.get("target_modules") or ["q_proj", "k_proj", "v_proj", "o_proj"]
+                if not isinstance(lora_target_modules, (list, tuple)):
+                    raise ValueError("lora.target_modules must be a list of module names")
+                lora_target_modules = [str(mod) for mod in lora_target_modules]
 
-            task_type_raw = str(lora_cfg.get("task_type", "CAUSAL_LM")).upper()
-            try:
-                task_type = TaskType[task_type_raw]
-            except KeyError as exc:
-                raise ValueError(f"Unsupported LoRA task_type '{task_type_raw}'") from exc
+                task_type_raw = str(lora_cfg.get("task_type", "CAUSAL_LM")).upper()
+                try:
+                    task_type = TaskType[task_type_raw]
+                except KeyError as exc:
+                    raise ValueError(f"Unsupported LoRA task_type '{task_type_raw}'") from exc
 
-            peft_config = LoraConfig(
-                r=int(lora_cfg.get("r", 16)),
-                lora_alpha=int(lora_cfg.get("alpha", 32)),
-                lora_dropout=float(lora_cfg.get("dropout", 0.05)),
-                bias=str(lora_cfg.get("bias", "none")),
-                target_modules=lora_target_modules,
-                task_type=task_type,
-                use_rslora=bool(lora_cfg.get("use_rslora", False)),
-            )
+                peft_config = LoraConfig(
+                    r=int(lora_cfg.get("r", 16)),
+                    lora_alpha=int(lora_cfg.get("alpha", 32)),
+                    lora_dropout=float(lora_cfg.get("dropout", 0.05)),
+                    bias=str(lora_cfg.get("bias", "none")),
+                    target_modules=lora_target_modules,
+                    task_type=task_type,
+                    use_rslora=bool(lora_cfg.get("use_rslora", False)),
+                )
 
-            model = get_peft_model(model, peft_config)
-            logger.info("LoRA adapters attached: %s", lora_target_modules)
+                model = get_peft_model(model, peft_config)
+                logger.info("Initialized new LoRA adapters: %s", lora_target_modules)
 
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
@@ -125,11 +139,34 @@ class LoRASFTExecutor(Executor):
             training_successful = True
             logger.info("LoRA SFT training completed")
 
+            final_adapter_path: Optional[Path] = None
             if bool(training_cfg.get("save_model", True)):
                 model_path = out_dir / "final_lora"
                 trainer.save_model(model_path)
                 tokenizer.save_pretrained(model_path)
+                final_adapter_path = model_path
                 logger.info("Saved LoRA-adapted weights to %s", model_path)
+
+            training_time = time.time() - start_time
+            result_payload = {
+                "task_id": task.get("task_id"),
+                "training_successful": training_successful,
+                "training_time_seconds": training_time,
+                "error_message": error_msg,
+                "model_name": self._model_name,
+                "dataset_size": len(train_dataset) if "train_dataset" in locals() else 0,
+                "output_dir": str(out_dir),
+                "checkpoints_dir": str(checkpoint_dir),
+                "resume_from_path": resume_str,
+            }
+            if final_adapter_path is not None:
+                result_payload["final_lora_path"] = str(final_adapter_path)
+                archive_path = archive_model_dir(final_adapter_path)
+                result_payload["final_lora_archive"] = archive_path.name
+                result_payload["final_lora_archive_path"] = str(archive_path)
+                logger.info("Prepared LoRA archive at %s", archive_path)
+                self._upload_model_archive(task, archive_path, result_payload)
+            return result_payload
 
         except Exception as exc:  # pylint: disable=broad-except
             error_msg = str(exc)
@@ -139,12 +176,15 @@ class LoRASFTExecutor(Executor):
         training_time = time.time() - start_time
 
         result = {
+            "task_id": task.get("task_id") if isinstance(task, dict) else None,
             "training_successful": training_successful,
             "training_time_seconds": training_time,
             "error_message": error_msg,
             "model_name": self._model_name,
             "dataset_size": len(train_dataset) if "train_dataset" in locals() else 0,
             "output_dir": str(out_dir),
+            "checkpoints_dir": str(checkpoint_dir),
+            "resume_from_path": str(resume_path) if 'resume_path' in locals() and resume_path else None,
         }
 
         if training_successful:
@@ -153,6 +193,36 @@ class LoRASFTExecutor(Executor):
         self.save_json(out_dir / "responses.json", result)
         message = error_msg or "LoRA SFT training failed"
         raise ExecutionError(message)
+
+    def _upload_model_archive(
+        self,
+        task: Dict[str, Any],
+        archive_path: Path,
+        payload: Dict[str, Any],
+    ) -> None:
+        destination = get_http_destination(task)
+        task_id = (task or {}).get("task_id")
+        if not destination or not task_id:
+            return
+
+        upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
+        try:
+            import requests
+
+            with archive_path.open("rb") as fh:
+                files = {"file": (archive_path.name, fh, "application/zip")}
+                response = requests.post(
+                    upload_url,
+                    files=files,
+                    headers=destination["headers"],
+                    timeout=destination["timeout"],
+                )
+                response.raise_for_status()
+            download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
+            payload["final_lora_archive_url"] = download_url
+            logger.info("Uploaded LoRA model archive to %s", upload_url)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("LoRA model archive upload failed for %s: %s", task_id, exc)
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
         data_cfg = spec.get("data", {}) or {}

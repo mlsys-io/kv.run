@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -13,7 +14,8 @@ from typing import Any, Dict, Optional, Union, List, Set
 
 
 import redis
-from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, Body
+from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, Body, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from utils import parse_int_env, now_iso, get_logger, safe_get
@@ -38,7 +40,7 @@ from scheduler import (
     is_data_parallel_enabled,
 )
 from aggregation import maybe_aggregate_parent
-from results import write_result, read_result
+from results import write_result, read_result, result_file_path
 
 # -------------------------
 # Logging & Redis setup
@@ -59,7 +61,7 @@ logger = get_logger(
 results_dir_env = os.getenv("ORCHESTRATOR_RESULTS_DIR")
 if not results_dir_env:
     # Fall back to the worker-style RESULTS_DIR for single-host setups
-    results_dir_env = os.getenv("RESULTS_DIR", "./results")
+    results_dir_env = os.getenv("RESULTS_DIR", "./results_host")
 RESULTS_DIR = Path(results_dir_env).expanduser().resolve()
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -241,6 +243,61 @@ async def get_result(task_id: str, _: Any = Depends(require_auth)):
         return {"task_id": task_id, "raw": content}
 
     return data
+
+
+@app.post("/api/v1/results/{task_id}/files")
+async def upload_result_file(
+    task_id: str,
+    file: UploadFile = File(...),
+    _: Any = Depends(require_auth),
+):
+    safe_task_id = (task_id or "").strip()
+    if not safe_task_id:
+        raise HTTPException(status_code=400, detail="task_id is required")
+
+    filename = Path(file.filename or "")
+    if filename.name != file.filename or filename.name in {"", ".", ".."}:
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    base_dir = result_file_path(RESULTS_DIR, safe_task_id).parent
+    target_path = (base_dir / filename.name).resolve()
+
+    try:
+        target_path.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    with target_path.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    logger.info("Stored artifact for task %s at %s", safe_task_id, target_path)
+    return {"ok": True, "path": str(target_path)}
+
+
+@app.get("/api/v1/results/{task_id}/files/{filename}")
+async def download_result_file(
+    task_id: str,
+    filename: str,
+    _: Any = Depends(require_auth),
+):
+    sanitized = Path(filename)
+    if sanitized.name != filename or sanitized.name in {"", ".", ".."}:
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    base_dir = result_file_path(RESULTS_DIR, task_id).parent
+    target_path = (base_dir / sanitized.name).resolve()
+
+    try:
+        target_path.relative_to(base_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid filename")
+
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+
+    return FileResponse(target_path)
 
 
 # -------------------------
