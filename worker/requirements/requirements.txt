@@ -55,3 +55,10 @@ wikipedia-api==0.8.1
 beautifulsoup4>=4.12.3
 crawl4ai
 ddgs
+
+# P2P networking
+libp2p==0.3.0
+multiaddr
+fastapi
+uvicorn
+trio-asyncio
