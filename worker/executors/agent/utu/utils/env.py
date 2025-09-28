@@ -3,7 +3,7 @@ import os
 
 from dotenv import find_dotenv, load_dotenv
 
-load_dotenv(find_dotenv(raise_error_if_not_found=True), verbose=True, override=True)
+load_dotenv(find_dotenv(raise_error_if_not_found=False), verbose=True, override=True)
 
 
 class EnvUtils:

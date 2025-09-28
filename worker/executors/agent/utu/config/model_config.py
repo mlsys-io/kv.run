@@ -13,11 +13,11 @@ class ModelProviderConfig(ConfigBaseModel):
 
     type: Literal["chat.completions", "responses"] = "chat.completions"
     """model type, supported types: chat.completions, responses"""
-    model: str = EnvUtils.get_env("UTU_LLM_MODEL")
+    model: str = "gpt-4"  # Default value, will be overridden by config
     """model name"""
-    base_url: str | None = EnvUtils.get_env("UTU_LLM_BASE_URL")
+    base_url: str | None = None  # Default value, will be overridden by config
     """model provider base url"""
-    api_key: str | None = EnvUtils.get_env("UTU_LLM_API_KEY")
+    api_key: str | None = None  # Default value, will be overridden by config
     """model provider api key"""
 
 

@@ -12,13 +12,22 @@ import json
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+
+from datasets import load_dataset
 
 # Add agent directory to sys.path for utu imports
 agent_dir = Path(__file__).parent / "agent"
 sys.path.insert(0, str(agent_dir))
 
 from .base_executor import Executor, ExecutionError
+from .graph_templates import build_prompts_from_graph_template
+
+# Constants
+DEFAULT_CONFIG_NAME = "default"
+DEFAULT_SHUFFLE_SEED = 42
+DEFAULT_DATASET_SPLIT = "train"
+DEFAULT_DATASET_COLUMN = "text"
 
 logger = logging.getLogger("worker.agent")
 logger.propagate = False  # Prevent duplicate logs
@@ -40,6 +49,7 @@ class AgentExecutor(Executor):
     def __init__(self):
         super().__init__()
         self._initialized = False
+        self._tasks: List[str] = []
 
     def prepare(self) -> None:
         """Initialize utu (youtu-agent) dependencies"""
@@ -54,8 +64,6 @@ class AgentExecutor(Executor):
             from utu.agents import get_agent
             from utu.config import AgentConfig, ConfigLoader
             from utu.utils import setup_logging, PrintUtils
-
-            logger.debug("utu (youtu-agent) modules imported successfully")
             self._initialized = True
         except ImportError as e:
             logger.error(f"utu modules import failed: {e}")
@@ -63,7 +71,7 @@ class AgentExecutor(Executor):
             logger.error(f"utu path exists: {(agent_dir / 'utu').exists()}")
             raise ExecutionError(f"Failed to import utu modules: {e}")
 
-    def _setup_environment_from_secrets(self):
+    def _setup_environment_from_secrets(self) -> None:
         """Setup environment variables from secrets.yaml if not already set"""
         import yaml
 
@@ -86,6 +94,7 @@ class AgentExecutor(Executor):
                 'UTU_LLM_API_KEY': secrets.get('UTU_LLM_API_KEY'),
                 'SERPER_API_KEY': secrets.get('SERPER_API_KEY'),
                 'JINA_API_KEY': secrets.get('JINA_API_KEY'),
+                'DB_URL': secrets.get('DB_URL'),
             }
 
             # Record successfully loaded configurations
@@ -114,49 +123,158 @@ class AgentExecutor(Executor):
             logger.warning(f"Failed to load secrets.yaml: {e}")
             # Continue without secrets, will use environment variables if available
 
+    def prepare_data(self, spec: Dict[str, Any]) -> None:
+        """Prepare task list from various data sources"""
+        data = spec.get("data") or {}
+
+        # Backward compatibility: if no data config, use spec.task
+        if not data:
+            task_input = spec.get("task", "")
+            if not task_input:
+                raise ExecutionError("Either spec.data or spec.task is required")
+            self._tasks = [task_input]
+            return
+
+        dtype = data.get("type")
+
+        if dtype == "static":
+            task_input = data.get("task", "")
+            if not task_input:
+                raise ExecutionError("spec.data.task is required for type == 'static'")
+            self._tasks = [task_input]
+
+        elif dtype == "dataset":
+            data_url = data.get("url")
+            if not data_url:
+                raise ExecutionError("spec.data.url is required for type == 'dataset'")
+
+            name = data.get("name", None)
+            split = data.get("split", DEFAULT_DATASET_SPLIT)
+            shuffle = bool(data.get("shuffle", False))
+
+            dataset = load_dataset(data_url, name=name, split=split)
+
+            if shuffle:
+                seed = int(data.get("seed", DEFAULT_SHUFFLE_SEED))
+                buffer_size = data.get("buffer_size", None)
+                if buffer_size is None:
+                    dataset = dataset.shuffle(seed=seed)
+                else:
+                    dataset = dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
+
+            column = data.get("column", DEFAULT_DATASET_COLUMN)
+            if column not in dataset.column_names:
+                raise ExecutionError(
+                    f"Column '{column}' not found in dataset. Available: {dataset.column_names}"
+                )
+            self._tasks = [str(x) for x in dataset[column]]
+
+        elif dtype == "list":
+            items = data.get("items", [])
+            if not isinstance(items, list) or any(not isinstance(x, str) for x in items):
+                raise ExecutionError("spec.data.items must be a list of strings for type == 'list'")
+            self._tasks = items
+
+        elif dtype == "graph_template":
+            prompts = build_prompts_from_graph_template(data, spec)
+            self._tasks = prompts
+
+        else:
+            raise ExecutionError(f"Unsupported spec.data.type: {dtype!r}")
+
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
-        """Execute agent task using youtu-agent (utu) framework"""
+        """Execute agent tasks using youtu-agent (utu) framework"""
         self.ensure_dir(out_dir)
 
         # Initialize utu modules
         self.prepare()
 
         spec = task.get("spec", {})
-        agent_config_name = spec.get("configName", "default")
-        task_input = spec.get("task", "")
+        agent_config_name = spec.get("configName", DEFAULT_CONFIG_NAME)
 
+        # Prepare tasks from various data sources
+        self.prepare_data(spec)
 
-        # Execute agent task using the same pattern as run_once.py
+        if not self._tasks:
+            raise ExecutionError("No tasks prepared. Check spec.data configuration")
+
         try:
-            result = asyncio.run(self._run_agent_task(agent_config_name, task_input, out_dir))
+            if len(self._tasks) == 1:
+                # Single task execution (backward compatible)
+                result = asyncio.run(self._run_agent_task(agent_config_name, self._tasks[0], out_dir))
 
-            output = {
-                "ok": True,
-                "config_name": agent_config_name,
-                "task": task_input,
-                "result": result.get("output", ""),
-                "execution_log": result.get("log", []),
-                "usage": result.get("usage", {}),
-                "items": [{"response": result.get("output", "")}]
-            }
+                output = {
+                    "ok": True,
+                    "model": agent_config_name,
+                    "items": [{
+                        "index": 0,
+                        "output": result.get("output", ""),
+                        "finish_reason": "completed"
+                    }],
+                    "usage": {
+                        "execution_time_sec": result.get("usage", {}).get("execution_time_sec", 0),
+                        "num_requests": 1,
+                        "agent_config": agent_config_name
+                    },
+                    "metadata": {
+                        "task": self._tasks[0],
+                        "execution_log": result.get("log", [])
+                    }
+                }
+            else:
+                # Batch execution for multiple tasks
+                results = asyncio.run(self._run_agent_tasks_batch(agent_config_name, self._tasks, out_dir))
+
+                # Transform batch results to standard format
+                items = []
+                for item in results.get("items", []):
+                    items.append({
+                        "index": item["index"],
+                        "output": item["response"],
+                        "finish_reason": "completed" if item["status"] == "completed" else "failed"
+                    })
+
+                output = {
+                    "ok": True,
+                    "model": agent_config_name,
+                    "items": items,
+                    "usage": {
+                        "execution_time_sec": results.get("usage", {}).get("execution_time_sec", 0),
+                        "num_requests": len(self._tasks),
+                        "agent_config": agent_config_name
+                    },
+                    "metadata": {
+                        "tasks_count": len(self._tasks),
+                        "execution_log": results.get("log", []),
+                        "batch_summary": results.get("batch_summary", {})
+                    }
+                }
 
             self.save_json(out_dir / "responses.json", output)
-            logger.debug("Agent task completed successfully")
+            logger.info(f"Agent execution completed: {len(self._tasks)} task(s)")
             return output
 
         except ExecutionError:
             raise
         except Exception as e:
-            logger.exception(f"Agent task failed: {e}")
+            logger.exception(f"Agent execution failed: {e}")
             error_output = {
                 "ok": False,
-                "config_name": agent_config_name,
-                "task": task_input,
-                "error": str(e),
-                "items": []
+                "model": agent_config_name,
+                "items": [],
+                "usage": {
+                    "execution_time_sec": 0,
+                    "num_requests": len(self._tasks),
+                    "agent_config": agent_config_name
+                },
+                "metadata": {
+                    "tasks_count": len(self._tasks),
+                    "error": str(e),
+                    "execution_log": []
+                }
             }
             self.save_json(out_dir / "responses.json", error_output)
-            raise ExecutionError(f"Agent task failed: {e}") from e
+            raise ExecutionError(f"Agent execution failed: {e}") from e
 
     async def _run_agent_task(self, config_name: str, task_input: str, out_dir: Path) -> Dict[str, Any]:
         """Execute agent task using utu framework with detailed logging and timeout control"""
@@ -188,9 +306,14 @@ class AgentExecutor(Executor):
         try:
             # Load agent configuration
             logger.info("Loading agent configuration...")
-            config: AgentConfig = ConfigLoader.load_agent_config(config_name)
-            logger.info(f"✅ Configuration loaded: {config.name if hasattr(config, 'name') else config_name}")
-            execution_log.append(f"Loaded config: {config_name}")
+            try:
+                config: AgentConfig = ConfigLoader.load_agent_config(config_name)
+                logger.info(f"✅ Configuration loaded: {config.name if hasattr(config, 'name') else config_name}")
+                execution_log.append(f"Loaded config: {config_name}")
+            except Exception as config_error:
+                logger.error(f"Failed to load agent config '{config_name}': {config_error}")
+                logger.error(f"Config error type: {type(config_error).__name__}")
+                raise ExecutionError(f"Failed to load agent config '{config_name}': {config_error}")
 
             # Create agent instance
             logger.info("Creating agent instance...")
@@ -322,4 +445,114 @@ class AgentExecutor(Executor):
             "output": output,
             "log": execution_log,
             "usage": usage_stats
+        }
+
+    async def _run_agent_tasks_batch(self, config_name: str, tasks: List[str], out_dir: Path) -> Dict[str, Any]:
+        """Execute multiple agent tasks in batch"""
+        from utu.agents import get_agent
+        from utu.config import AgentConfig, ConfigLoader
+        from utu.tracing.setup import setup_tracing
+
+        logger.info(f"Starting batch execution of {len(tasks)} tasks")
+
+        # Setup tracing
+        try:
+            setup_tracing()
+        except Exception as e:
+            logger.warning(f"Failed to setup tracing: {e}")
+
+        # Setup log directory
+        batch_log_dir = out_dir / "batch_logs"
+        batch_log_dir.mkdir(exist_ok=True)
+
+        execution_log = []
+        all_items = []
+        usage_stats = {}
+
+        try:
+            # Load agent configuration once
+            config: AgentConfig = ConfigLoader.load_agent_config(config_name)
+            agent = get_agent(config)
+
+            # Build agent once for all tasks
+            await asyncio.wait_for(agent.build(), timeout=120)
+            execution_log.append(f"Agent built for batch processing")
+
+            for i, task_input in enumerate(tasks):
+                logger.info(f"Processing task {i+1}/{len(tasks)}")
+                execution_log.append(f"Starting task {i+1}: {task_input[:50]}...")
+
+                try:
+                    # Use streaming execution
+                    result_streaming = agent.run_streamed(input=task_input)
+
+                    # Process stream events (simplified for batch)
+                    async for event in result_streaming.stream_events():
+                        # Log major events only to avoid overwhelming logs
+                        if hasattr(event, 'new_agent') and event.new_agent:
+                            agent_name = getattr(event.new_agent, 'name', 'Unknown')
+                            logger.debug(f"Task {i+1}: Agent switched to {agent_name}")
+
+                    # Wait for completion
+                    await asyncio.wait_for(result_streaming._run_impl_task, timeout=300)
+                    result = result_streaming
+
+                    # Extract output
+                    if hasattr(result, "final_output") and result.final_output:
+                        output = str(result.final_output)
+                    else:
+                        output = getattr(result, "output", None) or str(result)
+
+                    # Save individual task output
+                    task_output_file = batch_log_dir / f"task_{i+1}_output.txt"
+                    with open(task_output_file, "w", encoding="utf-8") as f:
+                        f.write(output)
+
+                    all_items.append({
+                        "index": i,
+                        "task": task_input,
+                        "response": output,
+                        "status": "completed"
+                    })
+
+                    execution_log.append(f"Task {i+1} completed: {len(output)} chars")
+
+                except Exception as e:
+                    logger.error(f"Task {i+1} failed: {e}")
+                    all_items.append({
+                        "index": i,
+                        "task": task_input,
+                        "response": "",
+                        "status": "failed",
+                        "error": str(e)
+                    })
+                    execution_log.append(f"Task {i+1} failed: {e}")
+
+            # Cleanup agent
+            try:
+                await asyncio.wait_for(agent.cleanup(), timeout=30)
+                execution_log.append("Batch agent cleanup completed")
+            except Exception as e:
+                logger.warning(f"Batch agent cleanup failed: {e}")
+
+        except Exception as e:
+            logger.error(f"Batch execution failed: {e}")
+            raise ExecutionError(f"Batch execution failed: {e}")
+
+        # Save batch summary
+        batch_summary = {
+            "total_tasks": len(tasks),
+            "completed": len([item for item in all_items if item["status"] == "completed"]),
+            "failed": len([item for item in all_items if item["status"] == "failed"])
+        }
+
+        summary_file = out_dir / "batch_summary.json"
+        with open(summary_file, "w", encoding="utf-8") as f:
+            json.dump(batch_summary, f, ensure_ascii=False, indent=2)
+
+        return {
+            "items": all_items,
+            "log": execution_log,
+            "usage": usage_stats,
+            "batch_summary": batch_summary
         }

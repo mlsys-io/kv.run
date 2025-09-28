@@ -167,3 +167,5 @@ cython_debug/
 #.idea/
 
 worker/executors/agent/secrets.yaml
+results_workers/
+results_host/

@@ -1,0 +1,34 @@
+apiVersion: mloc/v1
+kind: AgentTask
+metadata:
+  name: agent-simple-test
+  owner: researcher
+  annotations:
+    description: "Simple agent test with basic AI query"
+
+spec:
+  taskType: "agent"
+
+  configName: "default"
+
+  task: "Please provide a brief introduction to artificial intelligence"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "4"
+      memory: "8Gi"
+      gpu:
+        type: "any"
+        count: 0
+
+  agent:
+    timeout: 300
+
+  output:
+    destination:
+      type: "local"
+      path: "agent_simple"
+    artifacts:
+      - "responses.json"
+      - "agent_output.txt"
