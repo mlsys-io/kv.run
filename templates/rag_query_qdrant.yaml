@@ -20,5 +20,37 @@ spec:
     model: "sentence-transformers/all-MiniLM-L6-v2"
   search:
     top_k: 5
-  query: "What is Qdrant?"
+  
+  # Option A: Multiple fixed queries
+  # data:
+  #   type: list
+  #   items:
+  #     - "What is Qdrant?"
+  #     - "How does server-side embedding work in Qdrant?"
+
+  # Option B: Build queries from upstream results (enable spec.dependsOn)
+  # data:
+  #   type: graph_template
+  #   template:
+  #     name: two_column_briefing
+  #     columns:
+  #       - label: "q1"
+  #         node: "<root>"
+  #         path: "result.items[0].output"
+  #       - label: "q2"
+  #         expr: "<root>.result.items[1].output"
+
+  # Option C: Hugging Face dataset (one query per row)
+  data:
+    type: list
+    items:
+      - "What is Qdrant?"
+      - "How does server-side embedding work in Qdrant?"
+
+  output:
+    destination:
+      type: "local"
+      path: "./"
+    artifacts:
+      - "responses.json"
 

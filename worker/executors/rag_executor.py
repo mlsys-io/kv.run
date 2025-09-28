@@ -3,25 +3,7 @@
 RAG (Retrieval-Augmented Generation - Retrieval Only) Executor
 
 This executor queries a Qdrant collection using server-side embeddings.
-Given a user query, it returns the top matching payload paragraphs.
-
-Spec schema (YAML):
-  apiVersion: mloc/v1
-  kind: RetrievalTask
-  metadata:
-    name: my-rag
-  spec:
-    taskType: rag
-    resources: { ... }
-    qdrant:
-      url: "https://<host>:6333"
-      api_key: "<key>"          # optional if not needed
-      collection: "demo_collection"
-    embedding:
-      model: "sentence-transformers/all-MiniLM-L6-v2"
-    search:
-      top_k: 5
-    query: "What is Qdrant?"
+Supports single or multiple queries.
 """
 
 from __future__ import annotations
@@ -34,6 +16,9 @@ from typing import Any, Dict, List, Optional
 from qdrant_client import QdrantClient, models
 
 from .base_executor import Executor, ExecutionError
+from .graph_templates import build_prompts_from_graph_template
+from datasets import load_dataset
+from urllib.parse import urlparse
 
 
 logger = logging.getLogger("worker.rag")
@@ -57,37 +42,95 @@ class RAGExecutor(Executor):
         search_cfg = spec.get("search", {})
         top_k = int(search_cfg.get("top_k", 5))
 
-        query_text = spec.get("query")
+        # -------- Prepare queries (dataset | list | graph_template | single query) --------
+        queries: List[str] = []
+        data_cfg = spec.get("data") or {}
+        dtype = data_cfg.get("type") if isinstance(data_cfg, dict) else None
+        if dtype == "dataset":
+            data_url = data_cfg.get("url")
+            if not data_url:
+                raise ExecutionError("spec.data.url is required for type == 'dataset'.")
+            name = data_cfg.get("name", None)
+            split = data_cfg.get("split", "train")
+            shuffle = bool(data_cfg.get("shuffle", False))
+            column = data_cfg.get("column", "text")
+
+            dataset = load_dataset(data_url, name=name, split=split)
+            if shuffle:
+                seed = int(data_cfg.get("seed", 42))
+                buffer_size = data_cfg.get("buffer_size", None)
+                dataset = dataset.shuffle(seed=seed) if buffer_size is None else dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
+
+            if column not in dataset.column_names:
+                raise ExecutionError(
+                    f"Column '{column}' not found in dataset. Available: {dataset.column_names}"
+                )
+            queries = [str(x) for x in dataset[column]]
+        elif dtype == "list":
+            items = data_cfg.get("items", [])
+            if not isinstance(items, list) or any(not isinstance(x, str) for x in items):
+                raise ExecutionError("spec.data.items must be a list of strings for type == 'list'.")
+            queries = [s for s in items]
+        elif dtype == "graph_template":
+            # Build queries from upstream results using the graph template
+            queries = build_prompts_from_graph_template(data_cfg, spec)
+        else:
+            # Backward compatibility: spec.query as a single string
+            query_text = spec.get("query")
+            if isinstance(query_text, str) and query_text.strip():
+                queries = [query_text]
+            else:
+                raise ExecutionError("Missing input queries: provide spec.query or spec.data")
 
         # Basic validation
         if not url:
             raise ExecutionError("Missing spec.qdrant.url")
         if not collection:
             raise ExecutionError("Missing spec.qdrant.collection")
-        if not isinstance(query_text, str) or not query_text.strip():
-            raise ExecutionError("Missing or empty spec.query")
+        if not queries:
+            raise ExecutionError("No queries prepared. Check spec.query or spec.data configuration.")
 
         logger.info("Connecting Qdrant url=%s collection=%s", url, collection)
         client = QdrantClient(url=url, api_key=api_key) if api_key else QdrantClient(url=url)
 
-        try:
-            logger.info("Querying top_k=%d using model=%s", top_k, model_name)
-            res = client.query_points(
-                collection_name=collection,
-                query=models.Document(text=query_text, model=model_name),
-                limit=top_k,
-            )
-            points = getattr(res, "points", []) or []
-        except Exception as e:
-            logger.exception("Qdrant query failed: %s", e)
-            raise ExecutionError(f"Qdrant query failed: {e}")
+        results_per_query: List[Dict[str, Any]] = []
+        total_items = 0
+        for i, q in enumerate(queries):
+            try:
+                logger.info("Querying top_k=%d using model=%s", top_k, model_name)
+                res = client.query_points(
+                    collection_name=collection,
+                    query=models.Document(text=str(q), model=model_name),
+                    limit=top_k,
+                )
+                points = getattr(res, "points", []) or []
+            except Exception as e:
+                has_api_key = bool(api_key)
+                scheme = host = ""
+                try:
+                    parsed = urlparse(url or "")
+                    scheme = parsed.scheme
+                    host = parsed.netloc
+                except Exception:
+                    pass
+                err_msg = f"Qdrant query failed: {e}"
+                ctx_msg = f"url={url} (scheme={scheme}, host={host}), collection={collection}, has_api_key={has_api_key}"
+                logger.error("%s; context: %s; exception_type=%s", err_msg, ctx_msg, type(e).__name__)
+                print(f"[RAGExecutor] {err_msg}; context: {ctx_msg}; exception_type={type(e).__name__}")
+                raise ExecutionError(f"{err_msg}. {ctx_msg}")
 
-        items: List[Dict[str, Any]] = []
-        for p in points:
-            items.append({
-                "id": getattr(p, "id", None),
-                "score": getattr(p, "score", None),
-                "payload": getattr(p, "payload", None),
+            items: List[Dict[str, Any]] = []
+            for p in points:
+                items.append({
+                    "id": getattr(p, "id", None),
+                    "score": getattr(p, "score", None),
+                    "payload": getattr(p, "payload", None),
+                })
+            total_items += len(items)
+            results_per_query.append({
+                "index": i,
+                "query": str(q),
+                "items": items,
             })
 
         # Compose response
@@ -95,17 +138,19 @@ class RAGExecutor(Executor):
             "ok": True,
             "executor": self.name,
             "qdrant": {"collection": collection, "url": url},
-            "query": query_text,
-            "items": items,
+            "embedding": {"model": model_name},
+            "search": {"top_k": top_k},
+            "queries": results_per_query,
             "usage": {
                 "latency_sec": round(time.time() - start_ts, 4),
-                "num_results": len(items),
+                "num_queries": len(queries),
+                "total_results": total_items,
             },
         }
 
         # Persist outputs
         self.save_json(out_dir / "responses.json", out)
-        logger.info("RAG query completed results=%d", len(items))
+        logger.info("RAG query completed queries=%d total_results=%d", len(queries), total_items)
         return out
 
 
