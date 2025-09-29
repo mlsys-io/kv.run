@@ -8,52 +8,66 @@ metadata:
 
 spec:
   taskType: dpo
-
   resources:
     replicas: 1
     hardware:
       cpu: "8"
-      memory: "24Gi"
+      memory: "32Gi"
       gpu:
         type: any
         count: 1
-
+  
   model:
     source:
       type: huggingface
       identifier: meta-llama/Llama-3.2-1B-Instruct
       revision: main
       trust_remote_code: false
+    config:
+      fp16: true
+      device_map_auto: true
 
   data:
-    # Use a tiny inlined preference set by default to reduce memory.
-    # Replace with your dataset or HF datasets config as needed.
+    # Option 1: Use Hugging Face dataset
+    # dataset_name: "trl-lib/ultrafeedback_binarized"
+    # split: "train[:100]"  # Use small subset for testing
+    # max_samples: 100
+    
+    # Option 2: Provide preference data directly
     preferences:
-      - prompt: "Explain what a function is in programming."
-        chosen: "A function is a reusable block of code that takes inputs, performs a task, and can return a result. It helps organize programs and avoid repetition."
-        rejected: "A function is anything your program does."
-
-      - prompt: "Give advice for debugging Python code."
-        chosen: "Read the traceback carefully, add print statements or use a debugger to inspect variables, and minimize the failing example to isolate the issue."
-        rejected: "Just keep trying random changes until it works."
-
-      - prompt: "What is good commit message practice?"
-        chosen: "Write concise, imperative summaries that explain the why and what; include details in the body if needed."
-        rejected: "Any message is fine as long as it commits."
+      - prompt: "Write a helpful response about Python programming:"
+        chosen: "Python is a versatile programming language known for its readability and extensive libraries. It's great for beginners and widely used in data science, web development, and automation."
+        rejected: "Python is just another programming language. Nothing special about it."
+      
+      - prompt: "Explain machine learning in simple terms:"
+        chosen: "Machine learning is like teaching computers to recognize patterns and make predictions from data, similar to how humans learn from experience."
+        rejected: "Machine learning is complicated math stuff that computers do."
+      
+      - prompt: "Give advice on learning to code:"
+        chosen: "Start with a beginner-friendly language like Python, practice regularly with small projects, and don't be afraid to make mistakes - they're part of learning!"
+        rejected: "Just memorize syntax and you'll be fine."
+      
+      - prompt: "Describe the importance of documentation:"
+        chosen: "Good documentation is essential for code maintainability, team collaboration, and helping future developers (including yourself) understand what the code does and why."
+        rejected: "Documentation is just extra work that slows down development."
+      
+      - prompt: "What's the best way to debug code?"
+        chosen: "Start by reading error messages carefully, use print statements or a debugger to trace the execution, and isolate the problem by testing small parts of your code."
+        rejected: "Just keep changing things randomly until it works."
 
   training:
-    # Conservative defaults to minimize VRAM usage
-    learning_rate: 5e-7
-    batch_size: 1                     # per-device batch size
-    gradient_accumulation_steps: 8    # accumulates to effective batch size of 8
-    num_train_epochs: 1
+    learning_rate: 5e-7        # Lower learning rate for DPO
+    batch_size: 4              # Batch size per device
+    gradient_accumulation_steps: 4
+    num_train_epochs: 1        # Number of epochs
     save_model: true
-    save_freq: 200
-
+    save_freq: 500             # Save every N steps
+    
   output:
     destination:
       type: local
       path: /ignored/by/current-worker
     artifacts:
       - responses.json
-      - final_model/
+      - trained_model/
+      - logs
