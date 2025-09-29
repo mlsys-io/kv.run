@@ -148,9 +148,21 @@ class PPOExecutor(Executor):
                     def wrapped_forward(*args, **kwargs):
                         # Normalize: drop positional tensors and route as kwargs
                         new_kwargs = dict(kwargs)
-                        if len(args) > 0 and isinstance(args[0], torch.Tensor):
-                            new_kwargs["input_ids"] = args[0]
-                            new_args = tuple(a for a in args[1:] if not isinstance(a, torch.Tensor))
+                        new_args = args
+                        if len(args) > 0:
+                            first = args[0]
+                            # Case 1: positional tensor as input_ids
+                            if isinstance(first, torch.Tensor):
+                                new_kwargs["input_ids"] = first
+                                new_args = tuple(a for a in args[1:] if not isinstance(a, torch.Tensor))
+                            # Case 2: positional dict-like with input_ids/attention_mask
+                            elif isinstance(first, dict) and ("input_ids" in first or "attention_mask" in first):
+                                if "input_ids" in first:
+                                    new_kwargs["input_ids"] = first["input_ids"]
+                                if "attention_mask" in first and "attention_mask" not in new_kwargs:
+                                    new_kwargs["attention_mask"] = first["attention_mask"]
+                                # drop the dict positional
+                                new_args = args[1:]
                         else:
                             new_args = args
                         out = orig_forward(*new_args, **new_kwargs)
