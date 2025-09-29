@@ -65,7 +65,10 @@ class SFTExecutor(Executor):
                 except Exception:
                     n_gpus = None
 
-            if allow_multi and not already_spawned and (n_gpus or 0) > 1:
+            # If user requested FSDP explicitly, treat as multi-GPU intent
+            fsdp_intent = bool((spec.get("training") or {}).get("fsdp"))
+
+            if (allow_multi or fsdp_intent) and not already_spawned and (n_gpus or 0) > 1:
                 # Persist the task spec to a file for the launcher entrypoint
                 launcher_dir = out_dir / "_launcher"
                 launcher_dir.mkdir(parents=True, exist_ok=True)
@@ -158,6 +161,19 @@ class SFTExecutor(Executor):
                 # Set to 0 instead of None to satisfy Transformers check `> 0`
                 fsdp_min_num_params = 0
 
+            # Determine if distributed is actually initialized
+            is_dist = False
+            try:
+                import torch.distributed as dist
+                is_dist = dist.is_available() and dist.is_initialized()
+            except Exception:
+                is_dist = False
+
+            # If FSDP requested but not in distributed context, disable to avoid HF error
+            will_use_fsdp = fsdp if is_dist else None
+            if fsdp and not is_dist:
+                logger.warning("FSDP requested but no distributed context detected; disabling FSDP for this run.")
+
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
                 num_train_epochs=float(training_cfg.get("num_train_epochs", 1.0)),
@@ -178,20 +194,23 @@ class SFTExecutor(Executor):
                 pad_token=tokenizer.pad_token,
                 eos_token=tokenizer.eos_token,
                 # FSDP 关键项
-                fsdp=fsdp,
+                fsdp=will_use_fsdp,
                 fsdp_config=fsdp_config,
                 fsdp_min_num_params=fsdp_min_num_params,
             )
 
             # 仅在单卡时手动放置；多卡/FSDP/DDP 交给分布式后端
-            is_multi_gpu = bool(training_cfg.get("allow_multi_gpu", False)) and torch.cuda.device_count() > 1
-            if torch.cuda.is_available() and not is_multi_gpu:
+            if is_dist:
+                logger.info("Distributed mode detected — device placement handled by DDP/FSDP runtime.")
+            is_multi_gpu_intent = bool(training_cfg.get("allow_multi_gpu", False)) and (torch.cuda.device_count() > 1)
+            if torch.cuda.is_available() and not is_dist:
                 target_device = torch.device("cuda:0")
                 model = model.to(target_device)
                 if any(p.device != target_device for _, p in model.named_parameters()):
                     logger.warning("Some parameters not moved to %s; check environment.", target_device)
-            else:
-                logger.info("Distributed mode detected — device placement handled by DDP/FSDP runtime.")
+            elif is_dist:
+                # placement handled by backend
+                pass
 
             # 构造 Trainer（兼容 TRL 版本差异）
             trainer = None
