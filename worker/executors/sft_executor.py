@@ -72,7 +72,22 @@ class SFTExecutor(Executor):
 
             # === FSDP 配置读取 ===
             fsdp = training_cfg.get("fsdp")  # e.g., "full_shard auto_wrap"
-            fsdp_config = training_cfg.get("fsdp_config") or {}
+            fsdp_config = dict(training_cfg.get("fsdp_config") or {})
+            # Sanitize mutually exclusive options to avoid HF error:
+            # "`min_num_params` and `transformer_layer_cls_to_wrap` are mutually exclusive."
+            try:
+                if (
+                    fsdp_config.get("min_num_params") is not None
+                    and fsdp_config.get("transformer_layer_cls_to_wrap")
+                ):
+                    removed = fsdp_config.pop("min_num_params", None)
+                    logger.warning(
+                        "FSDP config: removed min_num_params=%s because transformer_layer_cls_to_wrap is set;"
+                        " these options are mutually exclusive in Transformers.",
+                        removed,
+                    )
+            except Exception:
+                pass
 
             # === SFTConfig：唯一真源控制 batch 与累积 ===
             sft_config = SFTConfig(
