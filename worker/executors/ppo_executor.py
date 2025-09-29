@@ -72,6 +72,32 @@ class PPOExecutor(Executor):
             _ensure_generation_config(model)
             _ensure_generation_config(ref_model)
 
+            # Ensure TRL's PolicyAndValueWrapper can locate the backbone via
+            # `<model>.base_model_prefix` attribute and a matching attribute on the instance.
+            def _ensure_backbone(m):
+                # Common attribute names for the wrapped transformer backbone
+                candidates = [
+                    getattr(m, "pretrained_model", None),
+                    getattr(m, "transformer", None),
+                    getattr(m, "model", None),
+                    getattr(m, "base_model", None),
+                ]
+                backbone = next((c for c in candidates if c is not None), None)
+                if backbone is None:
+                    return
+                # Prefer the underlying module's own base_model_prefix if present
+                prefix = getattr(backbone, "base_model_prefix", None) or "model"
+                try:
+                    setattr(m, prefix, backbone)
+                    m.base_model_prefix = prefix
+                except Exception:
+                    # Fallback to a neutral attribute name
+                    setattr(m, "backbone", backbone)
+                    m.base_model_prefix = "backbone"
+
+            _ensure_backbone(model)
+            _ensure_backbone(ref_model)
+
             logger.info("Models loaded: %s", self._model_name)
 
             # Load dataset
