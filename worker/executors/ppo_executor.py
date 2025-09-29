@@ -138,6 +138,35 @@ class PPOExecutor(Executor):
             _ensure_return_dict(model)
             _ensure_return_dict(ref_model)
 
+            # As a last resort, wrap forward to always return an object with `.logits`
+            try:
+                import types
+                import torch
+                from types import SimpleNamespace
+
+                class _ReturnDictWrapper(torch.nn.Module):
+                    def __init__(self, inner):
+                        super().__init__()
+                        self.inner = inner
+                    def forward(self, *args, **kwargs):
+                        out = self.inner(*args, **kwargs)
+                        if isinstance(out, tuple):
+                            return SimpleNamespace(logits=out[0])
+                        return out
+                    def __getattr__(self, name):
+                        try:
+                            return super().__getattribute__(name)
+                        except AttributeError:
+                            return getattr(self.inner, name)
+
+                # Probe with a tiny dummy to see if tuple persists; avoid real forward
+                # If config still produces tuple at runtime, wrap models.
+                # We cannot run a real forward safely here, so proactively wrap.
+                model = _ReturnDictWrapper(model)
+                ref_model = _ReturnDictWrapper(ref_model)
+            except Exception:
+                pass
+
             logger.info("Models loaded: %s", self._model_name)
 
             # Load dataset
