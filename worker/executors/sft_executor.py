@@ -90,6 +90,17 @@ class SFTExecutor(Executor):
                 pass
 
             # === SFTConfig：唯一真源控制 batch 与累积 ===
+            # If user provided a top-level min_num_params/fsdp_min_num_params, honor it
+            # unless transformer_layer_cls_to_wrap is set (mutually exclusive).
+            fsdp_min_num_params = training_cfg.get("fsdp_min_num_params", training_cfg.get("min_num_params"))
+            if fsdp_config.get("transformer_layer_cls_to_wrap"):
+                if fsdp_min_num_params is not None:
+                    logger.warning(
+                        "Dropping fsdp_min_num_params=%s because transformer_layer_cls_to_wrap is set (mutually exclusive)",
+                        fsdp_min_num_params,
+                    )
+                fsdp_min_num_params = None
+
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
                 num_train_epochs=float(training_cfg.get("num_train_epochs", 1.0)),
@@ -112,6 +123,7 @@ class SFTExecutor(Executor):
                 # FSDP 关键项
                 fsdp=fsdp,
                 fsdp_config=fsdp_config,
+                fsdp_min_num_params=fsdp_min_num_params,
             )
 
             # 仅在单卡时手动放置；多卡/FSDP/DDP 交给分布式后端
