@@ -84,12 +84,18 @@ class SFTExecutor(Executor):
                 cmd = [
                     "torchrun",
                     "--nproc_per_node", str(nproc),
-                    "-m", "executors.sft_dist_entry",
+                    "-m", "worker.executors.sft_dist_entry",
                     str(task_file),
                     str(out_dir),
                 ]
                 env = os.environ.copy()
                 env["TORCHRUN_SPAWNED"] = "1"
+                # Ensure repo root on PYTHONPATH so `worker.executors.*` is importable
+                try:
+                    repo_root = Path(__file__).resolve().parents[2]
+                    env["PYTHONPATH"] = f"{str(repo_root)}:" + env.get("PYTHONPATH", "")
+                except Exception:
+                    pass
                 logger.info("Spawning torchrun for SFT: %s (CUDA_VISIBLE_DEVICES=%s)", " ".join(cmd), env.get("CUDA_VISIBLE_DEVICES"))
                 subprocess.check_call(cmd, env=env)
                 # Read back results written by distributed run
