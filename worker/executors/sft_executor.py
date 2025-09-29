@@ -99,7 +99,8 @@ class SFTExecutor(Executor):
                         "Dropping fsdp_min_num_params=%s because transformer_layer_cls_to_wrap is set (mutually exclusive)",
                         fsdp_min_num_params,
                     )
-                fsdp_min_num_params = None
+                # Set to 0 instead of None to satisfy Transformers check `> 0`
+                fsdp_min_num_params = 0
 
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
