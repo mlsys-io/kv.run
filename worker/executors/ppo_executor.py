@@ -237,11 +237,20 @@ class PPOExecutor(Executor):
                 return {k: [f[k] for f in features] for k in keys}
 
             logger.info("Creating PPOConfig...")
+            # Optional args to control saving behavior and memory
+            ppo_optional = {}
+            if "save_safetensors" in training_config:
+                ppo_optional["save_safetensors"] = bool(training_config["save_safetensors"])  # transformers arg
+            else:
+                # Default off to avoid shared-tensor safetensors error when embeddings are tied
+                ppo_optional["save_safetensors"] = False
+
             ppo_config = PPOConfig(
                 learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
                 batch_size=int(training_config.get("batch_size", 4)),
                 mini_batch_size=int(training_config.get("mini_batch_size", 1)),
                 output_dir=str(checkpoint_dir),
+                **ppo_optional,
             )
             logger.info("PPOConfig created successfully")
 
@@ -426,7 +435,8 @@ class PPOExecutor(Executor):
                 try:
                     logger.info("Saving trained model...")
                     model_save_path = checkpoint_dir / "final_model"
-                    ppo_trainer.save_pretrained(model_save_path)
+                    # Prefer save_model to avoid safetensors shared-tensor errors
+                    ppo_trainer.save_model(model_save_path)
                     logger.info("Model saved to: %s", model_save_path)
                 except Exception as exc:  # pragma: no cover - best effort save
                     logger.warning("Failed to save model: %s", exc)
