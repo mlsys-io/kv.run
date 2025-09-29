@@ -14,7 +14,7 @@ artifacts (for example, fine-tuned checkpoints).
 | `WORKER_ID` | random | Override to keep a stable worker identifier. |
 | `WORKER_TAGS` | empty | Comma-separated tags used by the scheduler. |
 | `LOG_LEVEL` | `INFO` | Worker log level. |
-| `ORCHESTRATOR_BASE_URL` | empty | Optional base URL (e.g. `http://127.0.0.1:8080`) used to construct artifact download links when templates specify `checkpoint.load` blocks without an explicit URL. |
+| `ORCHESTRATOR_BASE_URL` | empty | Optional base URL (e.g. `http://127.0.0.1:8000`) used to construct artifact download links when templates specify `checkpoint.load` blocks without an explicit URL. |
 
 > When `spec.output.destination.type` is `http`, the worker uploads generated
 > model archives back to the orchestrator using `POST /api/v1/results/{task_id}/files`.
@@ -25,7 +25,7 @@ artifacts (for example, fine-tuned checkpoints).
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
 export RESULTS_DIR=./results_workers
-export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8080"
+export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8000"
 python worker/main.py
 ```
 

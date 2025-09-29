@@ -46,7 +46,7 @@ spec:
   output:
     destination:
       type: "http"
-      url: "http://orchestrator:8080/api/v1/results"   # update host/port to your orchestrator endpoint
+      url: "http://orchestrator:8000/api/v1/results"   # update host/port to your orchestrator endpoint
       method: "POST"
       timeoutSec: 10
       headers:

@@ -1,8 +1,8 @@
-# sft_llama_3b.yaml
+# sft_llama3b_fsdp.yaml
 apiVersion: mloc/v1
 kind: SFTTask
 metadata:
-  name: llama-3b-sft-demo
+  name: llama-3b-sft-fsdp
 
 spec:
   taskType: "sft"
@@ -31,37 +31,36 @@ spec:
     max_samples: 200
 
   training:
+    # 多卡可见
     allow_multi_gpu: true
     visible_devices: "0,1"
+
+    # 训练超参（唯一真源）
     num_train_epochs: 2
-    batch_size: 2                      # == DS.train_micro_batch_size_per_gpu
-    gradient_accumulation_steps: 4     # == DS.gradient_accumulation_steps
+    batch_size: 2
+    gradient_accumulation_steps: 4
     learning_rate: 5.0e-5
     max_seq_length: 512
     logging_steps: 5
     save_steps: 50
+    save_strategy: "steps"
     save_model: true
+
+    # 稳定性/显存
     gradient_checkpointing: true
     packing: false
     fp16: false
     bf16: true
-    deepspeed:
-      zero_optimization:
-        stage: 2
-        offload_optimizer:
-          device: cpu
-          pin_memory: true
-        allgather_partitions: true
-        allgather_bucket_size: 200000000
-        reduce_scatter: true
-        reduce_bucket_size: 200000000
-        overlap_comm: true
-        contiguous_gradients: true
-      bf16:
-        enabled: true
-      zero_allow_untested_optimizer: true
-      train_micro_batch_size_per_gpu: 2
-      gradient_accumulation_steps: 4
+
+    # === FSDP 开启 ===
+    fsdp: "full_shard auto_wrap"
+    fsdp_config:
+      transformer_layer_cls_to_wrap: "LlamaDecoderLayer"
+      min_num_params: 100000000         # 1e8；按需调小可包得更细
+      sync_module_states: true
+      forward_prefetch: true
+      limit_all_gathers: true
+      use_orig_params: true
 
   output:
     destination:

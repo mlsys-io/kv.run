@@ -624,25 +624,6 @@ wheels = [
 ]
 
 [[package]]
-name = "deepspeed"
-version = "0.17.6"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "einops" },
-    { name = "hjson" },
-    { name = "msgpack" },
-    { name = "ninja" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "py-cpuinfo" },
-    { name = "pydantic" },
-    { name = "torch" },
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/a9/6130c78d84980ed636092be1a262d6429d539105724e675b6f65ef74a05e/deepspeed-0.17.6.tar.gz", hash = "sha256:b3318064ee5798e8a27d201ea8b888f0439973c4eac9af9ab381dd1862ebdf45", size = 1592402, upload-time = "2025-09-19T19:57:50.473Z" }
-
-[[package]]
 name = "depyf"
 version = "0.19.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1158,15 +1139,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/6c/3c/28cc4db153a7601a996985bcb564f7b8f5b9e1a706c7537aad4b4809f358/hf_xet-1.1.9-cp37-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:ad1022e9a998e784c97b2173965d07fe33ee26e4594770b7785a8cc8f922cd95", size = 3251429, upload-time = "2025-08-27T23:05:16.471Z" },
     { url = "https://files.pythonhosted.org/packages/84/17/7caf27a1d101bfcb05be85850d4aa0a265b2e1acc2d4d52a48026ef1d299/hf_xet-1.1.9-cp37-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:86754c2d6d5afb11b0a435e6e18911a4199262fe77553f8c50d75e21242193ea", size = 3354643, upload-time = "2025-08-27T23:05:17.828Z" },
     { url = "https://files.pythonhosted.org/packages/cd/50/0c39c9eed3411deadcc98749a6699d871b822473f55fe472fad7c01ec588/hf_xet-1.1.9-cp37-abi3-win_amd64.whl", hash = "sha256:5aad3933de6b725d61d51034e04174ed1dce7a57c63d530df0014dea15a40127", size = 2804797, upload-time = "2025-08-27T23:05:20.77Z" },
-]
-
-[[package]]
-name = "hjson"
-version = "3.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/82/e5/0b56d723a76ca67abadbf7fb71609fb0ea7e6926e94fcca6c65a85b36a0e/hjson-3.1.0.tar.gz", hash = "sha256:55af475a27cf83a7969c808399d7bccdec8fb836a07ddbd574587593b9cdcf75", size = 40541, upload-time = "2022-08-13T02:53:01.919Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/7f/13cd798d180af4bf4c0ceddeefba2b864a63c71645abc0308b768d67bb81/hjson-3.1.0-py3-none-any.whl", hash = "sha256:65713cdcf13214fb554eb8b4ef803419733f4f5e551047c9b711098ab7186b89", size = 54018, upload-time = "2022-08-13T02:52:59.899Z" },
 ]
 
 [[package]]
@@ -1787,7 +1759,6 @@ dependencies = [
     { name = "chunkr-ai" },
     { name = "colorlog" },
     { name = "datasets" },
-    { name = "deepspeed" },
     { name = "docker" },
     { name = "fastapi" },
     { name = "fastembed" },
@@ -1833,7 +1804,6 @@ requires-dist = [
     { name = "chunkr-ai", specifier = ">=0.1.0" },
     { name = "colorlog", specifier = ">=6.9.0" },
     { name = "datasets", specifier = ">=4.0.0" },
-    { name = "deepspeed", specifier = ">=0.17.6" },
     { name = "docker", specifier = ">=7.1.0" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "fastembed", specifier = ">=0.7.3" },
@@ -1862,7 +1832,7 @@ requires-dist = [
     { name = "sqlmodel", specifier = ">=0.0.24" },
     { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "toml", specifier = ">=0.10.2" },
-    { name = "trl", specifier = ">=0.8.0" },
+    { name = "trl", specifier = "==0.23.0" },
     { name = "uvicorn", specifier = ">=0.35.0" },
     { name = "vllm", specifier = ">=0.10.1.1" },
     { name = "wikipedia-api", specifier = ">=0.8.1" },
@@ -4420,16 +4390,16 @@ wheels = [
 
 [[package]]
 name = "trl"
-version = "0.22.2"
+version = "0.23.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "accelerate" },
     { name = "datasets" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c9/70/cf4f7936669457103d10aaa235fcf17d58f902f389acef93cb392118e019/trl-0.22.2.tar.gz", hash = "sha256:343203711339cb4f200b78fee35efa39655b2e6a0f8a63ce0b077973e689c12a", size = 497063, upload-time = "2025-09-03T14:41:58.055Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/18/c18e27f6156cf961791ca7abcd4ee5fc8c5ae0fbb936c59827852ee118f5/trl-0.23.0.tar.gz", hash = "sha256:abfe0ecfa6b7e46022552b9dd0cc288bf2c4ef19364ce7765d10218b62b618f1", size = 515765, upload-time = "2025-09-10T04:16:42.377Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/89/b10851fcad71e9ff7a6e74c5981476a7a3aa4efc0e9ef24176eb859990c9/trl-0.22.2-py3-none-any.whl", hash = "sha256:b5b058bc2b876f3b9d04e3ac54c6ad085b09f5583becefefd10d88a7cd150e21", size = 544789, upload-time = "2025-09-03T14:41:56.419Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/81/035cace9b8853df794db0499299273abef30de889602587efa2a95c7dccb/trl-0.23.0-py3-none-any.whl", hash = "sha256:bb8f35a6a1531bad2d52032add29380413bd9b032d133ab6df16d2191f14f9e6", size = 564734, upload-time = "2025-09-10T04:16:40.34Z" },
 ]
 
 [[package]]

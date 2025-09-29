@@ -10,7 +10,7 @@ artifacts.
 export REDIS_URL="redis://localhost:6379/0"
 export ORCHESTRATOR_TOKEN="dev-token"     # optional bearer auth
 export ORCHESTRATOR_RESULTS_DIR=./results_host
-python orchestrator/main.py                # listens on 0.0.0.0:8080 by default
+python orchestrator/main.py                # listens on 0.0.0.0:8000 by default
 ```
 Set `PORT` if you want to bind to a different TCP port.
 
@@ -20,7 +20,7 @@ Set `PORT` if you want to bind to a different TCP port.
 | `REDIS_URL` | – | Connection string for Redis (mandatory). |
 | `ORCHESTRATOR_TOKEN` | empty | If set, the API requires `Authorization: Bearer <token>`. |
 | `ORCHESTRATOR_RESULTS_DIR` | `./results_host` | Root directory where results and uploaded artifacts are stored. |
-| `PORT` | `8080` | HTTP port. |
+| `PORT` | `8000` | HTTP port. |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
 | `LOG_FILE` | `orchestrator.log` | Rolling log file path. |
 | `LOG_MAX_BYTES` | `5_242_880` | Max size of each log file before rotation. |

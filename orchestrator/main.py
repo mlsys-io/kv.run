@@ -703,6 +703,6 @@ async def get_task(task_id: str = ApiPath(..., min_length=1), _: Any = Depends(r
 
 if __name__ == "__main__":
     import uvicorn
-    port = parse_int_env("PORT", 8080)
+    port = parse_int_env("PORT", 8000)
     logger.info("Starting on 0.0.0.0:%d", port)
     uvicorn.run(app, host="0.0.0.0", port=port, reload=False)

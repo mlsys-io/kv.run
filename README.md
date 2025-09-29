@@ -56,14 +56,14 @@ export REDIS_URL="redis://localhost:6379/0"
 export ORCHESTRATOR_TOKEN="dev-token"  # optional auth
 export ORCHESTRATOR_RESULTS_DIR=./results_host
 python orchestrator/main.py
-# listens on 0.0.0.0:8080 (override with PORT)
+# listens on 0.0.0.0:8000 (override with PORT)
 ```
 
 ### 3. Run a Worker
 ```bash
 export REDIS_URL="redis://localhost:6379/0"
 export RESULTS_DIR=./results_workers    # or an NFS mount
-export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8080"  # enable HTTP artifact uploads
+export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8000"  # enable HTTP artifact uploads
 python worker/main.py
 ```
 Workers register with Redis, stream heartbeats, and execute incoming tasks.
@@ -72,7 +72,7 @@ If the YAML sets `spec.output.destination.path`, results go there; otherwise
 
 ### 4. Submit a task
 ```bash
-curl -X POST "http://localhost:8080/api/v1/tasks" \
+curl -X POST "http://localhost:8000/api/v1/tasks" \
   -H "Authorization: Bearer dev-token" \
   -H "Content-Type: text/yaml" \
   --data-binary @templates/inference_vllm_mistral.yaml
@@ -89,7 +89,7 @@ spec:
   output:
     destination:
       type: http
-      url: http://127.0.0.1:8080/api/v1/results
+      url: http://127.0.0.1:8000/api/v1/results
       headers:
         Authorization: "Bearer dev-token"
 ```

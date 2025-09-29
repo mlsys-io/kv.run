@@ -3,7 +3,7 @@
 set -eu
 
 : "${TOKEN:=dev-token}"
-ORCH_URL="${ORCH_URL:-http://localhost:8080}"
+ORCH_URL="${ORCH_URL:-http://localhost:8000}"
 
 echo "Submitting two-stage SFT task to ${ORCH_URL}" >&2
 curl -sS -X POST "${ORCH_URL}/api/v1/tasks" \
