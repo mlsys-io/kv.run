@@ -149,6 +149,19 @@ class PPOExecutor(Executor):
             except Exception as _e:
                 logger.warning("Skipping dataset tokenization step: %s", _e)
 
+            # Provide a simple collator to avoid Transformers' padding collator
+            # attempting to pad string fields like 'query'. This lets TRL handle
+            # tokenization/length management internally during PPO.
+            def _simple_collate(features):
+                if not features:
+                    return {}
+                # Prefer passing only 'query' if present
+                if "query" in features[0]:
+                    return {"query": [f["query"] for f in features]}
+                # Otherwise, generic stacking without padding
+                keys = features[0].keys()
+                return {k: [f[k] for f in features] for k in keys}
+
             logger.info("Creating PPOConfig...")
             ppo_config = PPOConfig(
                 learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
@@ -181,6 +194,8 @@ class PPOExecutor(Executor):
                     "train_dataset": dataset,
                     "dataset": dataset,
                     "output_dir": str(checkpoint_dir),
+                    "data_collator": _simple_collate,
+                    "collate_fn": _simple_collate,
                 }
 
                 positional = []
