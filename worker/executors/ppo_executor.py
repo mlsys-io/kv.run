@@ -122,6 +122,22 @@ class PPOExecutor(Executor):
             _ensure_grad_ckpt_flag(model)
             _ensure_grad_ckpt_flag(ref_model)
 
+            # Ensure models return ModelOutput (not tuple) so TRL can access `.logits`
+            def _ensure_return_dict(m):
+                try:
+                    if hasattr(m, "config") and hasattr(m.config, "use_return_dict"):
+                        m.config.use_return_dict = True
+                    # Also try backbone config if present
+                    if hasattr(m, "base_model_prefix") and hasattr(m, m.base_model_prefix):
+                        backbone = getattr(m, m.base_model_prefix)
+                        if hasattr(backbone, "config") and hasattr(backbone.config, "use_return_dict"):
+                            backbone.config.use_return_dict = True
+                except Exception:
+                    pass
+
+            _ensure_return_dict(model)
+            _ensure_return_dict(ref_model)
+
             logger.info("Models loaded: %s", self._model_name)
 
             # Load dataset
