@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from datasets import Dataset
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, GenerationConfig
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 
 from .base_executor import Executor, ExecutionError
@@ -50,6 +50,27 @@ class PPOExecutor(Executor):
             # Load models - PPO requires policy model and reference model
             model = AutoModelForCausalLMWithValueHead.from_pretrained(self._model_name)
             ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(self._model_name)
+
+            # Some TRL versions expect `generation_config` on the policy/ref models.
+            # AutoModelForCausalLMWithValueHead may not set it; ensure presence.
+            def _ensure_generation_config(m):
+                if not hasattr(m, "generation_config") or m.generation_config is None:
+                    try:
+                        gen_cfg = GenerationConfig.from_pretrained(self._model_name)
+                    except Exception:
+                        try:
+                            gen_cfg = GenerationConfig.from_model_config(getattr(m, "config", None))
+                        except Exception:
+                            gen_cfg = GenerationConfig()
+                    try:
+                        m.generation_config = gen_cfg
+                    except Exception:
+                        # As a fallback, set eos_token_id on config if available
+                        if hasattr(m, "config") and hasattr(gen_cfg, "eos_token_id"):
+                            m.config.eos_token_id = getattr(gen_cfg, "eos_token_id", None)
+
+            _ensure_generation_config(model)
+            _ensure_generation_config(ref_model)
 
             logger.info("Models loaded: %s", self._model_name)
 
