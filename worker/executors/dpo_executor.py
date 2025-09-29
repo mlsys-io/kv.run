@@ -72,13 +72,36 @@ class DPOExecutor(Executor):
 
             # Initialize DPO trainer
             logger.info("Creating DPOTrainer...")
-            dpo_trainer = DPOTrainer(
-                model=model,
-                ref_model=ref_model,
-                args=dpo_config,
-                train_dataset=dataset,
-                tokenizer=tokenizer,
-            )
+            # TRL has changed constructor args across versions. Prefer `tokenizer`,
+            # but gracefully fall back to `processing_class` or no tokenizer.
+            try:
+                dpo_trainer = DPOTrainer(
+                    model=model,
+                    ref_model=ref_model,
+                    args=dpo_config,
+                    train_dataset=dataset,
+                    tokenizer=tokenizer,
+                )
+            except TypeError as e:
+                if "unexpected keyword argument 'tokenizer'" in str(e):
+                    try:
+                        dpo_trainer = DPOTrainer(
+                            model=model,
+                            ref_model=ref_model,
+                            args=dpo_config,
+                            train_dataset=dataset,
+                            processing_class=tokenizer,
+                        )
+                    except TypeError:
+                        # Final fallback: construct without tokenizer-related arg
+                        dpo_trainer = DPOTrainer(
+                            model=model,
+                            ref_model=ref_model,
+                            args=dpo_config,
+                            train_dataset=dataset,
+                        )
+                else:
+                    raise
             logger.info("DPOTrainer created successfully")
 
             # Simple training - just call train()
