@@ -282,6 +282,20 @@ class PPOExecutor(Executor):
                     return self.v_head(hidden_states)
 
             reward_adapter = _RewardAdapter(model)
+            # Attach .score to underlying models too, in case TRL bypasses reward_model
+            try:
+                import types as _types_mod
+                def _score_impl(self, hidden_states):
+                    head = getattr(self, "v_head", None) or getattr(self, "value_head", None)
+                    if head is None:
+                        raise AttributeError("Model lacks v_head/value_head for reward scoring")
+                    return head(hidden_states)
+                if not hasattr(model, "score"):
+                    model.score = _types_mod.MethodType(_score_impl, model)
+                if not hasattr(ref_model, "score"):
+                    ref_model.score = _types_mod.MethodType(_score_impl, ref_model)
+            except Exception:
+                pass
 
             def build_trainer() -> PPOTrainer:
                 sig = inspect.signature(PPOTrainer.__init__)
