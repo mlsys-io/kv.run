@@ -1,0 +1,59 @@
+apiVersion: mloc/v1
+kind: TrainingTask
+metadata:
+  name: llama-1b-dpo-training
+  owner: alice
+  annotations:
+    description: DPO training for Llama-3.2 1B Instruct with minimal VRAM usage
+
+spec:
+  taskType: dpo
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "8"
+      memory: "24Gi"
+      gpu:
+        type: any
+        count: 1
+
+  model:
+    source:
+      type: huggingface
+      identifier: meta-llama/Llama-3.2-1B-Instruct
+      revision: main
+      trust_remote_code: false
+
+  data:
+    # Use a tiny inlined preference set by default to reduce memory.
+    # Replace with your dataset or HF datasets config as needed.
+    preferences:
+      - prompt: "Explain what a function is in programming."
+        chosen: "A function is a reusable block of code that takes inputs, performs a task, and can return a result. It helps organize programs and avoid repetition."
+        rejected: "A function is anything your program does."
+
+      - prompt: "Give advice for debugging Python code."
+        chosen: "Read the traceback carefully, add print statements or use a debugger to inspect variables, and minimize the failing example to isolate the issue."
+        rejected: "Just keep trying random changes until it works."
+
+      - prompt: "What is good commit message practice?"
+        chosen: "Write concise, imperative summaries that explain the why and what; include details in the body if needed."
+        rejected: "Any message is fine as long as it commits."
+
+  training:
+    # Conservative defaults to minimize VRAM usage
+    learning_rate: 5e-7
+    batch_size: 1                     # per-device batch size
+    gradient_accumulation_steps: 8    # accumulates to effective batch size of 8
+    num_train_epochs: 1
+    save_model: true
+    save_freq: 200
+
+  output:
+    destination:
+      type: local
+      path: /ignored/by/current-worker
+    artifacts:
+      - responses.json
+      - final_model/
