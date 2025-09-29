@@ -256,6 +256,8 @@ class PPOExecutor(Executor):
             class _RewardAdapter(torch.nn.Module):
                 def __init__(self, value_head_model):
                     super().__init__()
+                    # Keep reference to underlying LM/value-head model for delegation
+                    self._lm = value_head_model
                     head = getattr(value_head_model, "v_head", None)
                     if head is None:
                         # Try common alternatives or construct a linear head
@@ -278,8 +280,20 @@ class PPOExecutor(Executor):
                             raise AttributeError("Cannot infer hidden_size for reward head")
                         head = torch.nn.Linear(int(hidden), 1, bias=False)
                     self.v_head = head
+                    # Mirror key attributes expected by TRL utils
+                    self.base_model_prefix = getattr(value_head_model, "base_model_prefix", "model")
+                    if hasattr(value_head_model, self.base_model_prefix):
+                        setattr(self, self.base_model_prefix, getattr(value_head_model, self.base_model_prefix))
+                    for attr in ("config", "generation_config"):
+                        if hasattr(value_head_model, attr):
+                            setattr(self, attr, getattr(value_head_model, attr))
                 def score(self, hidden_states):
                     return self.v_head(hidden_states)
+                def __getattr__(self, name):
+                    try:
+                        return super().__getattr__(name)
+                    except AttributeError:
+                        return getattr(self.__dict__.get("_lm", object()), name)
 
             reward_adapter = _RewardAdapter(model)
             # Attach .score to underlying models too, in case TRL bypasses reward_model
