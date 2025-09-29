@@ -6,7 +6,6 @@ Simple implementation using TRL's DPOTrainer with built-in train() method.
 """
 
 import time
-import os
 import logging
 from pathlib import Path
 from typing import Dict, Any
@@ -36,16 +35,6 @@ class DPOExecutor(Executor):
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Ensure correct CUDA device selection under torchrun/DDP
-            try:
-                import torch  # local import to avoid hard dependency at import time
-                local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
-                if local_rank >= 0 and torch.cuda.is_available():
-                    torch.cuda.set_device(local_rank)
-                    logger.info("Set CUDA device to local_rank=%d", local_rank)
-            except Exception as _e:  # pragma: no cover
-                logger.debug("Skipping CUDA device set: %s", _e)
-
             # Get model configuration
             model_config = spec.get("model", {})
             model_source = model_config.get("source", {})
@@ -85,10 +74,6 @@ class DPOExecutor(Executor):
             # DeepSpeed config file path (string) if provided
             if "deepspeed" in training_config:
                 optional_args["deepspeed"] = training_config["deepspeed"]
-
-            # Explicit DDP backend if provided (e.g., 'nccl')
-            if "ddp_backend" in training_config:
-                optional_args["ddp_backend"] = training_config["ddp_backend"]
 
             dpo_config = DPOConfig(
                 learning_rate=float(training_config.get("learning_rate", 5e-7)),
