@@ -141,11 +141,20 @@ class PPOExecutor(Executor):
             # As a last resort, monkey-patch forward to always expose `.logits`
             try:
                 from types import SimpleNamespace
+                import torch
 
                 def _patch_forward_returns_logits(m):
                     orig_forward = m.forward
                     def wrapped_forward(*args, **kwargs):
-                        out = orig_forward(*args, **kwargs)
+                        # Avoid multiple values for input_ids by normalizing call
+                        new_kwargs = dict(kwargs)
+                        if len(args) > 0:
+                            # If positional input provided, move it into kwargs when needed
+                            if isinstance(args[0], torch.Tensor):
+                                if "input_ids" not in new_kwargs:
+                                    new_kwargs["input_ids"] = args[0]
+                                args = ()
+                        out = orig_forward(*args, **new_kwargs)
                         if isinstance(out, tuple):
                             return SimpleNamespace(logits=out[0])
                         return out
