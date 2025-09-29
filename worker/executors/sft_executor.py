@@ -7,115 +7,17 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from datasets import Dataset, load_dataset
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
-from trl.trainer.utils import entropy_from_logits
 
 from .base_executor import Executor, ExecutionError
 from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
 
 logger = logging.getLogger("worker.sft")
-
-
-class _SafeSFTTrainer(SFTTrainer):
-    """SFTTrainer variant with safer entropy aggregation under DataParallel."""
-
-    @staticmethod
-    def _entropy_from_mask(per_token_entropy: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        mask = attention_mask.to(device=per_token_entropy.device, dtype=per_token_entropy.dtype)
-
-        entropy_vals = per_token_entropy.reshape(-1)
-        mask_flat = mask.reshape(-1)
-
-        target_len = entropy_vals.size(0)
-        if mask_flat.size(0) != target_len:
-            if mask_flat.size(0) > target_len:
-                mask_flat = mask_flat[:target_len]
-            else:
-                pad = torch.zeros(target_len - mask_flat.size(0), device=mask_flat.device, dtype=mask_flat.dtype)
-                mask_flat = torch.cat((mask_flat, pad), dim=0)
-
-        mask_sum = mask_flat.sum()
-        if mask_sum <= 0:
-            return torch.tensor(0.0, device=mask_flat.device, dtype=per_token_entropy.dtype)
-
-        return torch.sum(entropy_vals * mask_flat) / mask_sum
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):  # type: ignore[override]
-        mode = "train" if self.model.training else "eval"
-        inputs["use_cache"] = False
-        loss, outputs = super(SFTTrainer, self).compute_loss(  # call into base Trainer
-            model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
-        )
-
-        try:
-            if not self.args.use_liger_kernel:
-                with torch.no_grad():
-                    per_token_entropy = entropy_from_logits(outputs.logits)
-                    if "attention_mask" in inputs:
-                        attention_mask = inputs["attention_mask"]
-                        if self.num_virtual_tokens:
-                            virtual_mask = attention_mask.new_ones(attention_mask.size(0), self.num_virtual_tokens)
-                            attention_mask = torch.cat((virtual_mask, attention_mask), dim=1)
-                        entropy = self._entropy_from_mask(per_token_entropy, attention_mask)
-                    elif "position_ids" in inputs:
-                        entropy = torch.mean(per_token_entropy)
-                    else:
-                        raise ValueError("Expected 'attention_mask' or 'position_ids' in inputs.")
-                    entropy = self.accelerator.gather_for_metrics(entropy).mean().item()
-                self._metrics[mode]["entropy"].append(entropy)
-
-            if "attention_mask" in inputs:
-                num_tokens_in_batch = self.accelerator.gather_for_metrics(inputs["attention_mask"].sum()).sum().item()
-            elif "position_ids" in inputs:
-                local_num_tokens = torch.tensor(inputs["position_ids"].size(1), device=inputs["position_ids"].device)
-                num_tokens_in_batch = self.accelerator.gather_for_metrics(local_num_tokens).sum().item()
-            else:
-                raise ValueError("Expected 'attention_mask' or 'position_ids' in inputs.")
-            self._total_train_tokens += num_tokens_in_batch
-            self._metrics[mode]["num_tokens"] = [self._total_train_tokens]
-
-            if "labels" in inputs and not self.args.use_liger_kernel:
-                with torch.no_grad():
-                    shift_logits = outputs.logits[..., :-1, :].contiguous()
-                    shift_labels = inputs["labels"][..., 1:].contiguous()
-                    shift_logits = shift_logits[:, self.num_virtual_tokens :, :]
-
-                    batch_dim = shift_logits.size(0)
-                    if shift_labels.size(0) != batch_dim:
-                        shift_labels = shift_labels[:batch_dim]
-
-                    seq_dim = shift_logits.size(1)
-                    if shift_labels.size(1) != seq_dim:
-                        seq_dim = min(seq_dim, shift_labels.size(1))
-                        shift_logits = shift_logits[:, :seq_dim, :]
-                        shift_labels = shift_labels[:, :seq_dim]
-
-                    predictions = shift_logits.argmax(dim=-1)
-                    mask = shift_labels != -100
-                    if mask.size() != predictions.size():
-                        mask = mask[: predictions.size(0), : predictions.size(1)]
-                        shift_labels = shift_labels[: predictions.size(0), : predictions.size(1)]
-
-                    correct_predictions = (predictions == shift_labels) & mask
-                    total_tokens = mask.sum()
-                    correct_tokens = correct_predictions.sum()
-                    correct_tokens = self.accelerator.gather_for_metrics(correct_tokens)
-                    total_tokens = self.accelerator.gather_for_metrics(total_tokens)
-                    total_sum = total_tokens.sum()
-                    accuracy = (correct_tokens.sum() / total_sum).item() if total_sum > 0 else 0.0
-                    self._metrics[mode]["mean_token_accuracy"].append(accuracy)
-        except Exception as exc:  # defensive fallback for metric edge cases
-            logger.debug("Metric computation skipped: %s", exc)
-
-        if return_outputs:
-            return (loss, outputs)
-        return loss
-
 
 class SFTExecutor(Executor):
     """Execute supervised fine-tuning jobs with TRL's SFTTrainer."""
@@ -159,6 +61,8 @@ class SFTExecutor(Executor):
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
+            deepspeed_config = self._resolve_deepspeed_config(training_cfg, logger)
+
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
                 num_train_epochs=float(training_cfg.get("num_train_epochs", 1.0)),
@@ -178,17 +82,71 @@ class SFTExecutor(Executor):
                 gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
                 pad_token=tokenizer.pad_token,
                 eos_token=tokenizer.eos_token,
+                deepspeed=deepspeed_config,
             )
 
-            trainer = _SafeSFTTrainer(
-                model=model,
-                args=sft_config,
-                train_dataset=train_dataset,
-                processing_class=tokenizer,
-            )
+            # 训练前强制将模型放到期望设备（单卡时避免DataParallel设备不一致问题）
+            if torch.cuda.is_available():
+                target_device = torch.device("cuda:0")
+                model = model.to(target_device)
+                # 校验全部参数一致
+                bad = [n for n,p in model.named_parameters() if p.device != target_device]
+                if bad:
+                    logger.warning("Parameters not on target device after .to(): %s", bad[:5])
+                else:
+                    logger.debug("All parameters moved to %s", target_device)
+
+            trainer = None
+            tried_errors = []
+            for variant in ("tokenizer", "processing_class", "none"):
+                try:
+                    if variant == "tokenizer":
+                        trainer = SFTTrainer(
+                            model=model,
+                            args=sft_config,
+                            train_dataset=train_dataset,
+                            tokenizer=tokenizer,
+                        )
+                    elif variant == "processing_class":
+                        trainer = SFTTrainer(
+                            model=model,
+                            args=sft_config,
+                            train_dataset=train_dataset,
+                            processing_class=tokenizer,
+                        )
+                    else:  # fallback without explicit tokenizer
+                        trainer = SFTTrainer(
+                            model=model,
+                            args=sft_config,
+                            train_dataset=train_dataset,
+                        )
+                    break
+                except TypeError as e:  # 版本不兼容重试
+                    tried_errors.append(str(e))
+                    trainer = None
+                    continue
+            if trainer is None:
+                raise TypeError("Failed to construct SFTTrainer with tried variants: " + " | ".join(tried_errors))
 
             logger.info("Starting supervised fine-tuning run")
-            trainer.train()
+            need_retry = False
+            try:
+                trainer.train()
+            except RuntimeError as rte:
+                # 针对设备不匹配错误进行一次重试
+                if "parameters and buffers" in str(rte) and torch.cuda.is_available():
+                    logger.error("RuntimeError detected (device mismatch); attempting one retry with model.reto(cuda:0)")
+                    model.to(torch.device("cuda:0"))
+                    torch.cuda.empty_cache()
+                    need_retry = True
+                else:
+                    raise
+            if need_retry:
+                try:
+                    trainer.model = model  # 确保trainer引用最新设备模型
+                    trainer.train()
+                except Exception:
+                    raise
             training_successful = True
             logger.info("SFT training completed")
 
@@ -372,3 +330,29 @@ class SFTExecutor(Executor):
             available,
             preferred,
         )
+
+    @staticmethod
+    def _resolve_deepspeed_config(
+        training_cfg: Dict[str, Any],
+        log: Optional[logging.Logger] = None,
+    ) -> Optional[Union[str, Dict[str, Any]]]:
+        ds_cfg = training_cfg.get("deepspeed")
+        if not ds_cfg:
+            return None
+
+        active_logger = log or logger
+
+        if isinstance(ds_cfg, dict):
+            active_logger.info("Using inline DeepSpeed configuration")
+            return ds_cfg
+
+        if isinstance(ds_cfg, str):
+            config_path = Path(ds_cfg).expanduser()
+            if not config_path.is_absolute():
+                config_path = (Path.cwd() / config_path).resolve()
+            if not config_path.exists():
+                raise ValueError(f"DeepSpeed config file '{config_path}' not found")
+            active_logger.info("Using DeepSpeed configuration from %s", config_path)
+            return str(config_path)
+
+        raise ValueError("training.deepspeed must be a mapping or path string")

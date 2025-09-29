@@ -35,8 +35,7 @@ spec:
     max_samples: 200
 
   training:
-    allow_multi_gpu: true
-    visible_devices: "0,2"
+    allow_multi_gpu: false
     num_train_epochs: 2
     batch_size: 4
     gradient_accumulation_steps: 4
@@ -51,7 +50,7 @@ spec:
   output:
     destination:
       type: "local"
-      path: "./sft_llama_8b"
+      path: "./sft_llama_1b"
     artifacts:
       - "responses.json"
       - "final_model"

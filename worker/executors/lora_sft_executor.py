@@ -15,7 +15,7 @@ from trl import SFTConfig
 
 from .base_executor import Executor, ExecutionError
 from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
-from .sft_executor import _SafeSFTTrainer, SFTExecutor
+from .sft_executor import SFTExecutor
 
 try:
     from peft import LoraConfig, TaskType, get_peft_model, PeftModel
@@ -74,6 +74,8 @@ class LoRASFTExecutor(Executor):
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
+            deepspeed_config = SFTExecutor._resolve_deepspeed_config(training_cfg, logger)
+
             if resume_path:
                 logger.info("Resuming LoRA training from %s", resume_path)
                 model = PeftModel.from_pretrained(
@@ -125,14 +127,42 @@ class LoRASFTExecutor(Executor):
                 packing=bool(training_cfg.get("packing", False)),
                 pad_token=tokenizer.pad_token,
                 eos_token=tokenizer.eos_token,
+                deepspeed=deepspeed_config,
             )
 
-            trainer = _SafeSFTTrainer(
-                model=model,
-                args=sft_config,
-                train_dataset=train_dataset,
-                processing_class=tokenizer,
-            )
+            # 使用原生 SFTTrainer，兼容不同版本参数(tokenizer / processing_class)
+            from trl import SFTTrainer  # 局部导入避免循环
+            trainer = None
+            tried_errors = []
+            for variant in ("tokenizer", "processing_class", "none"):
+                try:
+                    if variant == "tokenizer":
+                        trainer = SFTTrainer(
+                            model=model,
+                            args=sft_config,
+                            train_dataset=train_dataset,
+                            tokenizer=tokenizer,
+                        )
+                    elif variant == "processing_class":
+                        trainer = SFTTrainer(
+                            model=model,
+                            args=sft_config,
+                            train_dataset=train_dataset,
+                            processing_class=tokenizer,
+                        )
+                    else:
+                        trainer = SFTTrainer(
+                            model=model,
+                            args=sft_config,
+                            train_dataset=train_dataset,
+                        )
+                    break
+                except TypeError as e:
+                    tried_errors.append(str(e))
+                    trainer = None
+                    continue
+            if trainer is None:
+                raise TypeError("Failed to construct SFTTrainer with tried variants: " + " | ".join(tried_errors))
 
             logger.info("Starting LoRA supervised fine-tuning run")
             trainer.train()
