@@ -326,6 +326,7 @@ class PPOExecutor(Executor):
                     "model": model,
                     "ref_model": ref_model,
                     "train_dataset": dataset,
+                    "eval_dataset": dataset,
                     "dataset": dataset,
                     "output_dir": str(checkpoint_dir),
                     "data_collator": _simple_collate,
@@ -375,6 +376,22 @@ class PPOExecutor(Executor):
                 return PPOTrainer(*positional, **kwargs)
 
             ppo_trainer = build_trainer()
+            # Ensure eval dataset/dataloader exist for TRL 0.23 `generate_completions`.
+            try:
+                if getattr(ppo_trainer, "eval_dataset", None) is None:
+                    setattr(ppo_trainer, "eval_dataset", dataset)
+                # Try to build eval_dataloader via trainer helper if available
+                if getattr(ppo_trainer, "eval_dataloader", None) is None:
+                    build_fn = getattr(ppo_trainer, "get_eval_dataloader", None) or getattr(ppo_trainer, "_build_eval_dataloader", None)
+                    if callable(build_fn):
+                        try:
+                            edl = build_fn()
+                            if edl is not None:
+                                setattr(ppo_trainer, "eval_dataloader", edl)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             # Ensure TRL uses our reward adapter (with .score) even if constructor
             # variant didn't bind it as expected.
             try:
