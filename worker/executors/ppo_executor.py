@@ -252,15 +252,34 @@ class PPOExecutor(Executor):
             import inspect
 
             # Build a lightweight reward adapter expected by TRL 0.23 (needs .score)
-            class _RewardAdapter:
+            import torch
+            class _RewardAdapter(torch.nn.Module):
                 def __init__(self, value_head_model):
-                    self._vh = value_head_model
-                def score(self, hidden_states):
-                    # hidden_states: (..., hidden_size) -> (..., 1)
-                    head = getattr(self._vh, "v_head", None)
+                    super().__init__()
+                    head = getattr(value_head_model, "v_head", None)
                     if head is None:
-                        raise AttributeError("Value head model lacks v_head for reward scoring")
-                    return head(hidden_states)
+                        # Try common alternatives or construct a linear head
+                        head = getattr(value_head_model, "value_head", None)
+                    if head is None:
+                        hidden = None
+                        try:
+                            hidden = getattr(value_head_model.config, "hidden_size", None)
+                        except Exception:
+                            pass
+                        if hidden is None:
+                            # Try backbone config
+                            try:
+                                if hasattr(value_head_model, "base_model_prefix") and hasattr(value_head_model, value_head_model.base_model_prefix):
+                                    backbone = getattr(value_head_model, value_head_model.base_model_prefix)
+                                    hidden = getattr(getattr(backbone, "config", None), "hidden_size", None)
+                            except Exception:
+                                pass
+                        if hidden is None:
+                            raise AttributeError("Cannot infer hidden_size for reward head")
+                        head = torch.nn.Linear(int(hidden), 1, bias=False)
+                    self.v_head = head
+                def score(self, hidden_states):
+                    return self.v_head(hidden_states)
 
             reward_adapter = _RewardAdapter(model)
 
