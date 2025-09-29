@@ -347,6 +347,25 @@ class PPOExecutor(Executor):
                 return PPOTrainer(*positional, **kwargs)
 
             ppo_trainer = build_trainer()
+            # Ensure TRL uses our reward adapter (with .score) even if constructor
+            # variant didn't bind it as expected.
+            try:
+                if hasattr(ppo_trainer, "reward_model"):
+                    # Move adapter to same device as policy/value if possible
+                    try:
+                        import torch
+                        dev = None
+                        if hasattr(model, "device"):
+                            dev = model.device
+                        elif hasattr(model, "parameters"):
+                            dev = next(model.parameters()).device
+                        if dev is not None and isinstance(reward_adapter, torch.nn.Module):
+                            reward_adapter.to(dev)
+                    except Exception:
+                        pass
+                    ppo_trainer.reward_model = reward_adapter
+            except Exception:
+                pass
             logger.info("PPOTrainer created successfully")
 
             # Simple training - just call train()
