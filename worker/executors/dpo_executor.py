@@ -59,6 +59,22 @@ class DPOExecutor(Executor):
             logger.info("Dataset loaded with %d samples", len(dataset))
 
             logger.info("Creating DPOConfig...")
+            # Allow optional multi-GPU and memory-saving args via YAML
+            optional_args = {}
+            for key in (
+                "fp16",
+                "bf16",
+                "gradient_checkpointing",
+                "ddp_find_unused_parameters",
+                "torch_empty_cache_steps",
+            ):
+                if key in training_config:
+                    optional_args[key] = training_config[key]
+
+            # DeepSpeed config file path (string) if provided
+            if "deepspeed" in training_config:
+                optional_args["deepspeed"] = training_config["deepspeed"]
+
             dpo_config = DPOConfig(
                 learning_rate=float(training_config.get("learning_rate", 5e-7)),
                 per_device_train_batch_size=int(training_config.get("batch_size", 4)),
@@ -67,6 +83,7 @@ class DPOExecutor(Executor):
                 output_dir=str(checkpoint_dir),
                 save_steps=int(training_config.get("save_freq", 500)),
                 logging_steps=10,
+                **optional_args,
             )
             logger.info("DPOConfig created successfully")
 
