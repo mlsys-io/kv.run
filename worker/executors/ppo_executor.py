@@ -146,15 +146,14 @@ class PPOExecutor(Executor):
                 def _patch_forward_returns_logits(m):
                     orig_forward = m.forward
                     def wrapped_forward(*args, **kwargs):
-                        # Avoid multiple values for input_ids by normalizing call
+                        # Normalize: drop positional tensors and route as kwargs
                         new_kwargs = dict(kwargs)
-                        if len(args) > 0:
-                            # If positional input provided, move it into kwargs when needed
-                            if isinstance(args[0], torch.Tensor):
-                                if "input_ids" not in new_kwargs:
-                                    new_kwargs["input_ids"] = args[0]
-                                args = ()
-                        out = orig_forward(*args, **new_kwargs)
+                        if len(args) > 0 and isinstance(args[0], torch.Tensor):
+                            new_kwargs["input_ids"] = args[0]
+                            new_args = tuple(a for a in args[1:] if not isinstance(a, torch.Tensor))
+                        else:
+                            new_args = args
+                        out = orig_forward(*new_args, **new_kwargs)
                         if isinstance(out, tuple):
                             return SimpleNamespace(logits=out[0])
                         return out
