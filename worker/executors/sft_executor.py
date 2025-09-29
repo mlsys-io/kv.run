@@ -68,6 +68,10 @@ class SFTExecutor(Executor):
             # If user requested FSDP explicitly, treat as multi-GPU intent
             fsdp_intent = bool((spec.get("training") or {}).get("fsdp"))
 
+            logger.info(
+                "SFT spawn decision: allow_multi=%s fsdp_intent=%s already_spawned=%s n_gpus=%s",
+                allow_multi, fsdp_intent, already_spawned, n_gpus,
+            )
             if (allow_multi or fsdp_intent) and not already_spawned and (n_gpus or 0) > 1:
                 # Persist the task spec to a file for the launcher entrypoint
                 launcher_dir = out_dir / "_launcher"
@@ -86,7 +90,7 @@ class SFTExecutor(Executor):
                 ]
                 env = os.environ.copy()
                 env["TORCHRUN_SPAWNED"] = "1"
-                logger.info("Spawning torchrun for SFT: %s", " ".join(cmd))
+                logger.info("Spawning torchrun for SFT: %s (CUDA_VISIBLE_DEVICES=%s)", " ".join(cmd), env.get("CUDA_VISIBLE_DEVICES"))
                 subprocess.check_call(cmd, env=env)
                 # Read back results written by distributed run
                 resp_path = out_dir / "responses.json"
@@ -170,9 +174,11 @@ class SFTExecutor(Executor):
                 is_dist = False
 
             # If FSDP requested but not in distributed context, disable to avoid HF error
-            will_use_fsdp = fsdp if is_dist else None
+            # Transformers expects `fsdp` to be an iterable (list/str). Use [] when disabled.
+            will_use_fsdp = fsdp if is_dist else []
             if fsdp and not is_dist:
                 logger.warning("FSDP requested but no distributed context detected; disabling FSDP for this run.")
+                fsdp_config = None
 
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
