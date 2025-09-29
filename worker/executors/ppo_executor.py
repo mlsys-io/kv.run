@@ -69,56 +69,72 @@ class PPOExecutor(Executor):
 
             # Initialize PPO trainer with correct API
             logger.info("Creating PPOTrainer...")
-            # TRL PPOTrainer signature varies widely across versions. We try a cascade:
-            # 1) tokenizer kwarg
-            # 2) processing_class kwarg
-            # 3) no tokenizer arg
-            # 4) some versions require reward_model/value_model (and possibly processing_class)
+            # TRL PPOTrainer signature varies widely across versions. Use
+            # introspection to build arguments positionally/with kwargs to fit.
             import inspect
 
-            def has_param(name: str) -> bool:
-                try:
-                    sig = inspect.signature(PPOTrainer.__init__)
-                    return name in sig.parameters
-                except Exception:
-                    return False
+            def build_trainer() -> PPOTrainer:
+                sig = inspect.signature(PPOTrainer.__init__)
+                params = list(sig.parameters.values())[1:]  # drop self
 
-            base = dict(args=ppo_config, model=model, ref_model=ref_model, train_dataset=dataset)
+                mapping = {
+                    "config": ppo_config,
+                    "args": ppo_config,
+                    "ppo_config": ppo_config,
+                    "processing_class": tokenizer,
+                    "tokenizer": tokenizer,
+                    "reward_model": ref_model,
+                    "value_model": model,
+                    "model": model,
+                    "ref_model": ref_model,
+                    "train_dataset": dataset,
+                    "dataset": dataset,
+                    "output_dir": str(checkpoint_dir),
+                }
 
-            tried_errors = []
-            for variant in ("tokenizer", "processing_class", "none", "with_rewards_tokenizer", "with_rewards_processing_class", "with_rewards_none"):
-                try:
-                    if variant == "tokenizer":
-                        ppo_trainer = PPOTrainer(tokenizer=tokenizer, **base)
-                    elif variant == "processing_class":
-                        ppo_trainer = PPOTrainer(processing_class=tokenizer, **base)
-                    elif variant == "none":
-                        ppo_trainer = PPOTrainer(**base)
+                positional = []
+                kwargs = {}
+                missing_required = []
+
+                for p in params:
+                    if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                        continue
+                    if p.default is inspect._empty:
+                        if p.name in mapping:
+                            positional.append(mapping[p.name])
+                        else:
+                            # Some older versions expect (config, processing_class, reward_model, value_model)
+                            # Try to satisfy common required names by aliases
+                            alias = None
+                            if p.name == "processing_class" and "tokenizer" in mapping:
+                                alias = mapping["tokenizer"]
+                            elif p.name == "dataset" and "train_dataset" in mapping:
+                                alias = mapping["train_dataset"]
+                            if alias is not None:
+                                positional.append(alias)
+                            else:
+                                missing_required.append(p.name)
                     else:
-                        # reward/value-model variants
-                        reward_kwargs = dict(reward_model=ref_model, value_model=model)
-                        payload = {**base, **reward_kwargs}
-                        if variant == "with_rewards_tokenizer":
-                            if has_param("tokenizer"):
-                                ppo_trainer = PPOTrainer(tokenizer=tokenizer, **payload)
-                                break
-                            else:
-                                raise TypeError("tokenizer not accepted")
-                        elif variant == "with_rewards_processing_class":
-                            if has_param("processing_class"):
-                                ppo_trainer = PPOTrainer(processing_class=tokenizer, **payload)
-                                break
-                            else:
-                                raise TypeError("processing_class not accepted")
-                        else:  # with_rewards_none
-                            ppo_trainer = PPOTrainer(**payload)
-                    break
-                except TypeError as e:
-                    tried_errors.append(str(e))
-                    ppo_trainer = None
-                    continue
-            if ppo_trainer is None:
-                raise TypeError("Failed to construct PPOTrainer with tried variants: " + " | ".join(tried_errors))
+                        # Optional: provide via kwargs if we have a value
+                        if p.name in mapping:
+                            kwargs[p.name] = mapping[p.name]
+
+                if missing_required:
+                    # As a fallback, try known positional legacy order
+                    # (config/args, processing_class, reward_model, value_model, model, ref_model, train_dataset)
+                    legacy_seq = []
+                    for key in ("args", "processing_class", "reward_model", "value_model", "model", "ref_model", "train_dataset"):
+                        if key in mapping:
+                            legacy_seq.append(mapping[key])
+                    try:
+                        return PPOTrainer(*legacy_seq, **kwargs)
+                    except TypeError:
+                        # Raise with details for debugging
+                        raise TypeError(f"PPOTrainer signature mismatch; missing required params: {missing_required}")
+
+                return PPOTrainer(*positional, **kwargs)
+
+            ppo_trainer = build_trainer()
             logger.info("PPOTrainer created successfully")
 
             # Simple training - just call train()
