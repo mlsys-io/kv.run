@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+import json
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -47,7 +49,52 @@ class SFTExecutor(Executor):
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        # Internal torchrun launcher: spawn multi-GPU training as distributed subprocesses
         try:
+            allow_multi = bool(training_cfg.get("allow_multi_gpu", False))
+            already_spawned = os.environ.get("TORCHRUN_SPAWNED") == "1"
+            # Determine requested GPU count
+            vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get("visible_devices")
+            n_gpus = None
+            if vis:
+                n_gpus = len(str(vis).split(","))
+            else:
+                try:
+                    if torch.cuda.is_available():
+                        n_gpus = torch.cuda.device_count()
+                except Exception:
+                    n_gpus = None
+
+            if allow_multi and not already_spawned and (n_gpus or 0) > 1:
+                # Persist the task spec to a file for the launcher entrypoint
+                launcher_dir = out_dir / "_launcher"
+                launcher_dir.mkdir(parents=True, exist_ok=True)
+                task_file = launcher_dir / "task_spec.json"
+                with task_file.open("w") as fh:
+                    json.dump(task, fh)
+
+                nproc = int(training_cfg.get("nproc_per_node", n_gpus))
+                cmd = [
+                    "torchrun",
+                    "--nproc_per_node", str(nproc),
+                    "-m", "executors.sft_dist_entry",
+                    str(task_file),
+                    str(out_dir),
+                ]
+                env = os.environ.copy()
+                env["TORCHRUN_SPAWNED"] = "1"
+                logger.info("Spawning torchrun for SFT: %s", " ".join(cmd))
+                subprocess.check_call(cmd, env=env)
+                # Read back results written by distributed run
+                resp_path = out_dir / "responses.json"
+                if resp_path.exists():
+                    return self.load_json(resp_path)
+                # If not present, continue to error handling
+        except Exception as spawn_exc:
+            logger.exception("Failed to launch distributed SFT via torchrun: %s", spawn_exc)
+
+        try:
+            # Proceed with in-process training (single GPU or inside torchrun)
             model_cfg = spec.get("model", {}) or {}
             model_source = model_cfg.get("source", {}) or {}
             self._model_name = model_source.get("identifier", "gpt2")
