@@ -69,13 +69,35 @@ class PPOExecutor(Executor):
 
             # Initialize PPO trainer with correct API
             logger.info("Creating PPOTrainer...")
-            ppo_trainer = PPOTrainer(
-                args=ppo_config,
-                tokenizer=tokenizer,
-                model=model,
-                ref_model=ref_model,
-                train_dataset=dataset,
-            )
+            # TRL PPOTrainer signature varies by version. Prefer `tokenizer`,
+            # fall back to `processing_class`, then no tokenizer arg.
+            try:
+                ppo_trainer = PPOTrainer(
+                    args=ppo_config,
+                    tokenizer=tokenizer,
+                    model=model,
+                    ref_model=ref_model,
+                    train_dataset=dataset,
+                )
+            except TypeError as e:
+                if "unexpected keyword argument 'tokenizer'" in str(e):
+                    try:
+                        ppo_trainer = PPOTrainer(
+                            args=ppo_config,
+                            processing_class=tokenizer,
+                            model=model,
+                            ref_model=ref_model,
+                            train_dataset=dataset,
+                        )
+                    except TypeError:
+                        ppo_trainer = PPOTrainer(
+                            args=ppo_config,
+                            model=model,
+                            ref_model=ref_model,
+                            train_dataset=dataset,
+                        )
+                else:
+                    raise
             logger.info("PPOTrainer created successfully")
 
             # Simple training - just call train()
