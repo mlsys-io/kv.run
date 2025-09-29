@@ -155,11 +155,22 @@ class PPOExecutor(Executor):
             def _simple_collate(features):
                 if not features:
                     return {}
-                # Prefer passing only 'query' if present
-                if "query" in features[0]:
+                f0 = features[0]
+                # If already tokenized, pad into tensors
+                if "input_ids" in f0:
+                    items = []
+                    for f in features:
+                        item = {"input_ids": f["input_ids"]}
+                        if "attention_mask" in f:
+                            item["attention_mask"] = f["attention_mask"]
+                        items.append(item)
+                    batch = tokenizer.pad(items, padding=True, return_tensors="pt")
+                    return batch
+                # Otherwise, pass raw queries through
+                if "query" in f0:
                     return {"query": [f["query"] for f in features]}
-                # Otherwise, generic stacking without padding
-                keys = features[0].keys()
+                # Fallback: return all fields as lists
+                keys = f0.keys()
                 return {k: [f[k] for f in features] for k in keys}
 
             logger.info("Creating PPOConfig...")
