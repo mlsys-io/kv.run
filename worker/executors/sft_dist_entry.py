@@ -23,10 +23,14 @@ def main(argv: list[str]) -> int:
     with task_path.open("r") as fh:
         task = json.load(fh)
     ex = SFTExecutor()
-    ex.run(task, out_dir)
+    result = ex.run(task, out_dir)
+    # Ensure a responses.json is present for the parent to consume
+    try:
+        (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
-

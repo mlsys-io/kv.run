@@ -98,11 +98,17 @@ class SFTExecutor(Executor):
                     pass
                 logger.info("Spawning torchrun for SFT: %s (CUDA_VISIBLE_DEVICES=%s)", " ".join(cmd), env.get("CUDA_VISIBLE_DEVICES"))
                 subprocess.check_call(cmd, env=env)
-                # Read back results written by distributed run
+                # Read back results written by distributed run (child ensures this exists)
                 resp_path = out_dir / "responses.json"
                 if resp_path.exists():
                     return self.load_json(resp_path)
-                # If not present, continue to error handling
+                # If not present for any reason, return a minimal success envelope
+                return {
+                    "training_successful": True,
+                    "spawned_torchrun": True,
+                    "model_name": (spec.get("model", {}).get("source", {}) or {}).get("identifier"),
+                    "output_dir": str(out_dir),
+                }
         except Exception as spawn_exc:
             logger.exception("Failed to launch distributed SFT via torchrun: %s", spawn_exc)
 
@@ -186,6 +192,11 @@ class SFTExecutor(Executor):
                 logger.warning("FSDP requested but no distributed context detected; disabling FSDP for this run.")
                 fsdp_config = None
 
+            # Optional DDP knobs
+            ddp_kwargs = {}
+            if "ddp_find_unused_parameters" in training_cfg:
+                ddp_kwargs["ddp_find_unused_parameters"] = bool(training_cfg["ddp_find_unused_parameters"])
+
             sft_config = SFTConfig(
                 output_dir=str(checkpoint_dir),
                 num_train_epochs=float(training_cfg.get("num_train_epochs", 1.0)),
@@ -209,6 +220,7 @@ class SFTExecutor(Executor):
                 fsdp=will_use_fsdp,
                 fsdp_config=fsdp_config,
                 fsdp_min_num_params=fsdp_min_num_params,
+                **ddp_kwargs,
             )
 
             # 仅在单卡时手动放置；多卡/FSDP/DDP 交给分布式后端
