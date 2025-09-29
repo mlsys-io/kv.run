@@ -138,6 +138,21 @@ class PPOExecutor(Executor):
             _ensure_return_dict(model)
             _ensure_return_dict(ref_model)
 
+            # Ensure hidden states are returned for reward computation in TRL 0.23
+            def _ensure_output_hidden_states(m):
+                try:
+                    if hasattr(m, "config") and hasattr(m.config, "output_hidden_states"):
+                        m.config.output_hidden_states = True
+                    if hasattr(m, "base_model_prefix") and hasattr(m, m.base_model_prefix):
+                        backbone = getattr(m, m.base_model_prefix)
+                        if hasattr(backbone, "config") and hasattr(backbone.config, "output_hidden_states"):
+                            backbone.config.output_hidden_states = True
+                except Exception:
+                    pass
+
+            _ensure_output_hidden_states(model)
+            _ensure_output_hidden_states(ref_model)
+
             # As a last resort, monkey-patch forward to always expose `.logits`
             try:
                 from types import SimpleNamespace
@@ -236,6 +251,19 @@ class PPOExecutor(Executor):
             # introspection to build arguments positionally/with kwargs to fit.
             import inspect
 
+            # Build a lightweight reward adapter expected by TRL 0.23 (needs .score)
+            class _RewardAdapter:
+                def __init__(self, value_head_model):
+                    self._vh = value_head_model
+                def score(self, hidden_states):
+                    # hidden_states: (..., hidden_size) -> (..., 1)
+                    head = getattr(self._vh, "v_head", None)
+                    if head is None:
+                        raise AttributeError("Value head model lacks v_head for reward scoring")
+                    return head(hidden_states)
+
+            reward_adapter = _RewardAdapter(model)
+
             def build_trainer() -> PPOTrainer:
                 sig = inspect.signature(PPOTrainer.__init__)
                 params = list(sig.parameters.values())[1:]  # drop self
@@ -246,7 +274,7 @@ class PPOExecutor(Executor):
                     "ppo_config": ppo_config,
                     "processing_class": tokenizer,
                     "tokenizer": tokenizer,
-                    "reward_model": ref_model,
+                    "reward_model": reward_adapter,
                     "value_model": model,
                     "model": model,
                     "ref_model": ref_model,
