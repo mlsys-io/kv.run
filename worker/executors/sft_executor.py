@@ -35,6 +35,15 @@ class SFTExecutor(Executor):
 
         training_cfg = spec.get("training", {}) or {}
         self._configure_devices(training_cfg)  # 只控制可见卡，不做模型放置
+        # Under torchrun/accelerate, set CUDA device from LOCAL_RANK to avoid NCCL warnings
+        try:
+            if torch.cuda.is_available():
+                local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "-1")))
+                if local_rank >= 0:
+                    torch.cuda.set_device(local_rank)
+                    logger.info("Set CUDA device by LOCAL_RANK/RANK=%d", local_rank)
+        except Exception as _e:
+            logger.debug("Skipping cuda.set_device: %s", _e)
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
