@@ -129,6 +129,26 @@ class PPOExecutor(Executor):
             dataset = self._load_dataset(spec)
             logger.info("Dataset loaded with %d samples", len(dataset))
 
+            # Some TRL versions expect tokenized inputs in the dataset and will
+            # route through a padding collator. Ensure input_ids/attention_mask exist.
+            try:
+                max_len = int(training_config.get("max_seq_length", 512))
+                def _tok_fn(batch):
+                    texts = batch.get("query") or []
+                    enc = tokenizer(
+                        texts,
+                        padding=False,
+                        truncation=True,
+                        max_length=max_len,
+                    )
+                    return enc
+
+                if "input_ids" not in dataset.column_names:
+                    dataset = dataset.map(_tok_fn, batched=True, remove_columns=[])
+                    logger.info("Tokenized dataset with max_length=%d", max_len)
+            except Exception as _e:
+                logger.warning("Skipping dataset tokenization step: %s", _e)
+
             logger.info("Creating PPOConfig...")
             ppo_config = PPOConfig(
                 learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
