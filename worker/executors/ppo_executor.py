@@ -98,6 +98,30 @@ class PPOExecutor(Executor):
             _ensure_backbone(model)
             _ensure_backbone(ref_model)
 
+            # Ensure flag expected by TRL's wrapper exists on policy/value models
+            def _ensure_grad_ckpt_flag(m):
+                try:
+                    if hasattr(m, "is_gradient_checkpointing"):
+                        return
+                    # Derive from backbone or config if possible
+                    val = False
+                    try:
+                        backbone = None
+                        if hasattr(m, "base_model_prefix") and hasattr(m, m.base_model_prefix):
+                            backbone = getattr(m, m.base_model_prefix)
+                        if backbone is not None and hasattr(backbone, "is_gradient_checkpointing"):
+                            val = bool(getattr(backbone, "is_gradient_checkpointing"))
+                        elif hasattr(m, "config") and hasattr(m.config, "gradient_checkpointing"):
+                            val = bool(getattr(m.config, "gradient_checkpointing"))
+                    except Exception:
+                        pass
+                    setattr(m, "is_gradient_checkpointing", val)
+                except Exception:
+                    pass
+
+            _ensure_grad_ckpt_flag(model)
+            _ensure_grad_ckpt_flag(ref_model)
+
             logger.info("Models loaded: %s", self._model_name)
 
             # Load dataset
