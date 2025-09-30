@@ -175,10 +175,11 @@ async def admin_cleanup(_: Any = Depends(require_auth)):
 # -------------------------
 # Publish helper
 # -------------------------
-def _publish_task(topic: str, message: Dict[str, Any]) -> None:
+def _publish_task(topic: str, message: Dict[str, Any]) -> int:
     payload = json.dumps(message, ensure_ascii=False)
     receivers = rds.publish(topic, payload)
     logger.info("Published to topic=%s receivers=%d", topic, receivers)
+    return int(receivers or 0)
 
 
 # -------------------------
@@ -355,7 +356,14 @@ def _try_dispatch_sharded(
             "shard_total": len(child_msgs),
         }
         try:
-            _publish_task(topic, message)
+            receivers = _publish_task(topic, message)
+            if receivers <= 0:
+                logger.warning(
+                    "No subscribers for shard %s on topic %s; will retry later",
+                    child_id,
+                    topic,
+                )
+                continue
             update_worker_status(rds, worker.worker_id, "RUNNING")
             child_rec = TaskRecord(
                 task_id=child_id,
@@ -450,7 +458,15 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
         "parent_task_id": rec.parent_task_id,
     }
     try:
-        _publish_task(topic, message)
+        receivers = _publish_task(topic, message)
+        if receivers <= 0:
+            logger.warning(
+                "No subscribers listening on %s; scheduling retry for %s",
+                topic,
+                task_id,
+            )
+            RETRY_MANAGER.schedule(task_id, rec, "No active workers subscribed", exclude_worker_id=worker.worker_id)
+            return
         update_worker_status(rds, worker.worker_id, "RUNNING")
         with TASKS_LOCK:
             rec.status = TaskStatus.DISPATCHED

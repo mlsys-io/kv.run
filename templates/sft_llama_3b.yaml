@@ -1,8 +1,8 @@
-# sft_llama3b_fsdp.yaml
+# sft_llama3b_deepspeed.yaml
 apiVersion: mloc/v1
 kind: SFTTask
 metadata:
-  name: llama-3b-sft-fsdp
+  name: llama-3b-sft-deepspeed
 
 spec:
   taskType: "sft"
@@ -31,11 +31,11 @@ spec:
     max_samples: 200
 
   training:
-    # 多卡可见
+    # Enable multi-GPU execution; ``visible_devices`` limits torchrun to the listed GPU IDs.
     allow_multi_gpu: true
     visible_devices: "0,1"
 
-    # 训练超参（唯一真源）
+    # Core hyperparameters controlled exclusively from this section.
     num_train_epochs: 2
     batch_size: 2
     gradient_accumulation_steps: 4
@@ -44,23 +44,29 @@ spec:
     logging_steps: 5
     save_steps: 50
     save_strategy: "steps"
-    save_model: true
+    save_model: false  # enable to save locally and ship a zipped checkpoint when HTTP output is configured
 
-    # 稳定性/显存
+    # Memory tuning.
     gradient_checkpointing: true
     packing: false
     fp16: false
     bf16: true
 
-    # === FSDP 开启 ===
-    fsdp: "full_shard auto_wrap"
-    fsdp_config:
-      transformer_layer_cls_to_wrap: "LlamaDecoderLayer"
-      min_num_params: 100000000         # 1e8；按需调小可包得更细
-      sync_module_states: true
-      forward_prefetch: true
-      limit_all_gathers: true
-      use_orig_params: true
+    # DeepSpeed stage-2 ZeRO configuration used by SFTExecutor when multi GPU is enabled.
+    deepspeed:
+      train_micro_batch_size_per_gpu: 2
+      gradient_accumulation_steps: 4
+      gradient_clipping: 1.0
+      steps_per_print: 50
+      zero_optimization:
+        stage: 2
+        overlap_comm: true
+        contiguous_gradients: true
+        reduce_bucket_size: 67108864
+        allgather_bucket_size: 67108864
+      bf16:
+        enabled: true
+      wall_clock_breakdown: false
 
   output:
     destination:
@@ -68,4 +74,3 @@ spec:
       path: "./sft_llama_3b"
     artifacts:
       - "responses.json"
-      - "final_model"

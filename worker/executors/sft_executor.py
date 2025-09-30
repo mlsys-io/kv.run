@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""SFT executor with PyTorch FSDP support via TRL's SFTTrainer/SFTConfig.
-   - No DeepSpeed.
-   - Multi-GPU handled by torch.distributed (torchrun) or Accelerate.
+"""SFT executor powered by TRL's SFTTrainer/SFTConfig.
+
+This implementation launches single-GPU runs in-process and spawns multi-GPU
+tasks via ``torchrun``. DeepSpeed is used for multi-GPU orchestration when a
+DeepSpeed configuration is provided in the training spec.
 """
 
 from __future__ import annotations
@@ -36,7 +38,8 @@ class SFTExecutor(Executor):
         caught_exc: Optional[Exception] = None
 
         training_cfg = spec.get("training", {}) or {}
-        self._configure_devices(training_cfg)  # 只控制可见卡，不做模型放置
+        self._configure_devices(training_cfg)  # only constrain visible devices; no placement here
+        deepspeed_cfg = training_cfg.get("deepspeed")
         # Under torchrun/accelerate, set CUDA device from LOCAL_RANK to avoid NCCL warnings
         try:
             if torch.cuda.is_available():
@@ -49,10 +52,11 @@ class SFTExecutor(Executor):
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Internal torchrun launcher: spawn multi-GPU training as distributed subprocesses
+        # Internal distributed launcher: spawn multi-GPU training as subprocesses
         try:
             allow_multi = bool(training_cfg.get("allow_multi_gpu", False))
-            already_spawned = os.environ.get("TORCHRUN_SPAWNED") == "1"
+            launcher_env_flag = "KV_SFT_DISTRIBUTED"
+            already_spawned = os.environ.get(launcher_env_flag) == "1"
             # Determine requested GPU count
             vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get("visible_devices")
             n_gpus = None
@@ -65,14 +69,14 @@ class SFTExecutor(Executor):
                 except Exception:
                     n_gpus = None
 
-            # If user requested FSDP explicitly, treat as multi-GPU intent
-            fsdp_intent = bool((spec.get("training") or {}).get("fsdp"))
+            # If a DeepSpeed config is supplied, assume multi-GPU intent
+            deepspeed_intent = bool(deepspeed_cfg)
 
             logger.info(
-                "SFT spawn decision: allow_multi=%s fsdp_intent=%s already_spawned=%s n_gpus=%s",
-                allow_multi, fsdp_intent, already_spawned, n_gpus,
+                "SFT spawn decision: allow_multi=%s deepspeed_intent=%s already_spawned=%s n_gpus=%s",
+                allow_multi, deepspeed_intent, already_spawned, n_gpus,
             )
-            if (allow_multi or fsdp_intent) and not already_spawned and (n_gpus or 0) > 1:
+            if (allow_multi or deepspeed_intent) and not already_spawned and (n_gpus or 0) > 1:
                 # Persist the task spec to a file for the launcher entrypoint
                 launcher_dir = out_dir / "_launcher"
                 launcher_dir.mkdir(parents=True, exist_ok=True)
@@ -81,22 +85,37 @@ class SFTExecutor(Executor):
                     json.dump(task, fh)
 
                 nproc = int(training_cfg.get("nproc_per_node", n_gpus))
-                cmd = [
-                    "torchrun",
-                    "--nproc_per_node", str(nproc),
-                    "-m", "worker.executors.sft_dist_entry",
-                    str(task_file),
-                    str(out_dir),
-                ]
+                if deepspeed_intent:
+                    cmd = [
+                        "deepspeed",
+                        "--num_gpus", str(nproc),
+                        "--module", "worker.executors.sft_dist_entry",
+                        str(task_file),
+                        str(out_dir),
+                    ]
+                else:
+                    cmd = [
+                        "torchrun",
+                        "--nproc_per_node", str(nproc),
+                        "-m", "worker.executors.sft_dist_entry",
+                        str(task_file),
+                        str(out_dir),
+                    ]
                 env = os.environ.copy()
-                env["TORCHRUN_SPAWNED"] = "1"
+                env[launcher_env_flag] = "1"
                 # Ensure repo root on PYTHONPATH so `worker.executors.*` is importable
                 try:
                     repo_root = Path(__file__).resolve().parents[2]
                     env["PYTHONPATH"] = f"{str(repo_root)}:" + env.get("PYTHONPATH", "")
                 except Exception:
                     pass
-                logger.info("Spawning torchrun for SFT: %s (CUDA_VISIBLE_DEVICES=%s)", " ".join(cmd), env.get("CUDA_VISIBLE_DEVICES"))
+                launcher_name = "DeepSpeed" if deepspeed_intent else "torchrun"
+                logger.info(
+                    "Spawning %s for SFT: %s (CUDA_VISIBLE_DEVICES=%s)",
+                    launcher_name,
+                    " ".join(cmd),
+                    env.get("CUDA_VISIBLE_DEVICES"),
+                )
                 subprocess.check_call(cmd, env=env)
                 # Read back results written by distributed run (child ensures this exists)
                 resp_path = out_dir / "responses.json"
@@ -145,38 +164,6 @@ class SFTExecutor(Executor):
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
-            # === FSDP 配置读取 ===
-            fsdp = training_cfg.get("fsdp")  # e.g., "full_shard auto_wrap"
-            fsdp_config = dict(training_cfg.get("fsdp_config") or {})
-            # Sanitize mutually exclusive options to avoid HF error:
-            # "`min_num_params` and `transformer_layer_cls_to_wrap` are mutually exclusive."
-            try:
-                if (
-                    fsdp_config.get("min_num_params") is not None
-                    and fsdp_config.get("transformer_layer_cls_to_wrap")
-                ):
-                    removed = fsdp_config.pop("min_num_params", None)
-                    logger.warning(
-                        "FSDP config: removed min_num_params=%s because transformer_layer_cls_to_wrap is set;"
-                        " these options are mutually exclusive in Transformers.",
-                        removed,
-                    )
-            except Exception:
-                pass
-
-            # === SFTConfig：唯一真源控制 batch 与累积 ===
-            # If user provided a top-level min_num_params/fsdp_min_num_params, honor it
-            # unless transformer_layer_cls_to_wrap is set (mutually exclusive).
-            fsdp_min_num_params = training_cfg.get("fsdp_min_num_params", training_cfg.get("min_num_params"))
-            if fsdp_config.get("transformer_layer_cls_to_wrap"):
-                if fsdp_min_num_params is not None:
-                    logger.warning(
-                        "Dropping fsdp_min_num_params=%s because transformer_layer_cls_to_wrap is set (mutually exclusive)",
-                        fsdp_min_num_params,
-                    )
-                # Set to 0 instead of None to satisfy Transformers check `> 0`
-                fsdp_min_num_params = 0
-
             # Determine if distributed is actually initialized
             is_dist = False
             try:
@@ -185,12 +172,19 @@ class SFTExecutor(Executor):
             except Exception:
                 is_dist = False
 
-            # If FSDP requested but not in distributed context, disable to avoid HF error
-            # Transformers expects `fsdp` to be an iterable (list/str). Use [] when disabled.
-            will_use_fsdp = fsdp if is_dist else []
-            if fsdp and not is_dist:
-                logger.warning("FSDP requested but no distributed context detected; disabling FSDP for this run.")
-                fsdp_config = None
+            # If DeepSpeed is requested but we are not in a distributed context, keep going.
+            # Hugging Face will still initialize DeepSpeed on the current rank (often rank 0 only).
+            if deepspeed_cfg and not is_dist:
+                if os.environ.get("KV_SFT_DISTRIBUTED") == "1":
+                    logger.info(
+                        "DeepSpeed runtime will initialize torch.distributed (local_rank=%s)",
+                        os.environ.get("LOCAL_RANK", "0"),
+                    )
+                else:
+                    logger.warning(
+                        "DeepSpeed config provided but torch.distributed is not initialized;"
+                        " training continues on a single rank."
+                    )
 
             # Optional DDP knobs
             ddp_kwargs = {}
@@ -207,7 +201,7 @@ class SFTExecutor(Executor):
                 logging_steps=int(training_cfg.get("logging_steps", 10)),
                 save_steps=int(training_cfg.get("save_steps", 100)),
                 save_strategy=str(training_cfg.get("save_strategy", "steps")),
-                report_to=[],  # 关闭默认 wandb
+                report_to=[],  # disable default wandb integration
                 fp16=bool(training_cfg.get("fp16", False)),
                 bf16=bool(training_cfg.get("bf16", False)),
                 dataset_text_field=text_field,
@@ -216,17 +210,13 @@ class SFTExecutor(Executor):
                 gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
                 pad_token=tokenizer.pad_token,
                 eos_token=tokenizer.eos_token,
-                # FSDP 关键项
-                fsdp=will_use_fsdp,
-                fsdp_config=fsdp_config,
-                fsdp_min_num_params=fsdp_min_num_params,
+                deepspeed=deepspeed_cfg,
                 **ddp_kwargs,
             )
 
-            # 仅在单卡时手动放置；多卡/FSDP/DDP 交给分布式后端
+            # Let the distributed backend handle placement when running under torchrun/deepspeed
             if is_dist:
-                logger.info("Distributed mode detected — device placement handled by DDP/FSDP runtime.")
-            is_multi_gpu_intent = bool(training_cfg.get("allow_multi_gpu", False)) and (torch.cuda.device_count() > 1)
+                logger.info("Distributed mode detected - device placement handled by DeepSpeed/DDP backend.")
             if torch.cuda.is_available() and not is_dist:
                 target_device = torch.device("cuda:0")
                 model = model.to(target_device)
@@ -236,7 +226,7 @@ class SFTExecutor(Executor):
                 # placement handled by backend
                 pass
 
-            # 构造 Trainer（兼容 TRL 版本差异）
+            # Construct the trainer while handling TRL signature variations
             trainer = None
             tried = []
             for variant in ("tokenizer", "processing_class", "none"):
@@ -254,7 +244,7 @@ class SFTExecutor(Executor):
             if trainer is None:
                 raise TypeError("Failed to construct SFTTrainer. Tried variants: " + " | ".join(tried))
 
-            # Dry-run dataloader shapes（本地微批）
+            # Dry-run dataloader shapes to surface obvious padding mistakes early
             try:
                 dl = trainer.get_train_dataloader()
                 first_batch = next(iter(dl))
@@ -265,24 +255,32 @@ class SFTExecutor(Executor):
                 logger.warning("Dry-run dataloader check failed (non-fatal): %s", e)
 
             logger.info(
-                "Effective batch -> per_device=%d, grad_accum=%d. FSDP='%s'",
+                "Effective batch -> per_device=%d, grad_accum=%d, deepspeed=%s",
                 sft_config.per_device_train_batch_size,
                 sft_config.gradient_accumulation_steps,
-                fsdp,
+                bool(deepspeed_cfg),
             )
 
-            logger.info("Starting SFT (FSDP)")
+            logger.info("Starting supervised fine-tuning")
             trainer.train()
             training_successful = True
             logger.info("Training finished")
 
             final_model_path: Optional[Path] = None
+            final_archive_path: Optional[Path] = None
             if bool(training_cfg.get("save_model", True)):
                 model_path = out_dir / "final_model"
                 trainer.save_model(model_path)
                 tokenizer.save_pretrained(model_path)
                 final_model_path = model_path
                 logger.info("Saved fine-tuned model to %s", model_path)
+                if get_http_destination(task):
+                    final_archive_path = archive_model_dir(model_path)
+                    logger.info("Archived fine-tuned model to %s for HTTP delivery", final_archive_path)
+                else:
+                    logger.info("No HTTP destination detected; skipping archive generation")
+            else:
+                logger.info("save_model flag is false; skipping model serialization and archive upload")
 
             training_time = time.time() - start_time
             result_payload = {
@@ -299,11 +297,10 @@ class SFTExecutor(Executor):
 
             if final_model_path is not None:
                 result_payload["final_model_path"] = str(final_model_path)
-                archive_path = archive_model_dir(final_model_path)
-                result_payload["final_model_archive"] = archive_path.name
-                result_payload["final_model_archive_path"] = str(archive_path)
-                logger.info("Prepared model archive at %s", archive_path)
-                self._upload_model_archive(task, archive_path, result_payload)
+                if final_archive_path is not None:
+                    result_payload["final_model_archive"] = final_archive_path.name
+                    result_payload["final_model_archive_path"] = str(final_archive_path)
+                    self._upload_model_archive(task, final_archive_path, result_payload)
 
             return result_payload
 
@@ -405,7 +402,7 @@ class SFTExecutor(Executor):
         if allow_multi:
             logger.info("Multi-GPU allowed; using all visible GPUs.")
             return
-        # 默认限制单卡（若多卡可见且未显式允许）
+        # Default to a single GPU when multiple devices are visible but not explicitly allowed
         try:
             n = torch.cuda.device_count()
         except Exception:

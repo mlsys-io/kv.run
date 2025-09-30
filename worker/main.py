@@ -56,11 +56,14 @@ def main():
     # Pick a safe default
     default_executor = executors.get("default")
 
-    Runner(lifecycle, rds, cfg.topic, cfg.results_dir, executors, default_executor, logger).start()
+    runner = Runner(lifecycle, rds, cfg.topic, cfg.results_dir, executors, default_executor, logger)
+    try:
+        runner.start()
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received; initiating shutdown")
+    finally:
+        lifecycle.shutdown()
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        pass
+    main()

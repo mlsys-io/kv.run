@@ -78,6 +78,11 @@ class Executor(ABC):
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    @staticmethod
+    def load_json(path: Path) -> Dict[str, Any]:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
 
 # -------- Minimal example implementation --------
 class EchoExecutor(Executor):

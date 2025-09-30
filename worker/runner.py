@@ -91,65 +91,80 @@ class Runner:
 
     def start(self):
         pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
-        pubsub.subscribe(self.topic)
-        for msg in pubsub.listen():
-            if msg.get("type") != "message":
-                continue
+        try:
+            pubsub.subscribe(self.topic)
+            for msg in pubsub.listen():
+                if msg.get("type") != "message":
+                    continue
 
-            raw = msg.get("data")
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="ignore")
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
+                raw = msg.get("data")
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="ignore")
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
 
-            if data.get("assigned_worker") != self.lifecycle.rworker.worker_id:
-                continue
+                assigned_worker = data.get("assigned_worker")
+                if assigned_worker != self.lifecycle.rworker.worker_id:
+                    self.logger.info(
+                        "Skipping task %s assigned to %s (this worker id=%s)",
+                        data.get("task_id"),
+                        assigned_worker,
+                        self.lifecycle.rworker.worker_id,
+                    )
+                    continue
 
-            task_id = str(data.get("task_id"))
-            task = data.get("task") or {}
-            task.setdefault("task_id", task_id)
-            task_type = (task.get("spec") or {}).get("taskType")
-            parent_task_id = data.get("parent_task_id")
-            shard_index = data.get("shard_index")
-            shard_total = data.get("shard_total")
+                task_id = str(data.get("task_id"))
+                task = data.get("task") or {}
+                task.setdefault("task_id", task_id)
+                task_type = (task.get("spec") or {}).get("taskType")
+                parent_task_id = data.get("parent_task_id")
+                shard_index = data.get("shard_index")
+                shard_total = data.get("shard_total")
 
-            extra = []
-            if parent_task_id:
-                extra.append(f"parent={parent_task_id}")
-            if shard_index is not None and shard_total is not None:
-                extra.append(f"shard={shard_index}/{shard_total}")
-            extra_info = ", ".join(extra) if extra else "no-parent"
+                extra = []
+                if parent_task_id:
+                    extra.append(f"parent={parent_task_id}")
+                if shard_index is not None and shard_total is not None:
+                    extra.append(f"shard={shard_index}/{shard_total}")
+                extra_info = ", ".join(extra) if extra else "no-parent"
 
-            self.logger.info(
-                "Received task %s (type=%s, %s) with spec keys %s",
-                task_id,
-                task_type or "unknown",
-                extra_info,
-                sorted((task.get("spec") or {}).keys()),
-            )
+                self.logger.info(
+                    "Received task %s (type=%s, %s) with spec keys %s",
+                    task_id,
+                    task_type or "unknown",
+                    extra_info,
+                    sorted((task.get("spec") or {}).keys()),
+                )
 
-            out_dir = self._resolve_output_dir(task_id, task)
-            self.lifecycle.set_running(task_id)
-            try:
-                if task_type == "inference":
-                    enforce_cpu = bool((task.get("spec") or {}).get("enforce_cpu", False))
-                    if enforce_cpu:
-                        executor = self.default_executor
+                out_dir = self._resolve_output_dir(task_id, task)
+                self.lifecycle.set_running(task_id)
+                try:
+                    if task_type == "inference":
+                        enforce_cpu = bool((task.get("spec") or {}).get("enforce_cpu", False))
+                        if enforce_cpu:
+                            executor = self.default_executor
+                        else:
+                            executor = self.executors.get("vllm", self.default_executor)
                     else:
-                        executor = self.executors.get("vllm", self.default_executor)
-                else:
-                    executor = self.executors.get(task_type, self.default_executor)
+                        executor = self.executors.get(task_type, self.default_executor)
 
-                out = None
-                if executor:
-                    out = executor.run(task, out_dir)
-                self._write_results(task_id, task, out_dir, out)
-                self.lifecycle.set_succeeded(task_id)
-                self.logger.info("Task %s completed successfully", task_id)
-            except Exception as e:
-                self.lifecycle.set_failed(task_id, str(e))
-                self.logger.error("Task %s failed: %s", task_id, e)
-            finally:
-                self.lifecycle.set_idle(task_id)
+                    out = None
+                    if executor:
+                        out = executor.run(task, out_dir)
+                    self._write_results(task_id, task, out_dir, out)
+                    self.lifecycle.set_succeeded(task_id)
+                    self.logger.info("Task %s completed successfully", task_id)
+                except Exception as e:
+                    self.lifecycle.set_failed(task_id, str(e))
+                    self.logger.error("Task %s failed: %s", task_id, e)
+                finally:
+                    self.lifecycle.set_idle(task_id)
+        except KeyboardInterrupt:
+            self.logger.info("Runner interrupted by user; shutting down pubsub loop")
+        finally:
+            try:
+                pubsub.close()
+            except Exception:
+                pass

@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""
-Distributed SFT entrypoint launched via torchrun by SFTExecutor.
-Usage:
-  torchrun --nproc_per_node N -m executors.sft_dist_entry <task_json> <out_dir>
+"""Distributed worker used to execute SFT tasks launched via torchrun or DeepSpeed.
 
-It loads the serialized task spec and delegates to SFTExecutor.run.
+The ``SFTExecutor`` persists task state to disk, and this module rehydrates the
+task inside each distributed rank. DeepSpeed injects ``--local_rank`` flags when
+spawning processes, so this entrypoint accepts and ignores that flag while
+forwarding the remaining positional arguments to ``SFTExecutor``.
 """
 
 import json
 import sys
 from pathlib import Path
+import argparse
 
 from .sft_executor import SFTExecutor
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 3:
-        print("Usage: -m executors.sft_dist_entry <task_json> <out_dir>")
-        return 2
-    task_path = Path(argv[1])
-    out_dir = Path(argv[2])
+    parser = argparse.ArgumentParser(description="Distributed SFT worker entrypoint")
+    parser.add_argument("task_json", type=Path, help="Path to serialized task specification")
+    parser.add_argument("out_dir", type=Path, help="Output directory for training artifacts")
+    parser.add_argument("--local_rank", type=int, default=None, help="Rank injected by torchrun/DeepSpeed")
+    args = parser.parse_args(argv[1:])
+
+    task_path = args.task_json
+    out_dir = args.out_dir
     with task_path.open("r") as fh:
         task = json.load(fh)
     ex = SFTExecutor()
