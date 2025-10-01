@@ -38,8 +38,8 @@ spec:
 
   output:
     destination:
-      type: "local"
-      path: "./runs/05_lora_sft_multi_turn"
+      type: "http"
+      url: "http://localhost:8000/api/v1/results"
     artifacts:
       - "responses.json"
       - "final_lora"

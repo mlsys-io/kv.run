@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from utils import safe_get, parse_int_env, WORKERS_SET
 from assigner import Worker, is_stale_by_redis, get_worker_from_redis, _hw_satisfies
+from task_load import HEAVY_LOAD_THRESHOLD, MEDIUM_LOAD_THRESHOLD
 
 # Tunables (env)
 CPU_ONLY_WEIGHT = float(os.getenv("CPU_ONLY_WEIGHT", "0.6"))
@@ -163,10 +164,17 @@ def choose_strategy(task: Dict[str, Any], idle_pool: List[Worker], queued: int) 
 # Selection & sharding
 # ---------------------------------------------------------------------------
 
-def select_workers_for_task(pool: List[Worker], shard_count: int, prefer_best: bool) -> List[Worker]:
+def select_workers_for_task(
+    pool: List[Worker],
+    shard_count: int,
+    prefer_best: bool,
+    task_load: int = 0,
+) -> List[Worker]:
     if not pool:
         return []
-    if prefer_best:
+    if prefer_best or task_load >= HEAVY_LOAD_THRESHOLD:
+        pool = sort_workers(pool)
+    elif task_load >= MEDIUM_LOAD_THRESHOLD:
         pool = sort_workers(pool)
     return pool[:shard_count]
 

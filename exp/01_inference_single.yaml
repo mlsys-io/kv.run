@@ -25,7 +25,7 @@ spec:
   model:
     source:
       type: "huggingface"
-      identifier: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+      identifier: "meta-llama/Llama-3.1-8B-Instruct"
       revision: "main"
     vllm:
       tensor_parallel_size: 2

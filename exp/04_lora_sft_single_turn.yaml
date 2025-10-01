@@ -61,8 +61,8 @@ spec:
 
   output:
     destination:
-      type: "local"
-      path: "./runs/04_lora_sft_single"
+      type: "http"
+      url: "http://localhost:8000/api/v1/results"
     artifacts:
       - "responses.json"
       - "final_lora"

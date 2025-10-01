@@ -13,6 +13,7 @@ import os
 import time
 import json
 import subprocess
+import gc
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -29,6 +30,8 @@ logger = logging.getLogger("worker.sft")
 class SFTExecutor(Executor):
     def __init__(self) -> None:
         self._model_name: Optional[str] = None
+        self._current_model: Optional[Any] = None
+        self._current_trainer: Optional[Any] = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         spec = (task or {}).get("spec") or {}
@@ -39,7 +42,7 @@ class SFTExecutor(Executor):
 
         training_cfg = spec.get("training", {}) or {}
         self._configure_devices(training_cfg)  # only constrain visible devices; no placement here
-        deepspeed_cfg = training_cfg.get("deepspeed")
+        deepspeed_cfg = self._resolve_deepspeed_config(training_cfg, logger)
         # Under torchrun/accelerate, set CUDA device from LOCAL_RANK to avoid NCCL warnings
         try:
             if torch.cuda.is_available():
@@ -161,6 +164,8 @@ class SFTExecutor(Executor):
             if bool(training_cfg.get("gradient_checkpointing", True)):
                 model.gradient_checkpointing_enable()
 
+            self._current_model = model
+
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
@@ -244,6 +249,8 @@ class SFTExecutor(Executor):
             if trainer is None:
                 raise TypeError("Failed to construct SFTTrainer. Tried variants: " + " | ".join(tried))
 
+            self._current_trainer = trainer
+
             # Dry-run dataloader shapes to surface obvious padding mistakes early
             try:
                 dl = trainer.get_train_dataloader()
@@ -326,6 +333,18 @@ class SFTExecutor(Executor):
         if caught_exc is not None:
             raise ExecutionError(error_msg or "SFT training failed") from caught_exc
         raise ExecutionError(error_msg or "SFT training failed")
+
+    def cleanup_after_run(self) -> None:
+        self._current_trainer = None
+        self._current_model = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
 
     def _upload_model_archive(self, task: Dict[str, Any], archive_path: Path, payload: Dict[str, Any]) -> None:
         destination = get_http_destination(task)
@@ -411,3 +430,20 @@ class SFTExecutor(Executor):
             preferred = training_cfg.get("primary_gpu", 0)
             os.environ["CUDA_VISIBLE_DEVICES"] = str(preferred)
             logger.info("Multiple GPUs detected (%d); restrict to device %s (set allow_multi_gpu=true to opt-in).", n, preferred)
+
+    @staticmethod
+    def _resolve_deepspeed_config(training_cfg: Dict[str, Any], log) -> Optional[Any]:
+        cfg = training_cfg.get("deepspeed")
+        if not cfg:
+            return None
+        if isinstance(cfg, dict):
+            return cfg
+        if isinstance(cfg, (str, Path)):
+            candidate = Path(str(cfg)).expanduser()
+            if candidate.exists():
+                log.info("Using DeepSpeed config at %s", candidate)
+                return str(candidate)
+            # Allow literal identifiers (e.g., 'auto') without file presence.
+            log.info("Using DeepSpeed literal configuration '%s'", cfg)
+            return str(cfg)
+        raise ValueError("training.deepspeed must be a dict, path string, or falsy")

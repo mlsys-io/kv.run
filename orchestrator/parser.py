@@ -18,6 +18,7 @@ from fastapi import HTTPException
 import yaml
 
 from utils import safe_get
+from task_load import compute_task_load, DEFAULT_TASK_LOAD
 
 
 REQUIRED_FIELDS = [
@@ -82,6 +83,7 @@ class TaskStore:
         self._parsed: Dict[str, Dict[str, Any]] = {}
         self._depends: Dict[str, Set[str]] = {}
         self._released: Set[str] = set()
+        self._load: Dict[str, int] = {}
 
     # -------------------------
     # Registration / Parsing
@@ -102,6 +104,7 @@ class TaskStore:
             List[{"task_id": str, "parsed": dict, "depends_on": List[str]}]
         """
         base = _validate_yaml_to_dict(yaml_text)
+        base_load = compute_task_load(base)
         stages = safe_get(base, "spec.stages", None)
         graph_nodes = safe_get(base, "spec.graph.nodes", None)
 
@@ -129,8 +132,15 @@ class TaskStore:
         with self._lock:
             self._parsed[tid] = base
             self._depends[tid] = set(depends_on)
+            self._load[tid] = base_load
 
-        results.append({"task_id": tid, "parsed": base, "depends_on": depends_on, "graph_node_name": None})
+        results.append({
+            "task_id": tid,
+            "parsed": base,
+            "depends_on": depends_on,
+            "graph_node_name": None,
+            "load": base_load,
+        })
         return results
 
     def _register_linear_stages(
@@ -151,6 +161,7 @@ class TaskStore:
             eff = copy.deepcopy(effective)
             eff_md = eff.setdefault("metadata", {})
             eff_md["name"] = f"{base_name}:{stage_name}"
+            load = compute_task_load(eff)
 
             depends_on_names = stage.get("dependsOn", []) or []
             if not isinstance(depends_on_names, list):
@@ -164,12 +175,14 @@ class TaskStore:
             with self._lock:
                 self._parsed[tid] = eff
                 self._depends[tid] = set(depends_on)
+                self._load[tid] = load
 
             results.append({
                 "task_id": tid,
                 "parsed": eff,
                 "depends_on": depends_on,
                 "graph_node_name": stage_name,
+                "load": load,
             })
             prev_task_id = tid
 
@@ -233,16 +246,19 @@ class TaskStore:
                     eff_md = eff.setdefault("metadata", {})
                     eff_md["name"] = f"{base_name}:{name}"
 
+                    load = compute_task_load(eff)
                     tid = str(uuid.uuid4())
                     with self._lock:
                         self._parsed[tid] = eff
                         self._depends[tid] = set(depends_on_task_ids)
+                        self._load[tid] = load
 
                     results.append({
                         "task_id": tid,
                         "parsed": eff,
                         "depends_on": depends_on_task_ids,
                         "graph_node_name": name,
+                        "load": load,
                     })
                     resolved_ids[name] = tid
                     unresolved.pop(name)
@@ -268,6 +284,10 @@ class TaskStore:
     def get_dependencies(self, task_id: str) -> List[str]:
         with self._lock:
             return list(self._depends.get(task_id, set()))
+
+    def get_load(self, task_id: str) -> int:
+        with self._lock:
+            return int(self._load.get(task_id, DEFAULT_TASK_LOAD))
 
     def list_waiting_tasks(self) -> List[str]:
         """Tasks not yet 'released' to dispatcher (pending capacity/deps)."""

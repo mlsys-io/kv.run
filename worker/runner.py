@@ -140,6 +140,7 @@ class Runner:
 
                 out_dir = self._resolve_output_dir(task_id, task)
                 self.lifecycle.set_running(task_id)
+                executor = None
                 try:
                     if task_type == "inference":
                         enforce_cpu = bool((task.get("spec") or {}).get("enforce_cpu", False))
@@ -158,8 +159,13 @@ class Runner:
                     self.logger.info("Task %s completed successfully", task_id)
                 except Exception as e:
                     self.lifecycle.set_failed(task_id, str(e))
-                    self.logger.error("Task %s failed: %s", task_id, e)
+                    self.logger.exception("Task %s failed", task_id)
                 finally:
+                    try:
+                        if executor:
+                            executor.cleanup_after_run()
+                    except Exception as cleanup_err:
+                        self.logger.debug("Cleanup after task %s raised: %s", task_id, cleanup_err)
                     self.lifecycle.set_idle(task_id)
         except KeyboardInterrupt:
             self.logger.info("Runner interrupted by user; shutting down pubsub loop")

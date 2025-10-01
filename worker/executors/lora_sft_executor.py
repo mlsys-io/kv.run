@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import logging
 import time
+import gc
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from types import MethodType
 
 import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
+from transformers import Trainer
 
 from .base_executor import Executor, ExecutionError
 from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
@@ -33,6 +36,8 @@ class LoRASFTExecutor(Executor):
 
     def __init__(self) -> None:
         self._model_name: Optional[str] = None
+        self._current_model: Optional[Any] = None
+        self._current_trainer: Optional[Any] = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         spec = (task or {}).get("spec") or {}
@@ -45,8 +50,16 @@ class LoRASFTExecutor(Executor):
                 "peft is required for LoRA SFT tasks. Install the 'peft' package in the worker environment."
             )
 
-        training_cfg = spec.get("training", {}) or {}
+        raw_training_cfg = spec.get("training", {}) or {}
+        training_cfg = dict(raw_training_cfg)
+
+        if bool(training_cfg.get("allow_multi_gpu", False)):
+            logger.warning("LoRA SFT currently runs on a single GPU; ignoring allow_multi_gpu request")
+            training_cfg["allow_multi_gpu"] = False
+
         SFTExecutor._configure_devices(training_cfg)
+        if training_cfg.get("deepspeed"):
+            logger.info("DeepSpeed configuration detected for LoRA run; forwarding to trainer")
         lora_cfg = spec.get("lora", {}) or {}
 
         checkpoint_dir = out_dir / "checkpoints"
@@ -64,6 +77,7 @@ class LoRASFTExecutor(Executor):
 
             model = AutoModelForCausalLM.from_pretrained(self._model_name)
             model.config.use_cache = False
+            self._current_model = model
 
             resume_path = determine_resume_path(spec, training_cfg, out_dir)
             resume_str = str(resume_path) if resume_path else None
@@ -164,6 +178,32 @@ class LoRASFTExecutor(Executor):
             if trainer is None:
                 raise TypeError("Failed to construct SFTTrainer with tried variants: " + " | ".join(tried_errors))
 
+            orig_compute_loss = trainer.compute_loss
+            self._current_trainer = trainer
+
+            def _compute_loss_with_guard(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+                try:
+                    return orig_compute_loss(model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch)
+                except RuntimeError as exc:
+                    if "size of tensor" not in str(exc):
+                        raise
+                    logger.warning(
+                        "LoRA SFT entropy metric mismatch encountered; falling back to baseline loss computation: %s",
+                        exc,
+                    )
+                    safe_inputs = dict(inputs)
+                    safe_inputs["use_cache"] = False
+                    loss, outputs = Trainer.compute_loss(
+                        self,
+                        model,
+                        safe_inputs,
+                        return_outputs=True,
+                        num_items_in_batch=num_items_in_batch,
+                    )
+                    return (loss, outputs) if return_outputs else loss
+
+            trainer.compute_loss = MethodType(_compute_loss_with_guard, trainer)
+
             logger.info("Starting LoRA supervised fine-tuning run")
             trainer.train()
             training_successful = True
@@ -223,6 +263,18 @@ class LoRASFTExecutor(Executor):
         self.save_json(out_dir / "responses.json", result)
         message = error_msg or "LoRA SFT training failed"
         raise ExecutionError(message)
+
+    def cleanup_after_run(self) -> None:
+        self._current_trainer = None
+        self._current_model = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
 
     def _upload_model_archive(
         self,

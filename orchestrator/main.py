@@ -39,6 +39,7 @@ from scheduler import (
     idle_satisfying_pool,
     is_data_parallel_enabled,
 )
+from task_load import MEDIUM_LOAD_THRESHOLD
 from aggregation import maybe_aggregate_parent
 from results import write_result, read_result, result_file_path
 
@@ -120,6 +121,7 @@ class TaskRecord(BaseModel):
     next_retry_at: Optional[str] = None
     last_failed_worker: Optional[str] = None
     graph_node_name: Optional[str] = None
+    load: int = 0
 
 TASKS: Dict[str, TaskRecord] = {}
 TASKS_LOCK = threading.RLock()
@@ -137,6 +139,45 @@ RETRY_MANAGER = RetryQueueManager(
     base_delay_sec=RETRY_BASE_DELAY_SEC,
     max_delay_sec=RETRY_MAX_DELAY_SEC,
 )
+
+
+def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
+    """Move dispatched tasks back to waiting when their worker disappears."""
+    safe_worker_id = (worker_id or "").strip()
+    if not safe_worker_id:
+        return
+
+    to_reschedule: List[tuple[str, Optional[str]]] = []
+    with TASKS_LOCK:
+        for task_id, rec in TASKS.items():
+            if rec.status == TaskStatus.DISPATCHED and rec.assigned_worker == safe_worker_id:
+                parent_id = CHILD_TO_PARENT.get(task_id)
+                to_reschedule.append((task_id, parent_id))
+
+    if not to_reschedule:
+        return
+
+    for task_id, parent_id in to_reschedule:
+        with TASKS_LOCK:
+            rec = TASKS.get(task_id)
+            if not rec or rec.status != TaskStatus.DISPATCHED or rec.assigned_worker != safe_worker_id:
+                continue
+
+        logger.info("Rescheduling %s after worker %s unregistered", task_id, safe_worker_id)
+        RETRY_MANAGER.schedule(
+            task_id,
+            rec,
+            "Assigned worker unregistered; retrying",
+            delay_sec=0.0,
+            exclude_worker_id=safe_worker_id,
+        )
+
+        if parent_id:
+            with TASKS_LOCK:
+                parent_rec = TASKS.get(parent_id)
+                if parent_rec and parent_rec.status == TaskStatus.DISPATCHED:
+                    parent_rec.status = TaskStatus.WAITING
+                    parent_rec.error = f"Waiting on shard retry: {task_id}"
 
 
 class ResultPayload(BaseModel):
@@ -324,7 +365,13 @@ def _try_dispatch_sharded(
     if strategy.mode != "data_parallel":
         return False
 
-    workers = select_workers_for_task(pool, shard_count=strategy.shard_count, prefer_best=strategy.prefer_best)
+    task_load = int(parent_rec.load or 0)
+    workers = select_workers_for_task(
+        pool,
+        shard_count=strategy.shard_count,
+        prefer_best=strategy.prefer_best or task_load >= MEDIUM_LOAD_THRESHOLD,
+        task_load=task_load,
+    )
     if len(workers) <= 1:
         return False
 
@@ -376,6 +423,7 @@ def _try_dispatch_sharded(
                 shard_index=idx,
                 shard_total=len(workers),
                 max_retries=parent_rec.max_retries,
+                load=parent_rec.load,
             )
             with TASKS_LOCK:
                 TASKS[child_id] = child_rec
@@ -393,6 +441,7 @@ def _try_dispatch_sharded(
                     parent_task_id=parent_task_id,
                     shard_index=idx,
                     shard_total=len(workers),
+                    load=parent_rec.load,
                 )
             logger.exception("Shard publish failed")
 
@@ -440,7 +489,14 @@ def _try_dispatch_one(task_id: str, task: Dict[str, Any], rec: TaskRecord,
         return
 
     strategy = choose_strategy(task, pool, queued)  # decides best-fit vs first-fit
-    worker_list = select_workers_for_task(pool, shard_count=1, prefer_best=strategy.prefer_best)
+    task_load = int(rec.load or 0)
+    prefer_best = strategy.prefer_best or task_load >= MEDIUM_LOAD_THRESHOLD
+    worker_list = select_workers_for_task(
+        pool,
+        shard_count=1,
+        prefer_best=prefer_best,
+        task_load=task_load,
+    )
     if not worker_list:
         logger.info("Worker selection failed for %s; scheduling retry", task_id)
         RETRY_MANAGER.schedule(task_id, rec, "No worker passed selection; retrying shortly")
@@ -641,6 +697,10 @@ def _workers_events_loop() -> None:
                     logger.debug("Bad workers.events payload: %s", exc)
                     continue
                 log_worker_event(logger, data)
+
+                ev_type = str(data.get("type", "")).upper()
+                if ev_type == "UNREGISTER":
+                    _reschedule_tasks_for_worker(data.get("worker_id"))
         except Exception as exc:
             logger.warning("workers.events listener error: %s; reconnecting soon...", exc)
             time.sleep(2)
@@ -683,6 +743,7 @@ async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="te
                 raw_yaml=yml,
                 parsed=task,
                 graph_node_name=entry.get("graph_node_name"),
+                load=int(entry.get("load", 0) or 0),
             )
 
         if not depends_on:
@@ -700,6 +761,7 @@ async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="te
                 "waiting_on": depends_on or [],
                 "retries": rec.retries,
                 "max_retries": rec.max_retries,
+                "load": rec.load,
             })
 
     return {"ok": True, "count": len(entries), "tasks": results}

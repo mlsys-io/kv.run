@@ -5,16 +5,28 @@ VLLMExecutor (YAML schema specific)
 - Reads model config from spec.model.vllm / spec.model.source
 - Reads sampling params and input prompts from spec.inference & spec.data
 - Writes generation results to out_dir/responses.json
+
+This rewrite follows vLLM's **LoRA Adapters** guidance:
+- Per-request LoRA with `LoRARequest(name, adapter_id, adapter_path)` and `enable_lora=True`.
+- Supports multiple runtime LoRA adapters in one call when the local vLLM build allows passing a list of `LoRARequest`.
+- Still supports `apply=merge` via native merge APIs if present, otherwise offline-merge with PEFT.
+- Optional `spec.model.vllm.release_after_run` to keep/release the LLM instance.
+- Defensive compatibility for older vLLM builds (graceful fallbacks and clear errors).
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import time
+import gc
+import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from datasets import load_dataset
+
+logger = logging.getLogger(__name__)
 
 from .base_executor import Executor, ExecutionError
 from .graph_templates import build_prompts_from_graph_template
@@ -28,7 +40,8 @@ try:
     # vLLM is optional at import time; errors are raised in prepare()
     from vllm import LLM, SamplingParams  # type: ignore
     _HAS_VLLM = True
-    try:  # LoRA helpers are optional prior to vLLM 0.3
+    try:
+        # Modern LoRA request helper (per-request adapters)
         from vllm.lora.request import LoRARequest  # type: ignore
     except Exception:  # pragma: no cover - optional dependency
         LoRARequest = None  # type: ignore
@@ -37,6 +50,7 @@ except Exception:
     SamplingParams = object  # type: ignore[misc,assignment]
     _HAS_VLLM = False
     LoRARequest = None  # type: ignore
+
 
 class VLLMExecutor(Executor):
     """Executor that runs text generation using vLLM based on a YAML spec."""
@@ -51,18 +65,19 @@ class VLLMExecutor(Executor):
         self._inf: Dict[str, Any] = {}
         self._adapter_specs: List[Dict[str, Any]] = []
         self._merged_adapters: List[str] = []
-        self._runtime_requests: List[Any] = []
+        self._runtime_specs: List[Dict[str, Any]] = []
+        self._release_llm_after_run = True
+        self._llm_kwargs: Dict[str, Any] = {}
+        self._offline_model_dir: Optional[Path] = None
 
     # --------------------------------------------------------------------- #
     # Lifecycle
     # --------------------------------------------------------------------- #
     def prepare(self) -> None:  # type: ignore[override]
-        """Validate runtime prerequisites (vLLM)."""
         if not _HAS_VLLM:
             raise ExecutionError("vLLM is not installed (`pip install vllm`).")
 
     def _ensure_llm(self, spec: Dict[str, Any]) -> None:
-        """Instantiate the LLM lazily from spec.model.*."""
         if self._llm is not None:
             return
 
@@ -73,13 +88,14 @@ class VLLMExecutor(Executor):
 
         adapter_specs = self._extract_adapter_specs(spec)
         vllm_cfg = (spec.get("model") or {}).get("vllm", {}) or {}
-        # Map config values with sane defaults and explicit casting
+
         kwargs: Dict[str, Any] = dict(
             model=ident,
             tensor_parallel_size=int(vllm_cfg.get("tensor_parallel_size", 1)),
             gpu_memory_utilization=float(vllm_cfg.get("gpu_memory_utilization", 0.9)),
             trust_remote_code=bool(vllm_cfg.get("trust_remote_code", False)),
         )
+        # Per vLLM docs: enable LoRA at init time when using per-request adapters
         if adapter_specs:
             kwargs["enable_lora"] = True
         if "max_model_len" in vllm_cfg:
@@ -88,12 +104,16 @@ class VLLMExecutor(Executor):
             kwargs["dtype"] = str(vllm_cfg["dtype"])
         if "download_dir" in vllm_cfg:
             kwargs["download_dir"] = str(vllm_cfg["download_dir"])
+        self._release_llm_after_run = bool(vllm_cfg.get("release_after_run", True))
 
+        self._llm_kwargs = dict(kwargs)
         try:
             self._llm = LLM(**kwargs)  # type: ignore[call-arg]
         except TypeError as exc:
+            # Some older builds don't accept enable_lora
             if "enable_lora" in kwargs:
                 kwargs.pop("enable_lora", None)
+                self._llm_kwargs = dict(kwargs)
                 self._llm = LLM(**kwargs)  # type: ignore[call-arg]
             else:
                 raise
@@ -103,13 +123,6 @@ class VLLMExecutor(Executor):
     # Data preparation
     # --------------------------------------------------------------------- #
     def prepare_data(self, spec: Dict[str, Any]) -> None:
-        """
-        Build the list of prompts to feed into the model.
-
-        Supported sources:
-          - spec.data.type == "dataset": load via Hugging Face datasets
-          - spec.data.type == "list":   use a provided list of strings
-        """
         data = spec.get("data") or {}
         if not data:
             raise ExecutionError("spec.data is required.")
@@ -117,48 +130,35 @@ class VLLMExecutor(Executor):
         dtype = data.get("type")
         append_system_prompt = True
         if dtype == "dataset":
-            # Load dataset from URL / HF identifier
             data_url = data.get("url")
             if not data_url:
                 raise ExecutionError("spec.data.url is required for type == 'dataset'.")
-
             name = data.get("name", None)
             split = data.get("split", "train")
             shuffle = bool(data.get("shuffle", False))
-
-            # load_dataset accepts path_or_name + optional name + split
             dataset = load_dataset(data_url, name=name, split=split)
-
             if shuffle:
                 seed = int(data.get("seed", 42))
                 buffer_size = data.get("buffer_size", None)
-                if buffer_size is None:
-                    dataset = dataset.shuffle(seed=seed)
-                else:
-                    dataset = dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
-
+                dataset = dataset.shuffle(seed=seed) if buffer_size is None else dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
             column = data.get("column", "text")
             if column not in dataset.column_names:
                 raise ExecutionError(
                     f"Column '{column}' not found in dataset. Available: {dataset.column_names}"
                 )
             self._prompts = [str(x) for x in dataset[column]]
-
         elif dtype == "list":
             items = data.get("items", [])
             if not isinstance(items, list) or any(not isinstance(x, str) for x in items):
                 raise ExecutionError("spec.data.items must be a list of strings for type == 'list'.")
             self._prompts = items
-
         elif dtype == "graph_template":
             self._prompts = build_prompts_from_graph_template(data, spec)
             template_cfg = data.get("template") or {}
             append_system_prompt = bool(template_cfg.get("append_system_prompt", False))
-
         else:
             raise ExecutionError(f"Unsupported spec.data.type: {dtype!r}")
 
-        # Inference params are copied as-is (validated where used)
         self._inf = spec.get("inference", {}) or {}
         system_prompt = self._inf.get("system_prompt")
         if system_prompt and append_system_prompt:
@@ -168,18 +168,11 @@ class VLLMExecutor(Executor):
     # Execution
     # --------------------------------------------------------------------- #
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:  # type: ignore[override]
-        """
-        Execute text generation with vLLM and persist a JSON result file.
-
-        Returns:
-            A dictionary containing success flag, model name, items, and usage stats.
-        """
         spec = (task or {}).get("spec") or {}
         self._ensure_llm(spec)
         self.prepare_data(spec)
         self._prepare_adapters(spec, out_dir)
 
-        # Build sampling params (defensive casts + defaults)
         sampling = SamplingParams(  # type: ignore[call-arg]
             temperature=float(self._inf.get("temperature", 0.7)),
             top_p=float(self._inf.get("top_p", 0.95)),
@@ -191,16 +184,15 @@ class VLLMExecutor(Executor):
         )
 
         if not self._prompts:
-            # Allow empty input but fail fast with a clear message
             raise ExecutionError("No prompts prepared. Check spec.data configuration.")
 
-        t0 = time.time()
-        # vLLM returns a list of RequestOutput objects
+        # Build per-request LoRA payload(s)
+        lora_payload = self._build_lora_requests(out_dir)
         generate_kwargs: Dict[str, Any] = {}
-        lora_request = self._build_runtime_lora_request()
-        if lora_request is not None:
-            generate_kwargs["lora_request"] = lora_request
+        if lora_payload is not None:
+            generate_kwargs["lora_request"] = lora_payload
 
+        t0 = time.time()
         try:
             outputs = self._llm.generate(
                 self._prompts,
@@ -208,12 +200,18 @@ class VLLMExecutor(Executor):
                 **generate_kwargs,
             )  # type: ignore[attr-defined]
         except TypeError as exc:
-            if generate_kwargs:
+            # Some builds don't accept list/arg name for lora_request; try a single adapter fallback
+            single = self._maybe_single_lora(lora_payload)
+            if single is not None:
+                outputs = self._llm.generate(
+                    self._prompts,
+                    sampling_params=sampling,
+                    lora_request=single,
+                )
+            else:
                 raise ExecutionError(
-                    "Installed vLLM build does not accept runtime LoRA requests via generate(); "
-                    "upgrade vLLM or switch adapter.apply to 'merge'."
+                    "Installed vLLM build does not accept per-request LoRA; upgrade vLLM or set adapter.apply='merge'."
                 ) from exc
-            raise
         latency = time.time() - t0
 
         items: List[Dict[str, Any]] = []
@@ -221,30 +219,20 @@ class VLLMExecutor(Executor):
         completion_tokens = 0
 
         for i, out in enumerate(outputs):
-            # Defensive guards for missing attributes
             out_outputs = getattr(out, "outputs", None)
             if not out_outputs:
                 items.append({"index": i, "output": "", "finish_reason": None})
                 continue
-
             best = out_outputs[0]
             text = getattr(best, "text", "") or ""
             finish_reason = getattr(best, "finish_reason", None)
-
-            items.append(
-                {
-                    "index": i,
-                    "output": text,
-                    "finish_reason": finish_reason,
-                }
-            )
-
+            items.append({"index": i, "output": text, "finish_reason": finish_reason})
             prompt_token_ids = getattr(out, "prompt_token_ids", None) or []
             best_token_ids = getattr(best, "token_ids", None) or []
             prompt_tokens += len(prompt_token_ids)
             completion_tokens += len(best_token_ids)
 
-        result: Dict[str, Any] = {
+        return {
             "ok": True,
             "model": self._model_name,
             "items": items,
@@ -257,15 +245,31 @@ class VLLMExecutor(Executor):
             },
         }
 
-        return result
+    def cleanup_after_run(self) -> None:
+        if self._release_llm_after_run:
+            self._llm = None
+        self._llm_kwargs = {}
+        self._prompts = []
+        self._adapter_specs = []
+        self._runtime_specs = []
+        self._merged_adapters = []
+        if self._offline_model_dir and self._offline_model_dir.exists():
+            shutil.rmtree(self._offline_model_dir, ignore_errors=True)
+        self._offline_model_dir = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
 
     # ------------------------------------------------------------------ #
-    # Adapter utilities
+    # Adapter utilities (per vLLM LoRA docs)
     # ------------------------------------------------------------------ #
     def _extract_adapter_specs(self, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
         if self._adapter_specs:
             return self._adapter_specs
-
         model_cfg = spec.get("model") or {}
         adapters = model_cfg.get("adapters") or []
         if not isinstance(adapters, list):
@@ -275,63 +279,119 @@ class VLLMExecutor(Executor):
         for idx, adapter in enumerate(adapters):
             if not isinstance(adapter, dict):
                 raise ExecutionError("Each entry in spec.model.adapters must be a mapping")
-
-            adapter_type = str(adapter.get("type", "")).lower()
-            if adapter_type != "lora":
+            if str(adapter.get("type", "")).lower() != "lora":
                 continue
-
             name = adapter.get("name") or f"lora_{idx}"
-            apply_mode = str(adapter.get("apply", "merge")).lower()
+            apply_mode = str(adapter.get("apply", "runtime")).lower()
             source_path = adapter.get("path")
             source_url = adapter.get("url")
+            adapter_id = adapter.get("id") or adapter.get("adapter_id") or name  # globally unique id
             archive_format = adapter.get("archive_format", "auto")
-            headers = adapter.get("headers") or {}
-
+            headers = {str(k): str(v) for k, v in (adapter.get("headers") or {}).items()}
+            scale = float(adapter.get("scale", 1.0))
             if not source_path and not source_url:
-                raise ExecutionError(
-                    f"LoRA adapter '{name}' must provide either 'path' or 'url'"
-                )
-
+                raise ExecutionError(f"LoRA adapter '{name}' must provide either 'path' or 'url'")
             normalized.append(
                 {
                     "name": str(name),
-                    "apply": apply_mode,
+                    "id": str(adapter_id),
+                    "apply": apply_mode,  # 'runtime' (per-request) or 'merge'
                     "path": source_path,
                     "url": source_url,
-                    "headers": {str(k): str(v) for k, v in headers.items()},
+                    "headers": headers,
                     "archive_format": str(archive_format),
+                    "scale": scale,
                 }
             )
-
         self._adapter_specs = normalized
         return normalized
 
     def _prepare_adapters(self, spec: Dict[str, Any], out_dir: Path) -> None:
-        if not self._adapter_specs:
+        # Split runtime vs merge upfront (runtime: handled at generate() via LoRARequest)
+        runtime_specs: List[Dict[str, Any]] = []
+        merge_specs: List[Dict[str, Any]] = []
+        for a in self._adapter_specs:
+            (merge_specs if a.get("apply") == "merge" else runtime_specs).append(a)
+        self._runtime_specs = runtime_specs
+
+        if merge_specs:
+            # Try native merge first; otherwise offline merge
+            if self._supports_native_merge():
+                for a in merge_specs:
+                    adapter_dir = self._resolve_adapter_directory(a, out_dir)
+                    self._load_and_merge_native(a["name"], adapter_dir)
+            else:
+                self._offline_merge_adapters(merge_specs, spec, out_dir)
+
+    def _supports_native_merge(self) -> bool:
+        llm = self._llm
+        if llm is None:
+            return False
+        return any(
+            hasattr(llm, attr)
+            for attr in ("merge_lora_weights", "merge_lora_adapter", "merge_lora")
+        )
+
+    def _offline_merge_adapters(
+        self,
+        adapters: List[Dict[str, Any]],
+        spec: Dict[str, Any],
+        out_dir: Path,
+    ) -> None:
+        if not adapters:
             return
-        if self._llm is None:
-            raise ExecutionError("vLLM executor not initialized before adapter preparation")
+        base_identifier = self._model_name
+        if not base_identifier:
+            model_src = (spec.get("model") or {}).get("source", {}) or {}
+            base_identifier = model_src.get("identifier")
+        if not base_identifier:
+            raise ExecutionError("Unable to determine base model identifier for offline LoRA merge")
 
-        ready_requests: List[Any] = []
-        for adapter in self._adapter_specs:
-            apply_mode = adapter.get("apply", "merge")
-            if apply_mode not in {"merge", "runtime", "apply", "activate"}:
-                raise ExecutionError(
-                    f"Unsupported LoRA apply mode '{apply_mode}' (expected 'merge' or 'runtime')"
-                )
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from peft import PeftModel
+        except ImportError as exc:
+            raise ExecutionError("Offline LoRA merge requires transformers and peft to be installed") from exc
 
-            adapter_dir = self._resolve_adapter_directory(adapter, out_dir)
-            adapter_name = adapter["name"]
+        logger.info("Offline merging %d LoRA adapter(s) into %s", len(adapters), base_identifier)
 
-            if apply_mode == "merge":
-                self._load_and_merge_adapter(adapter_name, adapter_dir)
-                continue
+        self._llm = None
+        merge_dir = out_dir / "_merged_vllm_model"
+        if merge_dir.exists():
+            shutil.rmtree(merge_dir, ignore_errors=True)
 
-            # runtime / apply / activate -> keep request for generation
-            request = self._load_runtime_adapter(adapter_name, adapter_dir)
-            if request is not None:
-                ready_requests.append(request)
-        self._runtime_requests = ready_requests
+        logger.info("Loading base model %s onto CPU for offline merge", base_identifier)
+        model = AutoModelForCausalLM.from_pretrained(  # type: ignore[assignment]
+            base_identifier,
+            device_map="cpu",
+            low_cpu_mem_usage=True,
+        )
+
+        for a in adapters:
+            adapter_dir = self._resolve_adapter_directory(a, out_dir)
+            logger.info("Merging LoRA adapter '%s' from %s", a.get("name"), adapter_dir)
+            model = PeftModel.from_pretrained(model, str(adapter_dir)).merge_and_unload()  # type: ignore[assignment]
+
+        logger.info("Saving merged model to %s", merge_dir)
+        model.save_pretrained(merge_dir)
+        try:
+            logger.info("Saving tokenizer for merged model")
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(base_identifier, use_fast=True)
+            except Exception:
+                tokenizer = AutoTokenizer.from_pretrained(base_identifier, use_fast=False)
+            tokenizer.save_pretrained(merge_dir)
+        except Exception as exc:
+            logger.warning("Failed to save tokenizer for merged model: %s", exc)
+
+        new_kwargs = dict(self._llm_kwargs)
+        new_kwargs.pop("enable_lora", None)
+        new_kwargs["model"] = str(merge_dir)
+        self._offline_model_dir = merge_dir
+        self._llm_kwargs = new_kwargs
+        logger.info("Reloading vLLM from merged weights at %s", merge_dir)
+        self._llm = LLM(**new_kwargs)  # type: ignore[call-arg]
+        self._model_name = str(merge_dir)
 
     def _resolve_adapter_directory(self, adapter: Dict[str, Any], out_dir: Path) -> Path:
         name = adapter["name"]
@@ -343,105 +403,68 @@ class VLLMExecutor(Executor):
             path = Path(str(path_value)).expanduser()
             if not path.exists():
                 raise ExecutionError(f"LoRA adapter path not found: {path}")
-            if path.is_file():
-                return self._extract_archive_file(path, out_dir, name, archive_format)
-            return self._ensure_adapter_root(path)
-
+            return self._ensure_or_extract(path, out_dir, name, archive_format)
         # Remote download
-        assert url_value is not None  # guarded earlier
+        assert url_value is not None
         download_root = out_dir / "_lora_cache" / name
         download_root.mkdir(parents=True, exist_ok=True)
-        load_cfg = {
-            "url": url_value,
-            "archive_format": archive_format,
-            "headers": adapter.get("headers") or {},
-        }
+        load_cfg = {"url": url_value, "archive_format": archive_format, "headers": adapter.get("headers") or {}}
         extracted = download_and_unpack(load_cfg, download_root)
         return self._ensure_adapter_root(extracted)
 
-    def _extract_archive_file(
-        self,
-        archive_path: Path,
-        out_dir: Path,
-        name: str,
-        archive_format: str,
-    ) -> Path:
+    def _ensure_or_extract(self, p: Path, out_dir: Path, name: str, archive_format: str) -> Path:
+        if p.is_dir():
+            return self._ensure_adapter_root(p)
+        # file -> archive
         target_root = out_dir / "_lora_cache" / name
         if target_root.exists():
             for child in target_root.iterdir():
-                if child.is_file():
-                    child.unlink()
-                else:
-                    import shutil
-
-                    shutil.rmtree(child, ignore_errors=True)
+                (child.unlink() if child.is_file() else shutil.rmtree(child, ignore_errors=True))
         target_root.mkdir(parents=True, exist_ok=True)
-
-        fmt = detect_archive_format(archive_format, archive_path.name)
+        fmt = detect_archive_format(archive_format, p.name)
         if fmt == "zip":
             import zipfile
-
-            with zipfile.ZipFile(archive_path, "r") as zf:
+            with zipfile.ZipFile(p, "r") as zf:
                 zf.extractall(target_root)
         elif fmt == "tar":
             import tarfile
-
-            with tarfile.open(archive_path, "r:*") as tf:
+            with tarfile.open(p, "r:*") as tf:
                 tf.extractall(target_root)
         else:
-            raise ExecutionError(
-                f"Unsupported LoRA archive format for {archive_path}; expected .zip/.tar or a directory"
-            )
-
+            raise ExecutionError(f"Unsupported LoRA archive format for {p}; expected .zip/.tar or a directory")
         return self._ensure_adapter_root(select_extracted_subdir(target_root, None))
 
     def _ensure_adapter_root(self, path: Path) -> Path:
         if path.is_file():
-            # Some workflows produce adapter.json; require directory
-            raise ExecutionError(
-                f"Expected LoRA adapter directory but found file: {path}"
-            )
+            raise ExecutionError(f"Expected LoRA adapter directory but found file: {path}")
         if (path / "adapter_config.json").exists():
             return path
         candidates = list(path.rglob("adapter_config.json"))
         if not candidates:
-            raise ExecutionError(
-                f"Could not locate adapter_config.json under {path} for LoRA adapter"
-            )
+            raise ExecutionError(f"Could not locate adapter_config.json under {path} for LoRA adapter")
         return candidates[0].parent
 
-    def _load_and_merge_adapter(self, adapter_name: str, adapter_dir: Path) -> None:
-        if adapter_name in self._merged_adapters:
-            return
+    # ---------------------------- Native merge ---------------------------- #
+    def _load_and_merge_native(self, adapter_name: str, adapter_dir: Path) -> None:
         if self._llm is None:
             raise ExecutionError("vLLM not initialized before merging LoRA adapters")
-
-        load_fn = getattr(self._llm, "load_lora_adapter", None)
-        if load_fn is None and LoRARequest is not None and hasattr(self._llm, "load_lora_adapters"):
-            load_fn = self._llm.load_lora_adapters
-
-        if load_fn is None:
-            raise ExecutionError(
-                "Installed vLLM build does not expose load_lora_adapter(s); upgrade to a version with LoRA support."
-            )
-
-        self._invoke_load_lora(load_fn, adapter_name, adapter_dir)
-
         merge_fn = (
             getattr(self._llm, "merge_lora_weights", None)
             or getattr(self._llm, "merge_lora_adapter", None)
             or getattr(self._llm, "merge_lora", None)
         )
-        if merge_fn is None:
-            raise ExecutionError(
-                "vLLM merge_lora_* API not found; cannot apply LoRA adapter with apply=merge"
-            )
-
+        load_fn = getattr(self._llm, "load_lora_adapter", None) or getattr(self._llm, "load_lora_adapters", None)
+        if load_fn is None and not merge_fn:
+            raise ExecutionError("vLLM merge_lora_* API not found; cannot apply LoRA adapter with apply=merge")
+        if load_fn is not None:
+            try:
+                load_fn(adapter_name=adapter_name, adapter_path=str(adapter_dir))
+            except TypeError:
+                load_fn(str(adapter_dir), adapter_name)  # type: ignore[misc]
         try:
             merge_fn(adapter_name=adapter_name)  # type: ignore[arg-type]
         except TypeError:
             merge_fn(adapter_name)  # type: ignore[arg-type]
-
         unload_fn = getattr(self._llm, "unload_lora_adapter", None)
         if unload_fn is not None:
             try:
@@ -449,43 +472,56 @@ class VLLMExecutor(Executor):
             except TypeError:
                 unload_fn(adapter_name)  # type: ignore[arg-type]
 
-        self._merged_adapters.append(adapter_name)
-
-    def _load_runtime_adapter(self, adapter_name: str, adapter_dir: Path) -> Optional[Any]:
-        if self._llm is None:
-            raise ExecutionError("vLLM not initialized before loading LoRA adapters")
-
+    # ------------------------- Per-request building ----------------------- #
+    def _build_lora_requests(self, out_dir: Path) -> Optional[Any]:
+        """Builds `lora_request` payload for vLLM.generate following the docs.
+        - If multiple runtime adapters are configured, returns a list of LoRARequest
+          when supported; otherwise, returns a single LoRARequest (first one).
+        - If LoRARequest helper is unavailable, returns None and expects merge path.
+        """
+        if not self._runtime_specs:
+            return None
         if LoRARequest is None:
             raise ExecutionError(
-                "vLLM LoRARequest helper unavailable; unable to keep adapter active at runtime"
+                "vLLM LoRARequest helper unavailable; upgrade vLLM or set adapter.apply='merge'"
             )
 
-        load_fn = getattr(self._llm, "load_lora_adapter", None)
-        if load_fn is None and hasattr(self._llm, "load_lora_adapters"):
-            load_fn = self._llm.load_lora_adapters
-        if load_fn is None:
-            raise ExecutionError(
-                "Installed vLLM build lacks load_lora_adapter(s); cannot activate LoRA runtime adapter"
-            )
+        requests: List[Any] = []
+        for a in self._runtime_specs:
+            adapter_dir = self._resolve_adapter_directory(a, out_dir)
+            req = self._make_lora_request(a["name"], a["id"], adapter_dir, a.get("scale", 1.0))
+            requests.append(req)
 
-        self._invoke_load_lora(load_fn, adapter_name, adapter_dir)
-        return LoRARequest(adapter_name, str(adapter_dir), 1.0)  # type: ignore[call-arg]
+        # Prefer returning the full list (newer builds), otherwise single
+        return requests if len(requests) > 1 else requests[0]
 
-    def _invoke_load_lora(self, load_fn: Any, adapter_name: str, adapter_dir: Path) -> None:
-        try:
-            load_fn(adapter_name=adapter_name, adapter_path=str(adapter_dir))
-        except TypeError:
-            try:
-                load_fn(str(adapter_dir), adapter_name)  # type: ignore[misc]
-            except TypeError as exc:
-                raise ExecutionError(
-                    f"Unsupported load_lora_adapter signature for adapter '{adapter_name}': {exc}"
-                ) from exc
-
-    def _build_runtime_lora_request(self) -> Optional[Any]:
-        requests = getattr(self, "_runtime_requests", None)
-        if not requests:
+    def _maybe_single_lora(self, payload: Optional[Any]) -> Optional[Any]:
+        if payload is None:
             return None
-        if len(requests) == 1:
-            return requests[0]
-        raise ExecutionError("Multiple runtime LoRA adapters are not supported by this executor")
+        if isinstance(payload, list) and payload:
+            return payload[0]
+        return payload
+
+    def _make_lora_request(self, name: str, adapter_id: str, adapter_dir: Path, scale: float) -> Any:
+        """Create LoRARequest(name, adapter_id, adapter_path) with fallbacks.
+        Some builds use (name, path, scaling) or (name, adapter_id, path, scaling).
+        We try common signatures in order.
+        """
+        path = str(adapter_dir)
+        # Try (name, adapter_id, path)
+        try:
+            return LoRARequest(name, adapter_id, path)  # type: ignore[call-arg]
+        except TypeError:
+            pass
+        # Try (name, adapter_id, path, scale)
+        try:
+            return LoRARequest(name, adapter_id, path, scale)  # type: ignore[call-arg]
+        except TypeError:
+            pass
+        # Try legacy (name, path, scale)
+        try:
+            return LoRARequest(name, path, scale)  # type: ignore[call-arg]
+        except TypeError as exc:
+            raise ExecutionError(
+                f"Unsupported LoRARequest signature for adapter '{name}': {exc}"
+            ) from exc

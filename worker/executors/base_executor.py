@@ -67,6 +67,10 @@ class Executor(ABC):
         """Optional: called when the worker is shutting down."""
         return None
 
+    def cleanup_after_run(self) -> None:
+        """Optional: called after every `run` invocation (even on failure)."""
+        return None
+
     # ---------- Convenience helpers ----------
     @staticmethod
     def ensure_dir(path: Path) -> None:

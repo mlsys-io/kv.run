@@ -55,4 +55,6 @@ dependencies = [
     "arize-phoenix-otel>=0.11.0",
     "peft>=0.17.1",
     "deepspeed>=0.17.6",
+    "flashinfer-python>=0.3.1.post1",
+    "nvidia-ml-py>=13.580.82",
 ]
