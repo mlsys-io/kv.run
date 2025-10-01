@@ -1,0 +1,69 @@
+apiVersion: mloc/v1
+kind: LoRASFTTask
+metadata:
+  name: llama32-3b-lora-single
+  owner: demo
+  annotations:
+    description: "Single-turn LoRA SFT on GSM8K (100 samples)"
+
+spec:
+  taskType: "lora_sft"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "16"
+      memory: "64Gi"
+      gpu:
+        type: "any"
+        count: 2
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "meta-llama/Llama-3.2-3B-Instruct"
+      revision: "main"
+
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    bias: "none"
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+    task_type: "CAUSAL_LM"
+
+  data:
+    dataset_name: "openai/gsm8k"
+    config_name: "main"
+    split: "train[:100]"
+    prompt_column: "question"
+    response_column: "answer"
+    separator: "\n\nAnswer: "
+
+  training:
+    allow_multi_gpu: true
+    visible_devices: "0,1"
+    num_train_epochs: 1
+    batch_size: 2
+    gradient_accumulation_steps: 4
+    learning_rate: 2.0e-4
+    max_seq_length: 512
+    logging_steps: 5
+    save_steps: 50
+    save_model: true
+    gradient_checkpointing: true
+    packing: false
+    bf16: true
+
+  output:
+    destination:
+      type: "local"
+      path: "./runs/04_lora_sft_single"
+    artifacts:
+      - "responses.json"
+      - "final_lora"
+      - "logs"

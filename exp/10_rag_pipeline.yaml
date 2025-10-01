@@ -1,0 +1,42 @@
+apiVersion: mloc/v1
+kind: RetrievalTask
+metadata:
+  name: rag-gsm8k-qdrant
+  owner: demo
+  annotations:
+    description: "Query Qdrant with GSM8K math problems and retrieve supporting passages"
+
+spec:
+  taskType: "rag"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "4"
+      memory: "8Gi"
+
+  qdrant:
+    url: "https://YOUR-CLUSTER-ID.us-east.aws.cloud.qdrant.io:6333"
+    api_key: "${QDRANT_API_KEY}"
+    collection: "gsm8k-math"
+
+  embedding:
+    model: "sentence-transformers/all-MiniLM-L6-v2"
+
+  search:
+    top_k: 5
+
+  data:
+    type: "dataset"
+    url: "openai/gsm8k"
+    name: "main"
+    split: "train[:200]"
+    column: "question"
+
+  output:
+    destination:
+      type: "local"
+      path: "./runs/10_rag_pipeline"
+    artifacts:
+      - "responses.json"
+      - "logs"

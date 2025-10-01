@@ -1,0 +1,99 @@
+apiVersion: mloc/v1
+kind: InferenceTask
+metadata:
+  name: llama31-8b-dag
+  owner: demo
+  annotations:
+    description: "Two-branch DAG inference over GSM8K with multi-GPU vLLM"
+
+spec:
+  taskType: "inference"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "16"
+      memory: "64Gi"
+      gpu:
+        type: "any"
+        count: 2
+
+  parallel:
+    enabled: true
+    max_shards: 2
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+      revision: "main"
+    vllm:
+      tensor_parallel_size: 2
+      gpu_memory_utilization: 0.9
+      trust_remote_code: true
+
+  graph:
+    nodes:
+      - name: branch-a
+        spec:
+          taskType: "inference"
+          data:
+            type: "dataset"
+            url: "openai/gsm8k"
+            name: "main"
+            split: "train[:100]"
+            column: "question"
+            shuffle: true
+            seed: 21
+          inference:
+            system_prompt: |
+              Produce a high-level reasoning outline before answering the math problem.
+            max_tokens: 192
+            temperature: 0.25
+            top_p: 0.9
+      - name: branch-b
+        spec:
+          taskType: "inference"
+          data:
+            type: "dataset"
+            url: "openai/gsm8k"
+            name: "main"
+            split: "train[100:200]"
+            column: "question"
+            shuffle: false
+          inference:
+            system_prompt: |
+              Solve the math question directly and return the final numeric answer.
+            max_tokens: 128
+            temperature: 0.15
+            top_p: 0.85
+      - name: synthesis
+        dependsOn:
+          - "branch-a"
+          - "branch-b"
+        spec:
+          taskType: "inference"
+          data:
+            type: "graph_template"
+            template:
+              name: "two_column_briefing"
+              columns:
+                - label: "outline"
+                  node: "branch-a"
+                  path: "result.items[*].output"
+                - label: "answer"
+                  node: "branch-b"
+                  path: "result.items[*].output"
+          inference:
+            system_prompt: |
+              Combine the outline and direct answer into a structured explanation with a final answer.
+            max_tokens: 256
+            temperature: 0.2
+            top_p: 0.85
+          output:
+            destination:
+              type: "local"
+              path: "./runs/03_inference_dag"
+            artifacts:
+              - "responses.json"
+              - "logs"
