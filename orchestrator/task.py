@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 import time
 from utils import now_iso
@@ -30,3 +30,6 @@ class TaskRecord(BaseModel):
     graph_node_name: Optional[str] = None
     load: int = 0
     slo_seconds: Optional[float] = None
+    merged_children: Optional[List[Dict[str, Any]]] = None
+    merged_parent_id: Optional[str] = None
+    merge_slice: Optional[Dict[str, int]] = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import copy
+import json
 import threading
 import time
 import uuid
@@ -16,6 +17,7 @@ from utils import safe_get
 
 from load_func import DEFAULT_TASK_LOAD
 from parser import ParsedTaskSpec, parse_task_specs
+from task import TaskStatus
 
 
 # -----------------------------
@@ -185,6 +187,7 @@ class TaskPoolManager:
         dispatch_fn: Callable[[str, Dict[str, Any], Any, Optional[str], Optional[str]], None],
         logger,
         task_lookup: Callable[[str], Any],
+        task_store,
         tasks_lock,
         dependency_resolver: Callable[[str], List[str]],
         pending_status: str,
@@ -195,6 +198,7 @@ class TaskPoolManager:
         self._logger = logger
         self._rds = redis_client
         self._task_lookup = task_lookup
+        self._task_store = task_store
         self._tasks_lock = tasks_lock
         self._dependency_resolver = dependency_resolver
         self._pending_status = pending_status
@@ -311,6 +315,198 @@ class TaskPoolManager:
 
         self._ensure_flush_timer()
 
+    def _apply_inference_merges(
+        self,
+        plans: List[DispatchPlan],
+        pool_map: Dict[str, List[Worker]],
+        inference_entries: List[PoolEntry],
+    ) -> Tuple[List[DispatchPlan], List[PoolEntry]]:
+        if not inference_entries:
+            return plans, inference_entries
+
+        plan_map: Dict[str, DispatchPlan] = {plan.task_id: plan for plan in plans}
+        skip_ids: Set[str] = set()
+        pending: Dict[str, PoolEntry] = {}
+
+        for entry in inference_entries:
+            if entry.task_id in skip_ids:
+                continue
+            plan = plan_map.get(entry.task_id)
+            signature = self._merge_signature(plan.parsed if plan else entry.task)
+            if not signature:
+                continue
+            partner = pending.get(signature)
+            if partner and partner.task_id not in skip_ids:
+                if self._merge_pair(partner, entry, plan_map, pool_map):
+                    skip_ids.add(entry.task_id)
+                    pending.pop(signature, None)
+                    continue
+            pending[signature] = entry
+
+        if not skip_ids:
+            return plans, inference_entries
+
+        for sid in skip_ids:
+            plan_map.pop(sid, None)
+            pool_map.pop(sid, None)
+
+        filtered_plans = [plan for plan in plans if plan.task_id not in skip_ids]
+        remaining_entries = [entry for entry in inference_entries if entry.task_id not in skip_ids]
+        return filtered_plans, remaining_entries
+
+    def _merge_signature(self, task: Dict[str, Any]) -> Optional[str]:
+        spec = copy.deepcopy(task.get("spec") or {})
+        if not spec:
+            return None
+        spec.pop("data", None)
+        try:
+            return json.dumps(spec, sort_keys=True, default=str)
+        except Exception:
+            return None
+
+    def _merge_pair(
+        self,
+        primary_entry: PoolEntry,
+        secondary_entry: PoolEntry,
+        plan_map: Dict[str, DispatchPlan],
+        pool_map: Dict[str, List[Worker]],
+    ) -> bool:
+        primary_plan = plan_map.get(primary_entry.task_id)
+        secondary_plan = plan_map.get(secondary_entry.task_id)
+        if not primary_plan or not secondary_plan:
+            return False
+
+        primary_items = self._expand_data_items(primary_plan.parsed)
+        secondary_items = self._expand_data_items(secondary_plan.parsed)
+        if primary_items is None or secondary_items is None:
+            return False
+        if not primary_items or not secondary_items:
+            return False
+
+        combined_items = list(primary_items) + list(secondary_items)
+        combined_spec = copy.deepcopy(primary_plan.parsed)
+        combined_spec.setdefault("spec", {})["data"] = {"type": "list", "items": combined_items}
+
+        slices: Dict[str, Tuple[int, int]] = {
+            primary_entry.task_id: (0, len(primary_items)),
+            secondary_entry.task_id: (len(primary_items), len(combined_items)),
+        }
+
+        if not self._update_merge_state(primary_entry, secondary_entry, combined_spec, slices):
+            return False
+
+        primary_plan.parsed = combined_spec
+        primary_entry.task = combined_spec
+        plan_map.pop(secondary_entry.task_id, None)
+        pool_map.pop(secondary_entry.task_id, None)
+        self._logger.info(
+            "Merged inference tasks %s + %s into combined batch with %d inputs",
+            primary_entry.task_id,
+            secondary_entry.task_id,
+            len(combined_items),
+        )
+        return True
+
+    def _expand_data_items(self, task: Dict[str, Any]) -> Optional[List[Any]]:
+        spec = (task or {}).get("spec") or {}
+        data = spec.get("data") or {}
+        dtype = str(data.get("type") or "list").lower()
+        if dtype in {"", "list"}:
+            items = data.get("items") or []
+            if not isinstance(items, list):
+                return None
+            return list(items)
+        if dtype == "dataset":
+            return self._dataset_to_items(spec)
+        return None
+
+    def _dataset_to_items(self, spec: Dict[str, Any]) -> Optional[List[str]]:
+        data = spec.get("data") or {}
+        source = data.get("url")
+        if not source:
+            return None
+        try:
+            from datasets import load_dataset  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            self._logger.warning("Cannot merge dataset-based inference tasks: %s", exc)
+            return None
+
+        name = data.get("name")
+        split = data.get("split", "train")
+        try:
+            dataset = load_dataset(source, name=name, split=split)
+        except Exception as exc:
+            self._logger.warning("Failed to load dataset %s for merge: %s", source, exc)
+            return None
+
+        if data.get("shuffle"):
+            seed = int(data.get("seed", 42))
+            buffer_size = data.get("buffer_size")
+            try:
+                if buffer_size is None:
+                    dataset = dataset.shuffle(seed=seed)
+                else:
+                    dataset = dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
+            except Exception as exc:
+                self._logger.warning("Dataset shuffle failed during merge: %s", exc)
+
+        column = data.get("column", "text")
+        if column not in dataset.column_names:
+            self._logger.warning("Column %s not found when merging dataset inference tasks", column)
+            return None
+
+        try:
+            return [str(value) for value in dataset[column]]
+        except Exception as exc:
+            self._logger.warning("Failed to extract dataset column %s for merge: %s", column, exc)
+            return None
+
+    def _update_merge_state(
+        self,
+        primary_entry: PoolEntry,
+        secondary_entry: PoolEntry,
+        combined_spec: Dict[str, Any],
+        slices: Dict[str, Tuple[int, int]],
+    ) -> bool:
+        parent_id = primary_entry.task_id
+        child_id = secondary_entry.task_id
+        with self._tasks_lock:
+            parent_rec = self._task_lookup(parent_id)
+            child_rec = self._task_lookup(child_id)
+            if not parent_rec or not child_rec:
+                return False
+
+            parent_children = list(parent_rec.merged_children or [])
+            parent_children = [c for c in parent_children if c.get("task_id") != child_id]
+            parent_children.append(
+                {
+                    "task_id": child_id,
+                    "start": slices[child_id][0],
+                    "end": slices[child_id][1],
+                }
+            )
+            parent_rec.merged_children = parent_children
+            parent_rec.merge_slice = {
+                "start": slices[parent_id][0],
+                "end": slices[parent_id][1],
+            }
+            parent_rec.parsed = copy.deepcopy(combined_spec)
+
+            child_rec.status = TaskStatus.WAITING
+            child_rec.error = f"Waiting on merged inference parent {parent_id}"
+            child_rec.assigned_worker = None
+            child_rec.next_retry_at = None
+            child_rec.merged_parent_id = parent_id
+            child_rec.merge_slice = {
+                "start": slices[child_id][0],
+                "end": slices[child_id][1],
+            }
+            child_rec.merged_children = None
+
+        self._task_store.update_parsed(parent_id, combined_spec)
+        self._task_store.register_merge(parent_id, slices)
+        return True
+
     def _optimize_batch(self, entries: List[PoolEntry]) -> List[DispatchPlan]:
         """
         Build dispatch plans and try to:
@@ -350,9 +546,16 @@ class TaskPoolManager:
                 if model_name:
                     model_counts[model_name] += 1
 
+        plans, inference_entries = self._apply_inference_merges(plans, pool_map, inference_entries)
+        model_counts = Counter()
+        for entry in inference_entries:
+            model_name = self._extract_model_name(entry.task)
+            if model_name:
+                model_counts[model_name] += 1
+
         # 2) Co-location when workers are tight: pair tasks sharing common workers
         available_workers = {w.worker_id for workers in pool_map.values() for w in workers}
-        worker_shortage = len(available_workers) < len(entries)
+        worker_shortage = len(available_workers) < len(pool_map)
 
         if worker_shortage and len(inference_entries) >= 2:
             ordered = sorted(inference_entries, key=lambda e: getattr(e.record, "submitted_ts", 0.0))
@@ -556,6 +759,8 @@ class TaskStore:
         self._pool_manager: Optional[TaskPoolManager] = None
         self._dead_letters: List[Dict[str, Any]] = []
         self._dlq_limit = max(1, int(os.getenv("TASK_DLQ_LIMIT", "500")))
+        self._merge_slices: Dict[str, Dict[str, Tuple[int, int]]] = {}
+        self._merge_parent: Dict[str, str] = {}
 
     # -------------------------
     # Pool management
@@ -580,6 +785,7 @@ class TaskStore:
             dispatch_fn=dispatch_fn,
             logger=logger,
             task_lookup=task_lookup,
+            task_store=self,
             tasks_lock=tasks_lock,
             dependency_resolver=self.get_dependencies,
             pending_status=pending_status,
@@ -612,6 +818,35 @@ class TaskStore:
     def flush_pool(self) -> None:
         if self._pool_manager:
             self._pool_manager.flush_due()
+
+    def update_parsed(self, task_id: str, parsed: Dict[str, Any]) -> None:
+        with self._lock:
+            if task_id in self._parsed:
+                self._parsed[task_id] = copy.deepcopy(parsed)
+
+    def register_merge(self, parent_id: str, slices: Dict[str, Tuple[int, int]]) -> None:
+        with self._lock:
+            existing = self._merge_slices.get(parent_id, {})
+            existing.update(slices)
+            self._merge_slices[parent_id] = existing
+            for task_id in slices.keys():
+                if task_id != parent_id:
+                    self._merge_parent[task_id] = parent_id
+
+    def clear_merge(self, parent_id: str) -> None:
+        with self._lock:
+            slices = self._merge_slices.pop(parent_id, {})
+            for task_id in list(slices.keys()):
+                if task_id != parent_id:
+                    self._merge_parent.pop(task_id, None)
+
+    def get_merge_slices(self, parent_id: str) -> Dict[str, Tuple[int, int]]:
+        with self._lock:
+            return copy.deepcopy(self._merge_slices.get(parent_id, {}))
+
+    def get_merge_parent(self, task_id: str) -> Optional[str]:
+        with self._lock:
+            return self._merge_parent.get(task_id)
 
     # -------------------------
     # Registration / Parsing
@@ -677,13 +912,19 @@ class TaskStore:
 
     def list_waiting_tasks(self) -> List[str]:
         with self._lock:
-            return [tid for tid in self._parsed.keys() if tid not in self._released]
+            return [
+                tid
+                for tid in self._parsed.keys()
+                if tid not in self._released and tid not in self._merge_parent
+            ]
 
     def ready_to_dispatch(self, is_dep_satisfied: Callable[[str], bool]) -> List[str]:
         ready: List[str] = []
         with self._lock:
             for tid, deps in self._depends.items():
                 if tid in self._released:
+                    continue
+                if tid in self._merge_parent:
                     continue
                 if all(is_dep_satisfied(did) for did in deps):
                     ready.append(tid)

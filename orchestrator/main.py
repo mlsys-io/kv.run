@@ -5,15 +5,16 @@ from __future__ import annotations
 
 import os
 import json
+import copy
 import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional, List, Tuple
 
 import redis
-from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, Body, UploadFile, File
+from fastapi import FastAPI, HTTPException, Path as ApiPath, Depends, Request, UploadFile, File
 from fastapi.responses import FileResponse
 
 from utils import (
@@ -147,6 +148,8 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
         "result": payload.result,
     }
 
+    content, child_payloads = _split_merged_result(task_id, content)
+
     file_path = write_result(RESULTS_DIR, task_id, content)
     logger.info("Stored result for task %s at %s", task_id, file_path)
 
@@ -155,6 +158,9 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
         if rec:
             rec.status = TaskStatus.DONE
             rec.error = None
+
+    if child_payloads:
+        _finalize_merge_children(task_id, child_payloads)
 
     maybe_aggregate_parent(
         task_id,
@@ -361,6 +367,7 @@ def _tasks_events_loop() -> None:
                     if rec:
                         with TASKS_LOCK:
                             rec.next_retry_at = None
+                        _propagate_merge_failure(rec)
                         _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
                     TASK_STORE.flush_pool()
                     continue
@@ -371,6 +378,119 @@ def _tasks_events_loop() -> None:
         except Exception as e:
             logger.warning("tasks.events listener error: %s; reconnecting soon...", e)
             time.sleep(2)
+
+
+def _split_merged_result(task_id: str, content: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    slices = TASK_STORE.get_merge_slices(task_id)
+    if not slices:
+        return content, {}
+
+    base_content = copy.deepcopy(content)
+    base_result = copy.deepcopy(base_content.get("result") or {})
+    items: List[Any] = list(base_result.get("items") or [])
+    total_items = len(items)
+
+    parent_slice = slices.get(task_id, (0, total_items))
+    parent_content = copy.deepcopy(content)
+    parent_content["result"] = _slice_result_section(base_result, items, parent_slice, total_items)
+    parent_meta = dict(parent_content.get("metadata") or {})
+    parent_meta.setdefault("merged_children", [cid for cid in slices.keys() if cid != task_id])
+    parent_content["metadata"] = parent_meta
+
+    child_payloads: Dict[str, Dict[str, Any]] = {}
+    for child_id, slc in slices.items():
+        if child_id == task_id:
+            continue
+        child_content = copy.deepcopy(content)
+        child_content["task_id"] = child_id
+        child_content["result"] = _slice_result_section(base_result, items, slc, total_items)
+        child_meta = dict(child_content.get("metadata") or {})
+        child_meta["merged_from"] = task_id
+        child_meta["merged_slice"] = {"start": int(slc[0]), "end": int(slc[1])}
+        child_content["metadata"] = child_meta
+        child_payloads[child_id] = child_content
+
+    return parent_content, child_payloads
+
+
+def _slice_result_section(
+    base_result: Dict[str, Any],
+    items: List[Any],
+    slc: Tuple[int, int],
+    total_items: int,
+) -> Dict[str, Any]:
+    start = max(0, int(slc[0]))
+    end = max(start, int(slc[1]))
+    if total_items:
+        end = min(end, total_items)
+
+    subset = items[start:end] if items else []
+    result = copy.deepcopy(base_result)
+    result["items"] = subset
+
+    usage = base_result.get("usage")
+    if isinstance(usage, dict):
+        result["usage"] = _scale_usage(usage, total_items, len(subset))
+
+    if "num_requests" in result:
+        result["num_requests"] = len(subset)
+    return result
+
+
+def _scale_usage(usage: Dict[str, Any], total_items: int, portion: int) -> Dict[str, Any]:
+    if portion <= 0 or total_items <= 0:
+        return copy.deepcopy(usage)
+    ratio = portion / float(total_items)
+    scaled: Dict[str, Any] = {}
+    for key, value in usage.items():
+        if key in {"num_requests", "requests"}:
+            scaled[key] = portion
+            continue
+        if isinstance(value, (int, float)):
+            computed = value * ratio
+            if isinstance(value, int):
+                scaled[key] = max(0, int(round(computed)))
+            else:
+                scaled[key] = computed
+        else:
+            scaled[key] = copy.deepcopy(value)
+    return scaled
+
+
+def _finalize_merge_children(parent_id: str, child_payloads: Dict[str, Dict[str, Any]]) -> None:
+    if not child_payloads:
+        with TASKS_LOCK:
+            parent_rec = TASKS.get(parent_id)
+            if parent_rec:
+                parent_rec.merged_children = None
+                parent_rec.merge_slice = None
+        TASK_STORE.clear_merge(parent_id)
+        return
+
+    with TASKS_LOCK:
+        parent_rec = TASKS.get(parent_id)
+        if parent_rec:
+            parent_rec.merged_children = None
+            parent_rec.merge_slice = None
+
+    for child_id, payload in child_payloads.items():
+        try:
+            path = write_result(RESULTS_DIR, child_id, payload)
+            logger.info("Stored split result for merged task %s -> child %s at %s", parent_id, child_id, path)
+        except Exception as exc:
+            logger.warning("Failed to store split result for child %s derived from %s: %s", child_id, parent_id, exc)
+            continue
+
+        with TASKS_LOCK:
+            child_rec = TASKS.get(child_id)
+            if child_rec:
+                child_rec.status = TaskStatus.DONE
+                child_rec.error = None
+                child_rec.merged_parent_id = None
+                child_rec.merge_slice = None
+        TASK_STORE.mark_released(child_id)
+
+    TASK_STORE.clear_merge(parent_id)
 
 
 def _workers_events_loop() -> None:
@@ -433,6 +553,35 @@ def _record_dead_letter(
         payload["slo_seconds"] = rec.slo_seconds
     TASK_STORE.record_dead_letter(payload)
 
+
+def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
+    children = list(parent_rec.merged_children or [])
+    if not children:
+        return
+
+    parent_id = parent_rec.task_id
+    error_msg = parent_rec.error or "Merged parent failed"
+
+    with TASKS_LOCK:
+        parent_rec.merged_children = None
+        parent_rec.merge_slice = None
+
+    for child in children:
+        child_id = child.get("task_id")
+        if not child_id:
+            continue
+        with TASKS_LOCK:
+            child_rec = TASKS.get(child_id)
+            if child_rec:
+                child_rec.status = TaskStatus.FAILED
+                child_rec.error = error_msg
+                child_rec.merged_parent_id = None
+                child_rec.merge_slice = None
+        TASK_STORE.mark_released(child_id)
+        logger.info("Propagated merged failure from %s to child %s", parent_id, child_id)
+
+    TASK_STORE.clear_merge(parent_id)
+
 def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
     """Move dispatched tasks back to waiting when their worker disappears."""
     safe_worker_id = (worker_id or "").strip()
@@ -489,14 +638,34 @@ app.router.lifespan_context = _lifespan
 # Task submission & queries
 # -------------------------
 @app.post("/api/v1/tasks")
-async def submit_task(raw: Union[str, Dict[str, Any]] = Body(..., media_type="text/yaml"),
-                      _: Any = Depends(require_auth)):
-    if isinstance(raw, dict) and "yaml" in raw:
-        yml = str(raw["yaml"])
-    elif isinstance(raw, str):
-        yml = raw
+async def submit_task(request: Request, _: Any = Depends(require_auth)):
+    raw_body = await request.body()
+    if not raw_body:
+        raise HTTPException(status_code=400, detail="Request body is required")
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    yml: Optional[str] = None
+
+    if "application/json" in content_type:
+        try:
+            data = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
+
+        if isinstance(data, dict) and "yaml" in data:
+            yml = str(data["yaml"])
+        elif isinstance(data, str):
+            yml = data
+        else:
+            raise HTTPException(status_code=400, detail='Expected YAML string or {"yaml":"..."} in JSON body')
     else:
-        raise HTTPException(status_code=400, detail='Expected YAML string or {"yaml":"..."}')
+        try:
+            yml = raw_body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Body must be UTF-8 encoded text")
+
+    if yml is None or yml.strip() == "":
+        raise HTTPException(status_code=400, detail="YAML payload cannot be empty")
 
     entries = TASK_STORE.parse_and_register(yml)
     results: List[Dict[str, Any]] = []
