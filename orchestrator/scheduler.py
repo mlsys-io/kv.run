@@ -13,16 +13,18 @@ When enabled and capacity is high, we:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import uuid
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from utils import safe_get, parse_int_env, WORKERS_SET
-from assigner import Worker, is_stale_by_redis, get_worker_from_redis, _hw_satisfies
-from task_load import HEAVY_LOAD_THRESHOLD, MEDIUM_LOAD_THRESHOLD
+from utils import safe_get, parse_int_env, WORKERS_SET, parse_mem_to_bytes
+from worker_cls import Worker, is_stale_by_redis, get_worker_from_redis, _hw_satisfies
+from load_func import HEAVY_LOAD_THRESHOLD, MEDIUM_LOAD_THRESHOLD
 
-# Tunables (env)
+# ----------------------- Tunables (env) -----------------------
+
 CPU_ONLY_WEIGHT = float(os.getenv("CPU_ONLY_WEIGHT", "0.6"))
 GPU_WEIGHT = float(os.getenv("GPU_WEIGHT", "1.0"))
 HIGH_AVAIL_RATIO = float(os.getenv("HIGH_AVAIL_RATIO", "2.0"))
@@ -38,6 +40,7 @@ def is_data_parallel_enabled(task: Dict[str, Any]) -> bool:
     task_type = str(safe_get(task, "spec.taskType", "")).lower()
     para_enabled = bool(safe_get(task, "spec.parallel.enabled", False))
     return task_type == "inference" and para_enabled
+
 
 def max_auto_shards_for(task: Dict[str, Any]) -> int:
     """Max shard fan-out for a given task (spec.parallel.max_shards overrides env)."""
@@ -55,11 +58,32 @@ def max_auto_shards_for(task: Dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 def _has_gpus(worker: Worker) -> bool:
-    gpus = safe_get(worker.hardware, "gpu.gpus", []) or []
-    return len(gpus) > 0
+    """
+    Return True if the worker reports GPUs.
+    Accepts both detailed list (hardware.gpu.gpus) and aggregate counts (gpu.count).
+    """
+    g_list = safe_get(worker.hardware, "gpu.gpus", []) or safe_get(worker.hardware, "gpus", []) or []
+    if isinstance(g_list, list) and len(g_list) > 0:
+        return True
+    # aggregate fallbacks
+    cnt = (
+        safe_get(worker.hardware, "gpu.count", None)
+        or safe_get(worker.hardware, "gpu_info.count", None)
+        or safe_get(worker.hardware, "gpuCount", None)
+        or safe_get(worker.hardware, "gpu.counts", None)
+        or safe_get(worker.hardware, "gpu", {}).get("count")
+        or safe_get(worker.hardware, "gpu_count", None)
+    )
+    try:
+        return int(cnt or 0) > 0
+    except Exception:
+        return False
+
 
 def _weight_for(worker: Worker) -> float:
+    """Simple capacity heuristic: GPU nodes weigh more than CPU-only nodes."""
     return GPU_WEIGHT if _has_gpus(worker) else CPU_ONLY_WEIGHT
+
 
 def idle_satisfying_pool(rds, task: Dict[str, Any], exclude_ids: Optional[Set[str]] = None) -> List[Worker]:
     """Return IDLE, non-stale workers that satisfy task requirements."""
@@ -77,48 +101,53 @@ def idle_satisfying_pool(rds, task: Dict[str, Any], exclude_ids: Optional[Set[st
             out.append(w)
     return out
 
+
 def weighted_available(workers: List[Worker]) -> float:
+    """Sum of capacity weights for the pool."""
     return sum(_weight_for(w) for w in workers)
 
-from utils import safe_get, parse_mem_to_bytes  # ensure these are imported
 
 def sort_workers(workers: List[Worker]) -> List[Worker]:
-    """Prefer GPU workers; then by total GPU VRAM (desc), system RAM (desc), CPU cores (desc)."""
+    """
+    Prefer GPU workers; then by total GPU VRAM (desc), system RAM (desc), CPU cores (desc).
 
-    def _gpu_count_and_mem_bytes(w: Worker) -> tuple[int, int]:
-        """Return (#GPUs, total GPU memory in bytes) with tolerant field parsing."""
-        gpus = safe_get(w.hardware, "gpu.gpus", []) or []
-        count = len(gpus)
-        total_bytes = 0
-        for g in gpus:
-            # Try common fields first; fall back to nested structures/strings with units.
-            cand = (
-                safe_get(g, "memory.total_bytes")
-                or safe_get(g, "memory_bytes")
-                or safe_get(g, "vram_bytes")
-                or safe_get(g, "memory.total")
-                or safe_get(g, "vram")
-                or safe_get(safe_get(g, "memory", {}) or {}, "total_bytes")
-                or safe_get(safe_get(g, "memory", {}) or {}, "bytes")
-                or safe_get(safe_get(g, "memory", {}) or {}, "total")
-            )
-            try:
-                bytes_val = parse_mem_to_bytes(cand) if isinstance(cand, str) else int(cand or 0)
-            except Exception:
-                bytes_val = 0
-            total_bytes += int(bytes_val)
-        return count, total_bytes
+    Optimization: precompute GPU (count, total_vram_bytes) once per worker
+    to avoid repeated parsing / conversions inside the sort key.
+    """
+    metrics: List[Tuple[Worker, int, int, int, int]] = []
 
-    return sorted(
-        workers,
-        key=lambda w: (
-            1 if _gpu_count_and_mem_bytes(w)[0] > 0 else 0,                         # GPU present first
-            _gpu_count_and_mem_bytes(w)[1],                                         # total GPU VRAM
-            int(safe_get(w.hardware, "memory.total_bytes", 0) or 0),                # system RAM
-            int(safe_get(w.hardware, "cpu.logical_cores", 0) or 0),                 # CPU cores
-        ),
-        reverse=True,
-    )
+    for w in workers:
+        # GPU metrics
+        g_list = safe_get(w.hardware, "gpu.gpus", []) or safe_get(w.hardware, "gpus", []) or []
+        g_count = len(g_list) if isinstance(g_list, list) else 0
+        total_vram = 0
+        if g_count > 0:
+            for g in g_list:
+                cand = (
+                    safe_get(g, "memory.total_bytes")
+                    or safe_get(g, "memory_bytes")
+                    or safe_get(g, "vram_bytes")
+                    or safe_get(g, "memory.total")
+                    or safe_get(g, "vram")
+                    or safe_get(safe_get(g, "memory", {}) or {}, "total_bytes")
+                    or safe_get(safe_get(g, "memory", {}) or {}, "bytes")
+                    or safe_get(safe_get(g, "memory", {}) or {}, "total")
+                )
+                try:
+                    bytes_val = parse_mem_to_bytes(cand) if isinstance(cand, str) else int(cand or 0)
+                except Exception:
+                    bytes_val = 0
+                total_vram += int(bytes_val)
+
+        # System RAM & CPU cores
+        sys_ram = int(safe_get(w.hardware, "memory.total_bytes", 0) or 0)
+        cpu_cores = int(safe_get(w.hardware, "cpu.logical_cores", 0) or 0)
+
+        metrics.append((w, g_count, total_vram, sys_ram, cpu_cores))
+
+    # Sort by GPU presence, total VRAM, system RAM, CPU cores (all desc)
+    metrics.sort(key=lambda t: (1 if t[1] > 0 else 0, t[2], t[3], t[4]), reverse=True)
+    return [t[0] for t in metrics]
 
 
 def estimate_queue_length(task_store) -> int:
@@ -126,6 +155,7 @@ def estimate_queue_length(task_store) -> int:
     try:
         return len(task_store.list_waiting_tasks())
     except Exception:
+        # Conservative default to avoid 'infinite capacity' misread
         return 1
 
 # ---------------------------------------------------------------------------
@@ -141,18 +171,33 @@ class Strategy:
     def __repr__(self) -> str:
         return f"Strategy(mode={self.mode}, shard_count={self.shard_count}, prefer_best={self.prefer_best})"
 
+
 def choose_strategy(task: Dict[str, Any], idle_pool: List[Worker], queued: int) -> Strategy:
-    """Pick first/best/data-parallel based on availability:demand ratio."""
+    """
+    Pick first/best/data-parallel based on availability:demand ratio.
+
+    - Compute availability weight (GPU > CPU-only).
+    - If data-parallel is enabled and capacity is abundant, choose data_parallel
+      with shard_count capped by:
+        * number of idle workers
+        * MAX_AUTO_SHARDS / spec.parallel.max_shards
+        * at least max(spec.resources.replicas, 2) to make parallelization meaningful
+    - Else fall back to best_fit / first_fit
+    """
     demand = max(1, queued)
     avail_weight = weighted_available(idle_pool)
-    ratio = avail_weight / demand
+    ratio = (avail_weight / demand) if demand > 0 else 0.0
 
     base_replicas = int(safe_get(task, "spec.resources.replicas", 1) or 1)
-    max_shards = max(1, min(len(idle_pool), max_auto_shards_for(task)))
+    # make sure base_replicas is at least 1; parallelization meaningful if >= 2
+    min_meaningful = max(base_replicas, 2)
 
-    # Data parallel only if enabled by task
     if is_data_parallel_enabled(task) and ratio >= HIGH_AVAIL_RATIO and len(idle_pool) > 1:
-        target = max(base_replicas, max_shards)
+        max_shards = max(1, min(len(idle_pool), max_auto_shards_for(task)))
+        target = min(max_shards, min_meaningful)
+        # If capacity allows more than 'min_meaningful', expand to max_shards
+        if max_shards > min_meaningful:
+            target = max_shards
         return Strategy(mode="data_parallel", shard_count=target, prefer_best=True)
 
     if ratio <= LOW_AVAIL_RATIO:
@@ -170,33 +215,53 @@ def select_workers_for_task(
     prefer_best: bool,
     task_load: int = 0,
 ) -> List[Worker]:
-    if not pool:
+    """
+    Select up to shard_count workers from the pool.
+    Heavy loads and 'prefer_best' cause a sort prioritizing GPU/VRAM/RAM/CPU.
+    """
+    if not pool or shard_count <= 0:
         return []
-    if prefer_best or task_load >= HEAVY_LOAD_THRESHOLD:
-        pool = sort_workers(pool)
-    elif task_load >= MEDIUM_LOAD_THRESHOLD:
+    if prefer_best or task_load >= HEAVY_LOAD_THRESHOLD or task_load >= MEDIUM_LOAD_THRESHOLD:
         pool = sort_workers(pool)
     return pool[:shard_count]
+
 
 _SPLIT_RE = re.compile(r"^(?P<name>[^\[\]]+)(?:\[(?P<rng>[^\]]*)\])?$")
 
 def _format_pct(x: float) -> str:
+    """Format a percentage with trimmed trailing zeros (e.g., 12.5 -> '12.5')."""
+    if not math.isfinite(x):
+        x = 0.0
+    x = max(0.0, min(100.0, x))
     s = f"{x:.6f}".rstrip("0").rstrip(".")
-    return s
+    return s or "0"
 
 def _parse_range_to_pct(rng: Optional[str]) -> tuple[float, float]:
-    """Parse 'a%:b%' / ':b%' / 'a%:' / '' into (start_pct, end_pct)."""
+    """
+    Parse 'a%:b%' / ':b%' / 'a%:' / '' into (start_pct, end_pct), both in [0,100].
+    Unknown formats collapse to full range [0,100].
+    """
     if not rng or rng.strip() == "":
         return 0.0, 100.0
     parts = rng.split(":")
-    if len(parts) == 1:
+    if len(parts) == 1:  # e.g., '[10%]' -> interpret as [0:10%]
         a = parts[0].strip()
         if a.endswith("%"):
-            return 0.0, float(a[:-1])
+            try:
+                return 0.0, float(a[:-1])
+            except Exception:
+                return 0.0, 100.0
         return 0.0, 100.0
     a, b = parts[0].strip(), parts[1].strip()
-    start = float(a[:-1]) if a.endswith("%") and a[:-1] != "" else 0.0
-    end   = float(b[:-1]) if b.endswith("%") and b[:-1] != "" else 100.0
+    def _to_pct(s: str, default: float) -> float:
+        if s.endswith("%"):
+            try:
+                return float(s[:-1])
+            except Exception:
+                return default
+        return default
+    start = _to_pct(a, 0.0)
+    end   = _to_pct(b, 100.0)
     start = max(0.0, min(100.0, start))
     end   = max(0.0, min(100.0, end))
     if end < start:
@@ -209,19 +274,22 @@ def compute_shard_split(base_split: str, index: int, total: int) -> str:
     divide its covered percentage evenly into `total` parts and return
     the sub-range for `index`. If parsing fails, return base_split.
     """
-    m = _SPLIT_RE.match(base_split.strip())
-    if not m:
+    try:
+        m = _SPLIT_RE.match(base_split.strip())
+        if not m:
+            return base_split
+        name = m.group("name").strip()
+        rng  = m.group("rng")
+        start, end = _parse_range_to_pct(rng)
+        span = max(0.0, end - start)
+        t = max(1, int(total or 0))
+        i = max(0, min(int(index or 0), t - 1))
+        step = span / t
+        s_i = start + step * i
+        e_i = start + step * (i + 1)
+        return f"{name}[{_format_pct(s_i)}%:{_format_pct(e_i)}%]"
+    except Exception:
         return base_split
-    name = m.group("name").strip()
-    rng  = m.group("rng")
-    start, end = _parse_range_to_pct(rng)
-    span = max(0.0, end - start)
-    if total <= 0:
-        total = 1
-    step = span / total
-    s_i = start + step * index
-    e_i = start + step * (index + 1)
-    return f"{name}[{_format_pct(s_i)}%:{_format_pct(e_i)}%]"
 
 def make_shard_messages(
     parent_task_id: str,
@@ -240,17 +308,18 @@ def make_shard_messages(
 
     for i, w in enumerate(shard_workers):
         child_id = str(uuid.uuid4())
+        # Shallow copies + per-field dict copies to limit overhead
         task_copy = dict(base_task)
         spec = dict(task_copy.get("spec", {}))
 
-        # Stamp shard metadata
+        # Stamp shard metadata (executor may rely on this even if split isn't used)
         spec["shard"] = {"index": i, "total": total, "parent_task_id": parent_task_id}
 
         # If data.split exists, try to carve it per-shard
         if base_split:
             try:
                 shard_split = compute_shard_split(base_split, i, total)
-                data = dict(spec.get("data", base_data))
+                data = dict(spec.get("data") or base_data)
                 data["split"] = shard_split
                 spec["data"] = data
             except Exception:
@@ -259,4 +328,5 @@ def make_shard_messages(
 
         task_copy["spec"] = spec
         out.append((child_id, task_copy, w))
+
     return out

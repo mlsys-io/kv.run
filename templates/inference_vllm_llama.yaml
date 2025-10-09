@@ -1,10 +1,10 @@
 apiVersion: mloc/v1
 kind: InferenceTask
 metadata:
-  name: mistral-7b-infer
+  name: inference-vllm-llama
   owner: alice
   annotations:
-    description: "Run text-generation inference using vLLM (Mistral-7B)"
+    description: "Run text-generation inference using vLLM (Llama-3.2-3B-Instruct model from Hugging Face) on the GSM8K dataset."
 
 spec:
   taskType: "inference"
@@ -27,7 +27,7 @@ spec:
   model:
     source:
       type: "huggingface"
-      identifier: "mistralai/Mistral-7B-Instruct-v0.1"
+      identifier: "meta-llama/Llama-3.2-3B-Instruct"
       revision: "main"
     vllm:
       tensor_parallel_size: 1
@@ -54,7 +54,7 @@ spec:
   output:
     destination:
       type: "local"
-      path: "./mistral_7b_infer"
+      path: "./inference_vllm_llama"
     artifacts:
       - "responses.json"
       - "logs"

@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from pydantic import BaseModel, Field
+from utils import now_iso
 
+class ResultPayload(BaseModel):
+    task_id: str
+    result: Dict[str, Any]
+    worker_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    received_at: str = Field(default_factory=now_iso)
 
 def _sanitize_task_id(task_id: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in task_id)

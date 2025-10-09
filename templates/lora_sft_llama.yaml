@@ -10,6 +10,7 @@ metadata:
 
 spec:
   taskType: "lora_sft"
+  sloSeconds: 10
 
   resources:
     replicas: 1

@@ -1,26 +1,21 @@
-# parser.py
-"""Task parsing and in-memory dependency tracking (supports stages and DAG graphs).
-
-Unchanged core behavior:
-- REQUIRED_FIELDS, single-task validation, optional staged pipelines.
-- The scheduler may choose to shard at dispatch time; those child shards
-  are internal to the orchestrator and are NOT registered in TaskStore,
-  so downstream dependencies continue to track the parent logical task.
-"""
 from __future__ import annotations
 
 import copy
-import threading
-import uuid
-from typing import Any, Dict, List, Set, Callable
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import HTTPException
 import yaml
+from fastapi import HTTPException
 
+from load_func import compute_task_load
+from results import read_result
 from utils import safe_get
-from task_load import compute_task_load, DEFAULT_TASK_LOAD
 
 
+# Required minimal fields for a task spec.
 REQUIRED_FIELDS = [
     "apiVersion",
     "kind",
@@ -31,276 +26,467 @@ REQUIRED_FIELDS = [
     "spec.resources.hardware.memory",
 ]
 
+# Matches ${path.to.value[0]} placeholders in strings.
+# We allow escaping via $${...} (handled in _replace_placeholders).
+_PLACEHOLDER_RE = re.compile(r"(?<!\$)\$\{([^}]+)\}")
 
-def _validate_yaml_to_dict(yaml_text: str) -> Dict[str, Any]:
-    """Parse YAML and validate required fields. Raises HTTP 400 on error."""
+
+@dataclass
+class ParsedTaskSpec:
+    """Flattened logical task spec produced from a single YAML."""
+    spec: Dict[str, Any]
+    depends_on: List[str]
+    local_name: Optional[str]
+    graph_node_name: Optional[str]
+    load: int
+    slo_seconds: Optional[float]
+
+
+def validate_yaml_to_dict(yaml_text: str) -> Dict[str, Any]:
+    """
+    Parse YAML into a dict and validate presence of required fields.
+    Raises HTTP 400 with actionable error messages on failure.
+
+    Notes:
+      - If 'gpu' block exists under spec.resources.hardware.gpu, we require 'count'.
+        'type' is optional to align with runtime matching fallback.
+    """
     try:
         data = yaml.safe_load(yaml_text)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {exc}")
 
-    # Validate required fields on the base document
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="YAML root must be a mapping/dict")
+
+    # Required path presence checks
     for path in REQUIRED_FIELDS:
-        cur = data
-        for key in path.split('.'):
+        cur: Any = data
+        for key in path.split("."):
             if not isinstance(cur, dict) or key not in cur:
                 raise HTTPException(status_code=400, detail=f"Missing required field: {path}")
             cur = cur[key]
 
-    # Optional GPU block validation
-    gpu = safe_get(data, "spec.resources.hardware.gpu", {})
+    # Basic type sanity (best-effort, do not over-validate)
+    _ensure_is_dict(safe_get(data, "metadata"), "metadata")
+    _ensure_is_dict(safe_get(data, "spec"), "spec")
+    _ensure_is_dict(safe_get(data, "spec.resources"), "spec.resources")
+    _ensure_is_dict(safe_get(data, "spec.resources.hardware"), "spec.resources.hardware")
+
+    # GPU requirements: require 'count' if gpu section exists; 'type' is optional
+    gpu = safe_get(data, "spec.resources.hardware.gpu", {}) or {}
     if gpu:
         if safe_get(gpu, "count") is None:
             raise HTTPException(status_code=400, detail="Missing spec.resources.hardware.gpu.count")
-        if safe_get(gpu, "type") is None:
-            raise HTTPException(status_code=400, detail="Missing spec.resources.hardware.gpu.type")
 
     return data
 
 
-def _deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursive dict merge (src overrides dst). Returns a new dict."""
+def _ensure_is_dict(val: Any, path: str) -> None:
+    if val is not None and not isinstance(val, dict):
+        raise HTTPException(status_code=400, detail=f"Field '{path}' must be a mapping/dict")
+
+
+def deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursive dict merge (src overrides dst). Returns a new dict.
+    Safe for nested structures by copying leaf nodes.
+    """
     out = copy.deepcopy(dst)
-    for k, v in (src or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
+    if not isinstance(src, dict):
+        return out
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], value)
         else:
-            out[k] = copy.deepcopy(v)
+            out[key] = copy.deepcopy(value)
     return out
 
 
-class TaskStore:
-    """In-memory registry for parsed tasks and dependency relations.
-
-    Data structures:
-      - _parsed:   task_id -> parsed YAML dict
-      - _depends:  task_id -> set of predecessor task_ids
-      - _released: set of task_ids already handed to the dispatcher (avoid duplicates)
+def parse_task_specs(yaml_text: str) -> List[ParsedTaskSpec]:
     """
+    Expand a YAML document into one or more logical task specs:
 
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._parsed: Dict[str, Dict[str, Any]] = {}
-        self._depends: Dict[str, Set[str]] = {}
-        self._released: Set[str] = set()
-        self._load: Dict[str, int] = {}
+      1) Graph mode:    spec.graph.nodes[*]
+      2) Stages mode:   spec.stages[*]
+      3) Single-task:   base spec as-is
 
-    # -------------------------
-    # Registration / Parsing
-    # -------------------------
-    def parse_and_register(self, yaml_text: str) -> List[Dict[str, Any]]:
-        """Parse YAML and register one or more tasks in the store.
+    Each produced spec includes computed load and SLO seconds.
+    """
+    base = validate_yaml_to_dict(yaml_text)
 
-        Behavior:
-          - If spec.stages is present and is a non-empty list:
-                * Generate a task per stage with its own task_id
-                * Merge base spec with stage.spec overrides
-                * Auto-chain dependencies: stage[i] depends on stage[i-1]
-                * metadata.name is suffixed with ':<stage_name_or_index>'
-          - Else (no stages):
-                * Register a single task with optional spec.dependsOn
+    # Base without graph/stages for merging per-node/stage overrides.
+    base_clean = copy.deepcopy(base)
+    if isinstance(base_clean.get("spec"), dict):
+        base_clean["spec"].pop("stages", None)
+        base_clean["spec"].pop("graph", None)
 
-        Returns:
-            List[{"task_id": str, "parsed": dict, "depends_on": List[str]}]
-        """
-        base = _validate_yaml_to_dict(yaml_text)
-        base_load = compute_task_load(base)
-        stages = safe_get(base, "spec.stages", None)
-        graph_nodes = safe_get(base, "spec.graph.nodes", None)
+    stages = safe_get(base, "spec.stages")
+    graph_nodes = safe_get(base, "spec.graph.nodes")
 
-        # Base copy for children to inherit from
-        base_clean = copy.deepcopy(base)
-        if isinstance(safe_get(base_clean, "spec", {}), dict):
-            base_clean["spec"].pop("stages", None)
-            base_clean["spec"].pop("graph", None)
+    if isinstance(graph_nodes, list) and graph_nodes:
+        return _parse_graph_nodes(base, base_clean, graph_nodes)
 
-        results: List[Dict[str, Any]] = []
+    if isinstance(stages, list) and stages:
+        return _parse_linear_stages(base, base_clean, stages)
 
-        if isinstance(graph_nodes, list) and graph_nodes:
-            return self._register_graph(base, base_clean, graph_nodes)
+    depends_on_raw = safe_get(base, "spec.dependsOn", []) or []
+    if not isinstance(depends_on_raw, list):
+        raise HTTPException(status_code=400, detail="spec.dependsOn must be a list of task_ids")
+    depends_on = [str(dep).strip() for dep in depends_on_raw if str(dep).strip()]
 
-        if isinstance(stages, list) and stages:
-            return self._register_linear_stages(base, base_clean, stages)
+    load = compute_task_load(base)
+    slo = extract_slo_seconds(base)
 
-        # Single-task path (no stages)
-        depends_on_raw = safe_get(base, "spec.dependsOn", []) or []
-        if not isinstance(depends_on_raw, list):
-            raise HTTPException(status_code=400, detail="spec.dependsOn must be a list of task_ids")
-        depends_on = [str(x).strip() for x in depends_on_raw if str(x).strip()]
+    return [ParsedTaskSpec(
+        spec=base,
+        depends_on=depends_on,
+        local_name=None,
+        graph_node_name=None,
+        load=load,
+        slo_seconds=slo,
+    )]
 
-        tid = str(uuid.uuid4())
-        with self._lock:
-            self._parsed[tid] = base
-            self._depends[tid] = set(depends_on)
-            self._load[tid] = base_load
 
-        results.append({
-            "task_id": tid,
-            "parsed": base,
-            "depends_on": depends_on,
-            "graph_node_name": None,
-            "load": base_load,
-        })
-        return results
+def extract_slo_seconds(task: Dict[str, Any]) -> Optional[float]:
+    """
+    Pull SLO target (in seconds) from common spec locations. Returns None if absent.
+    Only positive numeric values are accepted.
+    """
+    candidates = (
+        safe_get(task, "spec.sloSeconds"),
+        safe_get(task, "spec.slo.seconds"),
+        safe_get(task, "spec.latency.sloSeconds"),
+        safe_get(task, "spec.runtime.sloSeconds"),
+        safe_get(task, "metadata.annotations.sloSeconds"),
+        safe_get(task, "spec.deadlineSeconds"),
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
 
-    def _register_linear_stages(
-        self,
-        base: Dict[str, Any],
-        base_clean: Dict[str, Any],
-        stages: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        results: List[Dict[str, Any]] = []
-        prev_task_id: str | None = None
-        base_name = str(safe_get(base, "metadata.name", "task"))
 
-        for idx, stage in enumerate(stages):
-            stage_name = str(stage.get("name") or f"stage-{idx+1}")
-            stage_overrides = stage.get("spec") or {}
+def _parse_linear_stages(
+    base: Dict[str, Any],
+    base_clean: Dict[str, Any],
+    stages: List[Dict[str, Any]],
+) -> List[ParsedTaskSpec]:
+    """
+    Expand spec.stages[] linearly. Each stage:
+      - Overrides base via deep_merge({'spec': stage.spec})
+      - metadata.name becomes "<base>:<stage_name>"
+      - dependsOn = stage.dependsOn + previous stage (implicit chaining)
+    """
+    results: List[ParsedTaskSpec] = []
+    prev_stage_name: Optional[str] = None
+    base_name = str(safe_get(base, "metadata.name", "task"))
 
-            effective = _deep_merge(base_clean, {"spec": stage_overrides})
+    for idx, stage in enumerate(stages):
+        if not isinstance(stage, dict):
+            raise HTTPException(status_code=400, detail=f"spec.stages[{idx}] must be a mapping/dict")
+
+        stage_name = str(stage.get("name") or f"stage-{idx+1}")
+        stage_overrides = stage.get("spec") or {}
+        if not isinstance(stage_overrides, dict):
+            raise HTTPException(status_code=400, detail=f"spec.stages[{idx}].spec must be a mapping/dict")
+
+        effective = deep_merge(base_clean, {"spec": stage_overrides})
+        eff = copy.deepcopy(effective)
+        eff_md = eff.setdefault("metadata", {})
+        eff_md["name"] = f"{base_name}:{stage_name}"
+
+        load = compute_task_load(eff)
+        slo = extract_slo_seconds(eff)
+
+        depends_raw = stage.get("dependsOn") or []
+        if not isinstance(depends_raw, list):
+            raise HTTPException(status_code=400, detail="stage.dependsOn must be a list")
+        depends_on = [str(dep).strip() for dep in depends_raw if str(dep).strip()]
+        if prev_stage_name:
+            # Implicit linear dependency: current depends on the previous stage
+            depends_on.insert(0, prev_stage_name)
+
+        results.append(ParsedTaskSpec(
+            spec=eff,
+            depends_on=depends_on,
+            local_name=stage_name,
+            graph_node_name=stage_name,
+            load=load,
+            slo_seconds=slo,
+        ))
+        prev_stage_name = stage_name
+
+    return results
+
+
+def _parse_graph_nodes(
+    base: Dict[str, Any],
+    base_clean: Dict[str, Any],
+    nodes: List[Dict[str, Any]],
+) -> List[ParsedTaskSpec]:
+    """
+    Topologically expand spec.graph.nodes[] into runnable nodes.
+    Detects cycles / unresolved dependencies and raises HTTP 400.
+    """
+    if not nodes:
+        return []
+
+    name_to_node: Dict[str, Dict[str, Any]] = {}
+    base_name = str(safe_get(base, "metadata.name", "task"))
+
+    # Normalize and index nodes by name
+    for idx, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            raise HTTPException(status_code=400, detail=f"graph.nodes[{idx}] must be a mapping/dict")
+        name = node.get("name") or node.get("id") or f"node-{idx+1}"
+        name = str(name).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Each graph node requires a non-empty name")
+        if name in name_to_node:
+            raise HTTPException(status_code=400, detail=f"Duplicate graph node name '{name}'")
+        # Quick self-dependency guard
+        deps = node.get("dependsOn") or []
+        if any(str(d).strip() == name for d in deps if d is not None):
+            raise HTTPException(status_code=400, detail=f"Node '{name}' cannot depend on itself")
+        name_to_node[name] = dict(node)
+
+    unresolved = dict(name_to_node)
+    results: List[ParsedTaskSpec] = []
+
+    # Kahn-like loop: pick nodes whose deps are all resolved
+    while unresolved:
+        progressed = False
+        for name, node in list(unresolved.items()):
+            depends_raw = node.get("dependsOn") or []
+            if not isinstance(depends_raw, list):
+                raise HTTPException(status_code=400, detail=f"Node '{name}' dependsOn must be a list")
+
+            unresolved_internal = False
+            depends_on: List[str] = []
+
+            for dep in depends_raw:
+                dep = str(dep).strip()
+                if not dep:
+                    continue
+                if dep in unresolved:
+                    unresolved_internal = True
+                    break
+                depends_on.append(dep)
+
+            if unresolved_internal:
+                continue  # still waiting for its deps
+
+            stage_overrides = node.get("spec") or {}
+            if not isinstance(stage_overrides, dict):
+                raise HTTPException(status_code=400, detail=f"Node '{name}'.spec must be a mapping/dict")
+
+            effective = deep_merge(base_clean, {"spec": stage_overrides})
             eff = copy.deepcopy(effective)
             eff_md = eff.setdefault("metadata", {})
-            eff_md["name"] = f"{base_name}:{stage_name}"
+            eff_md["name"] = f"{base_name}:{name}"
+
             load = compute_task_load(eff)
+            slo = extract_slo_seconds(eff)
 
-            depends_on_names = stage.get("dependsOn", []) or []
-            if not isinstance(depends_on_names, list):
-                raise HTTPException(status_code=400, detail="stage.dependsOn must be a list")
+            results.append(ParsedTaskSpec(
+                spec=eff,
+                depends_on=depends_on,
+                local_name=name,
+                graph_node_name=name,
+                load=load,
+                slo_seconds=slo,
+            ))
+            unresolved.pop(name)
+            progressed = True
 
-            depends_on: List[str] = [str(dep).strip() for dep in depends_on_names if str(dep).strip()]
-            if prev_task_id:
-                depends_on.insert(0, prev_task_id)
+        if not progressed:
+            unresolved_names = ", ".join(unresolved.keys())
+            raise HTTPException(status_code=400, detail=f"Graph contains cycles or unresolved deps: {unresolved_names}")
 
-            tid = str(uuid.uuid4())
-            with self._lock:
-                self._parsed[tid] = eff
-                self._depends[tid] = set(depends_on)
-                self._load[tid] = load
+    return results
 
-            results.append({
-                "task_id": tid,
-                "parsed": eff,
-                "depends_on": depends_on,
-                "graph_node_name": stage_name,
-                "load": load,
-            })
-            prev_task_id = tid
 
-        return results
+def resolve_graph_templates(
+    task: Dict[str, Any],
+    task_id: str,
+    rec,
+    task_store,
+    tasks: Dict[str, Any],
+    results_dir: Path,
+    logger,
+) -> Dict[str, Any]:
+    """
+    Resolve ${...} placeholders in the task by injecting upstream results.
 
-    def _register_graph(
-        self,
-        base: Dict[str, Any],
-        base_clean: Dict[str, Any],
-        nodes: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        if not nodes:
-            return []
+    Steps:
+      1) Ask task_store for dependency ids for this task_id.
+      2) Build a context dict keyed by upstream node name.
+      3) Attach context under spec._upstreamResults for optional direct access.
+      4) Walk the task dict; for any string containing ${...}, replace it
+         with the referenced value from context (dict/list traversal only).
 
-        name_to_node: Dict[str, Dict[str, Any]] = {}
-        base_name = str(safe_get(base, "metadata.name", "task"))
+    Safety:
+      - No eval; only structural traversal by keys and numeric indexes.
+      - If a path is missing or invalid, we log at debug and substitute "".
+      - Escaped placeholders $${...} are left intact (becomes ${...}).
+    """
+    deps = task_store.get_dependencies(task_id)
+    if not deps:
+        return task
 
-        for idx, node in enumerate(nodes):
-            name = node.get("name") or node.get("id") or f"node-{idx+1}"
-            name = str(name).strip()
-            if not name:
-                raise HTTPException(status_code=400, detail="Each graph node requires a non-empty name")
-            if name in name_to_node:
-                raise HTTPException(status_code=400, detail=f"Duplicate graph node name '{name}'")
-            name_to_node[name] = dict(node)
+    context: Dict[str, Any] = {}
+    for dep_id in deps:
+        dep_rec = tasks.get(dep_id)
+        if not dep_rec:
+            continue
+        node_name = getattr(dep_rec, "graph_node_name", None) or _derive_node_name(dep_rec)
+        if not node_name:
+            continue
+        try:
+            raw = read_result(results_dir, dep_id)
+            data = json.loads(raw)
+        except FileNotFoundError:
+            logger.debug("Dependency %s result not found for task %s", dep_id, task_id)
+            continue
+        except json.JSONDecodeError as exc:
+            logger.debug("Failed to parse result for %s: %s", dep_id, exc)
+            continue
 
-        unresolved = dict(name_to_node)
-        resolved_ids: Dict[str, str] = {}
-        results: List[Dict[str, Any]] = []
+        # Normalize: ensure {'result': ...} exists for consistent addressing
+        if isinstance(data, dict) and "result" not in data:
+            data = {"result": data}
+        context[node_name] = data
 
-        while unresolved:
-            progressed = False
-            for name, node in list(unresolved.items()):
-                depends_raw = node.get("dependsOn") or []
-                if not isinstance(depends_raw, list):
-                    raise HTTPException(status_code=400, detail=f"Node '{name}' dependsOn must be a list")
+    resolved = copy.deepcopy(task)
 
-                internal_deps = [d for d in depends_raw if d in unresolved]
-                if internal_deps:
-                    continue  # wait for dependencies to resolve
+    if deps:
+        spec = resolved.setdefault("spec", {})
+        # Make upstream results accessible to the spec (optional consumption).
+        spec["_upstreamResults"] = context
 
-                if any(d not in resolved_ids and d in name_to_node for d in depends_raw):
-                    continue
+    if context:
+        _walk_and_replace(resolved, context, logger)
 
-                depends_on_task_ids: List[str] = []
-                for dep in depends_raw:
-                    dep = str(dep).strip()
-                    if not dep:
-                        continue
-                    if dep in resolved_ids:
-                        depends_on_task_ids.append(resolved_ids[dep])
-                    elif dep in name_to_node:
-                        # unresolved internal dependency; skip for now
-                        break
-                    else:
-                        depends_on_task_ids.append(dep)
-                else:
-                    stage_overrides = node.get("spec") or {}
-                    effective = _deep_merge(base_clean, {"spec": stage_overrides})
-                    eff = copy.deepcopy(effective)
-                    eff_md = eff.setdefault("metadata", {})
-                    eff_md["name"] = f"{base_name}:{name}"
+    return resolved
 
-                    load = compute_task_load(eff)
-                    tid = str(uuid.uuid4())
-                    with self._lock:
-                        self._parsed[tid] = eff
-                        self._depends[tid] = set(depends_on_task_ids)
-                        self._load[tid] = load
 
-                    results.append({
-                        "task_id": tid,
-                        "parsed": eff,
-                        "depends_on": depends_on_task_ids,
-                        "graph_node_name": name,
-                        "load": load,
-                    })
-                    resolved_ids[name] = tid
-                    unresolved.pop(name)
-                    progressed = True
-            if not progressed:
-                unresolved_names = ", ".join(unresolved.keys())
-                raise HTTPException(status_code=400, detail=f"Graph contains cycles or unresolved deps: {unresolved_names}")
+def _derive_node_name(dep_rec) -> str:
+    """
+    Derive a node name from dep_rec.parsed.metadata.name.
+    Expected format: "<base_name>:<node_name>" -> returns "<node_name>".
+    """
+    meta_name = safe_get(dep_rec.parsed, "metadata.name")
+    if not isinstance(meta_name, str):
+        return ""
+    if ":" in meta_name:
+        return meta_name.split(":", 1)[1]
+    return meta_name
 
-        return results
 
-    def mark_released(self, task_id: str) -> None:
-        """Mark a task as already handed to dispatcher (prevents re-dispatch)."""
-        with self._lock:
-            self._released.add(task_id)
+def _walk_and_replace(value: Any, context: Dict[str, Any], logger) -> Any:
+    """
+    Recursively traverse the task structure, replacing string placeholders.
+    Lists and dicts are processed in place; scalars returned as-is.
+    """
+    if isinstance(value, dict):
+        for key, val in list(value.items()):
+            value[key] = _walk_and_replace(val, context, logger)
+        return value
+    if isinstance(value, list):
+        for idx, item in enumerate(value):
+            value[idx] = _walk_and_replace(item, context, logger)
+        return value
+    if isinstance(value, str) and "${" in value:
+        return _replace_placeholders(value, context, logger)
+    return value
 
-    # -------------------------
-    # Queries
-    # -------------------------
-    def get_parsed(self, task_id: str) -> Dict[str, Any] | None:
-        with self._lock:
-            return self._parsed.get(task_id)
 
-    def get_dependencies(self, task_id: str) -> List[str]:
-        with self._lock:
-            return list(self._depends.get(task_id, set()))
+def _replace_placeholders(text: str, context: Dict[str, Any], logger) -> str:
+    """
+    Replace ${expr} with resolved values from context.
+    Supports escaping with $${...} -> becomes ${...} (no substitution).
+    """
 
-    def get_load(self, task_id: str) -> int:
-        with self._lock:
-            return int(self._load.get(task_id, DEFAULT_TASK_LOAD))
+    # Unescape: $${foo}  -> ${foo}
+    text = text.replace("$${", "${")
 
-    def list_waiting_tasks(self) -> List[str]:
-        """Tasks not yet 'released' to dispatcher (pending capacity/deps)."""
-        with self._lock:
-            return [tid for tid in self._parsed.keys() if tid not in self._released]
+    def repl(match: re.Match[str]) -> str:
+        expr = match.group(1).strip()
+        resolved = _evaluate_expr(expr, context, logger)
+        return "" if resolved is None else str(resolved)
 
-    def ready_to_dispatch(self, is_dep_satisfied: Callable[[str], bool]) -> List[str]:
-        """Return task_ids that are not released and have all deps satisfied."""
-        ready: List[str] = []
-        with self._lock:
-            for tid, deps in self._depends.items():
-                if tid in self._released:
-                    continue
-                if all(is_dep_satisfied(did) for did in deps):
-                    ready.append(tid)
-        return ready
+    return _PLACEHOLDER_RE.sub(repl, text)
+
+
+def _evaluate_expr(expr: str, context: Dict[str, Any], logger) -> Any:
+    """
+    Evaluate a dotted path with optional list indexes against the context.
+    Example: nodeA.result.items[0].id
+
+    Semantics:
+      - The first token is the root key into context (node name).
+      - Each following token may be "attr" or "attr[0][1]".
+      - For dicts, we require exact keys; for lists, integer indexes.
+      - On any missing/invalid step, log at debug and return None.
+    """
+    if not expr:
+        return None
+    parts = expr.split(".")
+    if not parts:
+        return None
+
+    root_name = parts[0]
+    data = context.get(root_name)
+    if data is None:
+        logger.debug("Template placeholder root '%s' not found in context", root_name)
+        return None
+
+    value: Any = data
+    for token in parts[1:]:
+        if not token:
+            continue
+        attr, indexes = _split_indexes(token, logger, full_expr=expr)
+
+        if attr:
+            if isinstance(value, dict) and attr in value:
+                value = value[attr]
+            else:
+                logger.debug("Template path '%s' missing attr '%s'", expr, attr)
+                return None
+
+        for idx in indexes:
+            if isinstance(value, list) and 0 <= idx < len(value):
+                value = value[idx]
+            else:
+                logger.debug("Template path '%s' invalid index %s", expr, idx)
+                return None
+
+    return value
+
+
+def _split_indexes(token: str, logger=None, full_expr: str = "") -> Tuple[str, List[int]]:
+    """
+    Split a token like 'field[0][1]' into ('field', [0, 1]).
+    Non-integer indexes are treated as invalid and reported via debug logs.
+    """
+    parts = token.split("[")
+    attr = parts[0]
+    idx_list: List[int] = []
+    for part in parts[1:]:
+        part = part.rstrip("]")
+        if not part:
+            continue
+        try:
+            idx_list.append(int(part))
+        except ValueError:
+            if logger:
+                logger.debug("Template path '%s' has non-integer index '%s'", full_expr, part)
+            return attr, [-1]  # propagate invalid index sentinel
+    return attr, idx_list
