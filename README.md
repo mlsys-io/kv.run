@@ -158,6 +158,9 @@ pytest tests/test_core_flow.py
 
 - `scripts/worker_validate.py` —— 通过 `echo` 模板快速验证本地 orchestrator/worker 流；支持 `--scenario echo-local` 与 `--scenario echo-http`。
 - `scripts/validate_echo_local.sh` 与 `scripts/validate_echo_http.sh` —— 基于环境变量 `ORCHESTRATOR_URL`、`ORCHESTRATOR_TOKEN` 进行常用场景验证。
+- `scripts/replay_task.py` —— 从状态快照中读取原始 YAML 并重新提交任务（便于失败重放）。
+- `scripts/export_results.py` —— 收集 `RESULTS_DIR` 下的 `responses.json`，导出为 CSV（可结合 `--state-file` 丰富元数据）。
+- `scripts/task_profile_report.py` —— 基于导出的 CSV 生成 Markdown 报告，统计成功率与平均耗时。
 
 ## Docker Compose Deployment
 

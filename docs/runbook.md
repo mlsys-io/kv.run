@@ -34,6 +34,8 @@
 - `scripts/validate_echo_local.sh`：验证本地结果落盘（EchoExecutor + Local output）。
 - `scripts/validate_echo_http.sh`：验证 HTTP 回传与 orchestrator 聚合。
 - 两者依赖 `ORCHESTRATOR_URL` 与 `ORCHESTRATOR_TOKEN` 环境变量，更多选项可参考 `scripts/worker_validate.py --help`。
+- `scripts/replay_task.py`：根据 `task_state.json` 重放指定 `task_id`。
+- `scripts/export_results.py` / `scripts/task_profile_report.py`：导出 `responses.json` 并生成任务画像报告。
 
 ## 故障排查提示
 - **任务卡住**：检查 `/metrics` 中 `tasks_requeued` 计数与 `dead_letters` API，确认是否超出重试上限。
