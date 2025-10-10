@@ -25,8 +25,18 @@ class RedisWorker:
     def _hb_key(self) -> str:
         return f"worker:{self.worker_id}:hb"
 
-    def register(self, status: str, started_at: str, pid: int,
-                 env: Dict[str, Any], hardware: Dict[str, Any], tags: List[str]):
+    def register(
+        self,
+        status: str,
+        started_at: str,
+        pid: int,
+        env: Dict[str, Any],
+        hardware: Dict[str, Any],
+        tags: List[str],
+        *,
+        cost_per_hour: float,
+        power_metrics: Optional[Dict[str, Any]] = None,
+    ):
         data = {
             "worker_id": self.worker_id,
             "status": status,
@@ -36,17 +46,25 @@ class RedisWorker:
             "hardware_json": json.dumps(hardware, ensure_ascii=False),
             "tags_json": json.dumps(tags, ensure_ascii=False),
             "last_seen": started_at,
+            "cost_per_hour": f"{cost_per_hour}",
         }
         with self.rds.pipeline() as p:
             p.sadd(self.WORKERS_SET, self.worker_id)
             p.hset(self._key(), mapping=data)
+            payload = {
+                "env": env,
+                "hardware": hardware,
+                "cost_per_hour": cost_per_hour,
+            }
+            if power_metrics:
+                payload["power_metrics"] = power_metrics
             evt = WorkerEvent(
                 type="REGISTER",
                 worker_id=self.worker_id,
                 status=status,
                 ts=started_at,
                 tags=tags,
-                payload={"env": env, "hardware": hardware},
+                payload=payload,
             )
             p.publish("workers.events", json.dumps(serialize_event(evt), ensure_ascii=False))
             p.execute()
@@ -84,16 +102,29 @@ class RedisWorker:
             p.publish("workers.events", json.dumps(serialize_event(evt), ensure_ascii=False))
             p.execute()
 
-    def unregister(self):
+    def unregister(
+        self,
+        *,
+        cost_per_hour: Optional[float] = None,
+        uptime_sec: Optional[float] = None,
+        power_summary: Optional[Dict[str, Any]] = None,
+    ):
         with self.rds.pipeline() as p:
             p.srem(self.WORKERS_SET, self.worker_id)
             p.delete(self._key())
             p.delete(self._hb_key())
-            evt = WorkerEvent(type="UNREGISTER", worker_id=self.worker_id)
+            payload: Dict[str, Any] = {}
+            if cost_per_hour is not None:
+                payload["cost_per_hour"] = cost_per_hour
+            if uptime_sec is not None:
+                payload["uptime_sec"] = uptime_sec
+            if power_summary is not None:
+                payload["power_summary"] = power_summary
+            evt = WorkerEvent(type="UNREGISTER", worker_id=self.worker_id, payload=payload)
             p.publish("workers.events", json.dumps(serialize_event(evt), ensure_ascii=False))
             p.execute()
-            
-    def task_failed(self, task_id: str, error: str):
+
+    def task_failed(self, task_id: str, error: str, metadata: Optional[Dict[str, Any]] = None):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         evt = TaskEvent(
@@ -101,18 +132,46 @@ class RedisWorker:
             worker_id=self.worker_id,
             task_id=task_id,
             error=error,
+            payload=metadata or {},
             ts=now,
         )
         self.rds.publish("tasks.events", json.dumps(serialize_event(evt), ensure_ascii=False))
 
-    def task_succeeded(self, task_id: str, result: Optional[Dict[str, Any]] = None):
+    def task_succeeded(self, task_id: str, metadata: Optional[Dict[str, Any]] = None):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
         evt = TaskEvent(
             type="TASK_SUCCEEDED",
             worker_id=self.worker_id,
             task_id=task_id,
-            payload=result or {},
+            payload=metadata or {},
+            ts=now,
+        )
+        self.rds.publish("tasks.events", json.dumps(serialize_event(evt), ensure_ascii=False))
+
+    def task_started(
+        self,
+        task_id: str,
+        *,
+        task_type: Optional[str] = None,
+        dispatched_at: Optional[str] = None,
+        started_at: Optional[str] = None,
+    ) -> None:
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        payload: Dict[str, Any] = {}
+        if task_type is not None:
+            payload["taskType"] = task_type
+        if dispatched_at is not None:
+            payload["dispatched_at"] = dispatched_at
+        if started_at is not None:
+            payload["started_at"] = started_at
+        evt = TaskEvent(
+            type="TASK_STARTED",
+            worker_id=self.worker_id,
+            task_id=task_id,
+            payload=payload,
             ts=now,
         )
         self.rds.publish("tasks.events", json.dumps(serialize_event(evt), ensure_ascii=False))

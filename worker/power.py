@@ -1,0 +1,167 @@
+"""Lightweight power sampling utilities for worker heartbeats."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _detect_cpu_energy_file() -> Optional[str]:
+    """Return the first available RAPL energy counter."""
+    candidates = [
+        "/sys/class/powercap/intel-rapl:0/energy_uj",
+        "/sys/class/powercap/amd-rapl:0/energy_uj",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    base = "/sys/class/powercap"
+    if not os.path.isdir(base):
+        return None
+    for root, _dirs, files in os.walk(base):
+        if "energy_uj" in files:
+            return os.path.join(root, "energy_uj")
+    return None
+
+
+class PowerMonitor:
+    """Tracks CPU/GPU power draw samples and aggregates averages."""
+
+    def __init__(self) -> None:
+        self._cpu_energy_path = _detect_cpu_energy_file()
+        self._cpu_prev_energy: Optional[float] = None
+        self._cpu_prev_ts: Optional[float] = None
+        self._start_ts = time.time()
+
+        self._cpu_sum = 0.0
+        self._cpu_samples = 0
+        self._gpu_sum = 0.0
+        self._gpu_samples = 0
+        self._per_gpu: Dict[str, Dict[str, float]] = {}
+
+    def sample(self) -> Dict[str, Any]:
+        """Collect a single power sample."""
+        ts = time.time()
+        cpu_power = self._read_cpu_power(ts)
+        gpu_entries = self._read_gpu_power()
+        gpu_total = 0.0
+        per_gpu_payload: List[Dict[str, Any]] = []
+
+        if cpu_power is not None:
+            self._cpu_sum += cpu_power
+            self._cpu_samples += 1
+
+        for entry in gpu_entries:
+            idx = str(entry["index"])
+            power = entry["power_w"]
+            per_gpu_payload.append(entry)
+            if power is None:
+                continue
+            gpu_total += power
+            self._gpu_sum += power
+            self._gpu_samples += 1
+            bucket = self._per_gpu.setdefault(idx, {"sum": 0.0, "count": 0})
+            bucket["sum"] += power
+            bucket["count"] += 1
+
+        gpu_total_value = gpu_total if gpu_entries else None
+        return {
+            "timestamp": _now_iso(),
+            "cpu_watts": cpu_power,
+            "gpu_watts": {
+                "total": gpu_total_value,
+                "per_gpu": per_gpu_payload,
+            },
+        }
+
+    def summary(self) -> Dict[str, Any]:
+        """Return aggregated averages and uptime."""
+        uptime_sec = max(0.0, time.time() - self._start_ts)
+        avg_cpu = self._cpu_sum / self._cpu_samples if self._cpu_samples else None
+        avg_gpu = self._gpu_sum / self._gpu_samples if self._gpu_samples else None
+        per_gpu_avg = {
+            idx: (stats["sum"] / stats["count"] if stats["count"] else None)
+            for idx, stats in self._per_gpu.items()
+        }
+        return {
+            "uptime_sec": uptime_sec,
+            "avg_cpu_watts": avg_cpu,
+            "avg_gpu_watts": avg_gpu,
+            "per_gpu_avg_watts": per_gpu_avg,
+            "samples": {
+                "cpu": self._cpu_samples,
+                "gpu": self._gpu_samples,
+            },
+        }
+
+    def _read_cpu_power(self, ts: float) -> Optional[float]:
+        path = self._cpu_energy_path
+        if not path:
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                micro_joules = float(fh.read().strip())
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+
+        if self._cpu_prev_energy is None:
+            self._cpu_prev_energy = micro_joules
+            self._cpu_prev_ts = ts
+            return None
+
+        delta = micro_joules - self._cpu_prev_energy
+        if delta < 0:
+            # Counter wrapped; reset baseline.
+            self._cpu_prev_energy = micro_joules
+            self._cpu_prev_ts = ts
+            return None
+
+        prev_ts = self._cpu_prev_ts or ts
+        dt = ts - prev_ts
+        self._cpu_prev_energy = micro_joules
+        self._cpu_prev_ts = ts
+        if dt <= 0:
+            return None
+        watts = (delta / 1_000_000.0) / dt  # convert microjoules to joules, then divide by seconds
+        return watts
+
+    def _read_gpu_power(self) -> List[Dict[str, Any]]:
+        if not shutil.which("nvidia-smi"):
+            return []
+        try:
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,power.draw", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return []
+
+        if proc.returncode != 0:
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        for line in proc.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                idx = int(parts[0])
+            except ValueError:
+                continue
+            try:
+                power = float(parts[1])
+            except ValueError:
+                power = None
+            entries.append({"index": idx, "power_w": power})
+        return entries

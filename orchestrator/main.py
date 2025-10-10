@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import json
 import copy
@@ -23,6 +24,7 @@ from utils import (
     get_logger,
     log_worker_event,
     now_iso,
+    parse_iso_ts,
 )
 from task_store import TaskStore
 from worker_cls import (
@@ -31,7 +33,7 @@ from worker_cls import (
     update_worker_status,
     is_stale_by_redis,
 )
-from task import TaskRecord, TaskStatus
+from task import TaskRecord, TaskStatus, categorize_task_type
 from dispatch import DispatchManager
 from aggregation import maybe_aggregate_parent
 from results import write_result, read_result, result_file_path, ResultPayload
@@ -128,6 +130,21 @@ STATE_MANAGER = StateManager(
 )
 METRICS_DIR = STATE_DIR / "metrics"
 METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
+
+def _export_metrics_on_exit() -> None:
+    try:
+        result = METRICS_RECORDER.export_final_report()
+        report = result.get("report") or {}
+        summary = METRICS_RECORDER.format_report(report)
+        if summary:
+            logger.info(summary)
+        path = result.get("path")
+        if path:
+            logger.info("Metrics report saved to %s", path)
+    except Exception as exc:  # noqa: broad-except
+        logger.warning("Failed to export final metrics on shutdown: %s", exc)
+
+atexit.register(_export_metrics_on_exit)
 
 _restored_tasks = STATE_MANAGER.load_snapshot()
 if _restored_tasks:
@@ -354,6 +371,21 @@ def _tasks_events_loop() -> None:
                 parent_id = CHILD_TO_PARENT.get(task_id)
                 state_dirty = False
 
+                if ev_type == "TASK_STARTED":
+                    with TASKS_LOCK:
+                        rec = TASKS.get(task_id)
+                        if rec:
+                            payload = event.payload or {}
+                            start_iso = payload.get("started_at") or event.ts
+                            rec.started_ts = parse_iso_ts(start_iso)
+                            dispatch_iso = payload.get("dispatched_at")
+                            if dispatch_iso:
+                                rec.dispatched_ts = parse_iso_ts(dispatch_iso)
+                            elif not rec.dispatched_ts:
+                                rec.dispatched_ts = rec.started_ts
+                            rec.attempts = int(rec.attempts or 0) + 1
+                    continue
+
                 if ev_type == 'TASK_SUCCEEDED':
                     logger.info("Task succeeded: %s", task_id)
                     TASK_STORE.clear_from_pool(task_id)
@@ -362,6 +394,9 @@ def _tasks_events_loop() -> None:
                         with TASKS_LOCK:
                             rec.status = TaskStatus.DONE
                             rec.error = None
+                            payload = event.payload or {}
+                            rec.finished_ts = parse_iso_ts(payload.get("finished_at") or event.ts)
+                            rec.started_ts = parse_iso_ts(payload.get("started_at") or event.ts)
                     if worker_id:
                         try:
                             update_worker_status(rds, worker_id, "IDLE")
@@ -395,6 +430,9 @@ def _tasks_events_loop() -> None:
                             rec.retries += 1
                             rec.last_failed_worker = worker_id
                             retries_left = rec.max_retries - rec.retries
+                            payload = event.payload or {}
+                            rec.finished_ts = parse_iso_ts(payload.get("finished_at") or event.ts)
+                            rec.started_ts = parse_iso_ts(payload.get("started_at") or event.ts)
                         state_dirty = True
 
                     if parent_id:
@@ -433,6 +471,7 @@ def _tasks_events_loop() -> None:
                                 if rec:
                                     rec.next_retry_at = None
                             _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
+                            METRICS_RECORDER.finalize_task_failure(task_id)
                             TASK_STORE.flush_pool()
                             if state_dirty:
                                 STATE_MANAGER.mark_dirty()
@@ -465,6 +504,7 @@ def _tasks_events_loop() -> None:
                         _propagate_merge_failure(rec)
                         _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
                         state_dirty = True
+                    METRICS_RECORDER.finalize_task_failure(task_id)
                     TASK_STORE.flush_pool()
                     if state_dirty:
                         STATE_MANAGER.mark_dirty()
@@ -826,6 +866,8 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
         task = entry["parsed"]
         depends_on = entry["depends_on"]
         slo_seconds = entry.get("slo_seconds")
+        task_type = (task.get("spec") or {}).get("taskType")
+        category = categorize_task_type(task_type)
 
         with TASKS_LOCK:
             rec_obj = TaskRecord(
@@ -835,7 +877,10 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
                 graph_node_name=entry.get("graph_node_name"),
                 load=int(entry.get("load", 0) or 0),
                 slo_seconds=slo_seconds,
+                task_type=task_type,
+                category=category,
             )
+            rec_obj.last_queue_ts = rec_obj.submitted_ts
             TASKS[task_id] = rec_obj
 
         DISPATCHER.enqueue_for_dispatch(task_id, task, rec_obj)
@@ -843,7 +888,10 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
             TaskEvent(
                 type="TASK_SUBMITTED",
                 task_id=task_id,
-                payload={"taskType": (task.get("spec") or {}).get("taskType")},
+                payload={
+                    "taskType": task_type,
+                    "sloSeconds": slo_seconds,
+                },
             )
         )
 

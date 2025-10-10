@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import time
+from datetime import datetime, timezone
 
 import requests
 from manifest_utils import prepare_output_dir, sync_manifest
@@ -126,6 +128,7 @@ class Runner:
                 parent_task_id = data.get("parent_task_id")
                 shard_index = data.get("shard_index")
                 shard_total = data.get("shard_total")
+                dispatched_at = data.get("dispatched_at")
 
                 extra = []
                 if parent_task_id:
@@ -144,6 +147,14 @@ class Runner:
 
                 out_dir = self._resolve_output_dir(task_id, task)
                 self.lifecycle.set_running(task_id)
+                start_iso = datetime.now(timezone.utc).isoformat()
+                start_wall = time.time()
+                self.lifecycle.notify_task_started(
+                    task_id,
+                    task_type=task_type,
+                    dispatched_at=dispatched_at,
+                    started_at=start_iso,
+                )
                 executor = None
                 try:
                     if task_type == "inference":
@@ -159,10 +170,30 @@ class Runner:
                     if executor:
                         out = executor.run(task, out_dir)
                     self._write_results(task_id, task, out_dir, out)
-                    self.lifecycle.set_succeeded(task_id)
+                    finished_iso = datetime.now(timezone.utc).isoformat()
+                    runtime_sec = max(0.0, time.time() - start_wall)
+                    metadata = {
+                        "taskType": task_type,
+                        "runtime_sec": runtime_sec,
+                        "started_at": start_iso,
+                        "finished_at": finished_iso,
+                    }
+                    if dispatched_at:
+                        metadata["dispatched_at"] = dispatched_at
+                    self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except Exception as e:
-                    self.lifecycle.set_failed(task_id, str(e))
+                    finished_iso = datetime.now(timezone.utc).isoformat()
+                    runtime_sec = max(0.0, time.time() - start_wall)
+                    metadata = {
+                        "taskType": task_type,
+                        "runtime_sec": runtime_sec,
+                        "started_at": start_iso,
+                        "finished_at": finished_iso,
+                    }
+                    if dispatched_at:
+                        metadata["dispatched_at"] = dispatched_at
+                    self.lifecycle.set_failed(task_id, str(e), metadata=metadata)
                     self.logger.exception("Task %s failed", task_id)
                 finally:
                     try:

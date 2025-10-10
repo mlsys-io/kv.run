@@ -6,6 +6,7 @@ from hw import collect_hw
 from lifecycle import Lifecycle
 from redis_worker import RedisWorker
 from runner import Runner
+from power import PowerMonitor
 
 from executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, EXECUTOR_CLASS_NAMES
 
@@ -83,7 +84,13 @@ def main():
     rds.ping()
 
     rworker = RedisWorker(rds, cfg.worker_id)
-    lifecycle = Lifecycle(rworker, cfg.hb_interval_sec, cfg.hb_ttl_sec)
+    lifecycle = Lifecycle(
+        rworker,
+        cfg.hb_interval_sec,
+        cfg.hb_ttl_sec,
+        cost_per_hour=cfg.cost_per_hour,
+        power_monitor=PowerMonitor(),
+    )
     lifecycle.start(env={}, hardware=collect_hw(), tags=cfg.tags)
 
     executors, default_executor = initialize_executors(logger)

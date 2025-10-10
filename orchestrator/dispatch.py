@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -19,7 +20,7 @@ from scheduler import (
     make_shard_messages,
     select_workers_for_task,
 )
-from task import TaskRecord, TaskStatus
+from task import TaskRecord, TaskStatus, categorize_task_type
 from parser import resolve_graph_templates
 from utils import now_iso, safe_get
 
@@ -153,6 +154,10 @@ class DispatchManager:
             rec.next_retry_at = self._next_retry_timestamp(rec)
             if exclude_worker_id:
                 rec.last_failed_worker = exclude_worker_id
+            rec.last_queue_ts = time.time()
+            rec.started_ts = None
+            rec.dispatched_ts = None
+            rec.finished_ts = None
 
         self.enqueue_for_dispatch(task_id, payload, rec, exclude_worker_id=exclude_worker_id)
 
@@ -271,6 +276,8 @@ class DispatchManager:
 
             self._task_store.record_assignment(task_payload, worker.worker_id)
             self._task_store.mark_released(task_id)
+            with self._tasks_lock:
+                rec.dispatched_ts = time.time()
 
         except Exception as exc:
             self._logger.warning("Publish failed for %s; requeueing via task pool", task_id)
@@ -362,6 +369,8 @@ class DispatchManager:
 
                 update_worker_status(self._redis, worker.worker_id, "RUNNING")
 
+                child_type = safe_get(child_task, "spec.taskType")
+                child_category = categorize_task_type(child_type)
                 child_rec = TaskRecord(
                     task_id=child_id,
                     raw_yaml=parent_rec.raw_yaml,
@@ -375,10 +384,14 @@ class DispatchManager:
                     max_retries=parent_rec.max_retries,
                     load=parent_rec.load,
                     slo_seconds=parent_rec.slo_seconds,
+                    task_type=child_type,
+                    category=child_category,
                 )
                 with self._tasks_lock:
                     self._tasks[child_id] = child_rec
                     self._child_to_parent[child_id] = parent_task_id
+                    child_rec.last_queue_ts = time.time()
+                    child_rec.dispatched_ts = child_rec.last_queue_ts
 
                 created_children.append(child_id)
                 order_map[child_id] = idx

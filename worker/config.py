@@ -25,6 +25,7 @@ class WorkerConfig:
     worker_id: str
     tags: List[str]
     log_level: str
+    cost_per_hour: float
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -43,6 +44,16 @@ class WorkerConfig:
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
+        cost_raw = os.getenv("WORKER_COST_PER_HOUR")
+        if cost_raw is None:
+            raise SystemExit("WORKER_COST_PER_HOUR must be set, e.g. 3.5 for $3.5/hour")
+        try:
+            cost_per_hour = float(cost_raw)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid WORKER_COST_PER_HOUR value: {cost_raw}") from exc
+        if cost_per_hour < 0:
+            raise SystemExit("WORKER_COST_PER_HOUR must be non-negative")
+
         return WorkerConfig(
             redis_url=redis_url,
             topic=topic,
@@ -52,4 +63,5 @@ class WorkerConfig:
             worker_id=worker_id,
             tags=tags,
             log_level=log_level,
+            cost_per_hour=cost_per_hour,
         )

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
@@ -44,6 +45,18 @@ def parse_float_env(name: str, default: float) -> float:
 def now_iso() -> str:
     """Return the current UTC time in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
+
+def parse_iso_ts(value: str) -> float:
+    """Best-effort parse of ISO-8601 timestamp into epoch seconds."""
+    if not value:
+        return time.time()
+    try:
+        # Support strings ending with "Z" by replacing with explicit UTC offset.
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value).timestamp()
+    except Exception:
+        return time.time()
 
 
 # -------------------------

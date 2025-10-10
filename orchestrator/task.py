@@ -3,6 +3,19 @@ from pydantic import BaseModel, Field
 import time
 from utils import now_iso
 
+TRAINING_TASK_TYPES = {"sft", "lora_sft", "ppo", "dpo", "training"}
+
+def categorize_task_type(task_type: Optional[str]) -> str:
+    """Map a taskType string into a coarse-grained category."""
+    if not task_type:
+        return "other"
+    normalized = task_type.strip().lower()
+    if normalized == "inference":
+        return "inference"
+    if normalized in TRAINING_TASK_TYPES:
+        return "training"
+    return "other"
+
 class TaskStatus(str):
     PENDING = "PENDING"
     DISPATCHED = "DISPATCHED"
@@ -15,10 +28,17 @@ class TaskRecord(BaseModel):
     raw_yaml: str
     parsed: Dict[str, Any]
     status: str = TaskStatus.PENDING
+    task_type: Optional[str] = None
+    category: Optional[str] = None
     assigned_worker: Optional[str] = None  # "MULTI" for sharded parent
     topic: Optional[str] = None
     submitted_at: str = Field(default_factory=now_iso)
     submitted_ts: float = Field(default_factory=time.time)
+    last_queue_ts: float = Field(default_factory=time.time)
+    dispatched_ts: Optional[float] = None
+    started_ts: Optional[float] = None
+    finished_ts: Optional[float] = None
+    attempts: int = 0
     error: Optional[str] = None
     retries: int = 0
     max_retries: int = 3
