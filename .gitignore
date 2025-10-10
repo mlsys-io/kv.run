@@ -5,6 +5,10 @@ __pycache__/
 
 .DS_Store
 
+# Codex tooling
+.codex/
+AGENTS.md
+
 # Results
 results/
 
@@ -169,3 +173,4 @@ cython_debug/
 worker/executors/agent/secrets.yaml
 results_workers/
 results_host/
+dump.rdb

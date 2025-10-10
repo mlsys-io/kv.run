@@ -5,18 +5,33 @@ description = "Modular LLM Operations Container - Distributed system for LLM inf
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    # MLOC Core Dependencies
     "fastapi>=0.116.1",
     "pyyaml>=6.0.2",
     "redis>=6.4.0",
     "requests>=2.32.5",
     "uvicorn>=0.35.0",
-    "vllm>=0.10.1.1",
+]
+
+[project.optional-dependencies]
+inference = [
+    "transformers>=4.44.0",
+    "torch>=2.3.0",
     "datasets>=4.0.0",
+    "tiktoken>=0.9.0",
+    "vllm>=0.10.1.1",
+]
+training = [
     "trl==0.23.0",
+    "peft>=0.17.1",
+    "deepspeed>=0.17.6",
+    "flashinfer-python>=0.3.1.post1",
+    "nvidia-ml-py>=13.580.82",
+]
+rag = [
     "qdrant-client>=1.15.1",
     "fastembed>=0.7.3",
-    # Agent Framework Dependencies (from youtu-agent)
+]
+agent = [
     "aiofiles>=24.1.0",
     "aiohttp>=3.12.15",
     "art>=6.5",
@@ -30,31 +45,24 @@ dependencies = [
     "jinja2>=3.1.6",
     "matplotlib>=3.10.3",
     "mcp>=1.12.3",
-    # OpenAI & Agents Dependencies
     "openai==1.99.6",
     "openai-agents==0.2.8",
-    # OpenInference Tracing
-    "openinference-instrumentation-openai>=0.1.30",
-    "openinference-instrumentation-openai-agents>=1.1.1",
-    # Data Processing
+    "prompt-toolkit>=3.0.0",
+    "rich>=14.1.0",
+    "toml>=0.10.2",
+    "wikipedia-api>=0.8.1",
+]
+analytics = [
     "openpyxl>=3.1.5",
     "pandas>=2.3.0",
     "pexpect>=4.9.0",
     "psycopg2-binary>=2.9.10",
     "pymupdf>=1.25.3",
-    # UI and Display
-    "rich>=14.1.0",
-    "prompt-toolkit>=3.0.0",
-    # Utilities
     "sqlmodel>=0.0.24",
-    "tiktoken>=0.9.0",
-    "toml>=0.10.2",
-    "wikipedia-api>=0.8.1",
-    # Phoenix Tracing (dev dependencies from youtu-agent)
+]
+observability = [
+    "openinference-instrumentation-openai>=0.1.30",
+    "openinference-instrumentation-openai-agents>=1.1.1",
     "arize-phoenix-client>=1.14.1",
     "arize-phoenix-otel>=0.11.0",
-    "peft>=0.17.1",
-    "deepspeed>=0.17.6",
-    "flashinfer-python>=0.3.1.post1",
-    "nvidia-ml-py>=13.580.82",
 ]

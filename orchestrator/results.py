@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from utils import now_iso
+from manifest_utils import prepare_output_dir
 
 class ResultPayload(BaseModel):
     task_id: str
@@ -23,6 +24,7 @@ def result_file_path(base_dir: Path, task_id: str) -> Path:
 
 def write_result(base_dir: Path, task_id: str, content: Dict[str, Any]) -> Path:
     path = result_file_path(base_dir, task_id)
+    prepare_output_dir(path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(content, ensure_ascii=False, indent=2))
     return path

@@ -944,3 +944,56 @@ class TaskStore:
     def list_dead_letters(self) -> List[Dict[str, Any]]:
         with self._lock:
             return [copy.deepcopy(item) for item in self._dead_letters]
+
+    # -------------------------
+    # Persistence helpers
+    # -------------------------
+
+    def export_state(self) -> Dict[str, Any]:
+        """Return a JSON-serializable snapshot of the in-memory state."""
+        with self._lock:
+            merge_slices: Dict[str, Dict[str, List[int]]] = {}
+            for parent_id, slices in self._merge_slices.items():
+                merge_slices[parent_id] = {
+                    child_id: [int(slice_vals[0]), int(slice_vals[1])]
+                    for child_id, slice_vals in slices.items()
+                }
+            return {
+                "parsed": copy.deepcopy(self._parsed),
+                "depends": {k: list(v) for k, v in self._depends.items()},
+                "released": list(self._released),
+                "load": copy.deepcopy(self._load),
+                "slo": copy.deepcopy(self._slo),
+                "dead_letters": copy.deepcopy(self._dead_letters),
+                "merge_slices": merge_slices,
+                "merge_parent": copy.deepcopy(self._merge_parent),
+            }
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        """Restore TaskStore internals from a snapshot."""
+        if not state:
+            return
+        with self._lock:
+            self._parsed = copy.deepcopy(state.get("parsed", {}))
+            depends = state.get("depends", {})
+            self._depends = {task_id: set(items or []) for task_id, items in depends.items()}
+            self._released = set(state.get("released", []))
+            self._load = {tid: int(val) for tid, val in (state.get("load") or {}).items()}
+            self._slo = copy.deepcopy(state.get("slo", {}))
+            self._dead_letters = copy.deepcopy(state.get("dead_letters", []))
+
+            merge_state: Dict[str, Dict[str, Tuple[int, int]]] = {}
+            for parent_id, slices in (state.get("merge_slices") or {}).items():
+                nested: Dict[str, Tuple[int, int]] = {}
+                if isinstance(slices, dict):
+                    for child_id, values in slices.items():
+                        if isinstance(values, (list, tuple)) and len(values) == 2:
+                            nested[child_id] = (int(values[0]), int(values[1]))
+                merge_state[parent_id] = nested
+            self._merge_slices = merge_state
+            self._merge_parent = {k: v for k, v in (state.get("merge_parent") or {}).items()}
+
+    def reset_release(self, task_id: str) -> None:
+        """Allow a task to be redispatched by clearing its released flag."""
+        with self._lock:
+            self._released.discard(task_id)

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, List, MutableMapping, Optional
 import json
 import threading
 import time
 import urllib.request
 import urllib.error
+from pathlib import Path
+from typing import Any, Dict, List, MutableMapping, Optional
 
+from manifest_utils import sync_manifest
 from utils import now_iso, safe_get
 from results import write_result
 
@@ -71,6 +72,19 @@ def maybe_aggregate_parent(
         collected = len(results)
         total = int(info.get("total") or 0)
         order_map: Dict[str, int] = dict(info.get("order") or {})
+        expected_children = set(info.get("children") or [])
+        if expected_children and total != len(expected_children):
+            total = len(expected_children)
+            info["total"] = total
+
+        missing_children = [cid for cid in expected_children if cid not in results]
+        if missing_children:
+            logger.debug(
+                "Aggregation waiting for parent %s, missing shards: %s",
+                parent_id,
+                missing_children,
+            )
+            return
 
         # Not all shards present yet; nothing else to do now.
         if total <= 0 or collected < total:
@@ -102,6 +116,10 @@ def maybe_aggregate_parent(
         "Aggregated result stored for parent %s (%d shards) at %s",
         parent_id, total, path
     )
+    expected_artifacts: List[str] = []
+    if parent_rec and getattr(parent_rec, "parsed", None):
+        expected_artifacts = ((parent_rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+    sync_manifest(path.parent, parent_id, expected_artifacts)
 
     try:
         _deliver_parent_output(parent_rec, aggregated_content, logger)

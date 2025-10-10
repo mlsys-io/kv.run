@@ -9,22 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from load_func import compute_task_load
 from results import read_result
 from utils import safe_get
-
-
-# Required minimal fields for a task spec.
-REQUIRED_FIELDS = [
-    "apiVersion",
-    "kind",
-    "metadata.name",
-    "spec.taskType",
-    "spec.resources.replicas",
-    "spec.resources.hardware.cpu",
-    "spec.resources.hardware.memory",
-]
+from spec_models import TaskDocumentModel, format_validation_error
 
 # Matches ${path.to.value[0]} placeholders in strings.
 # We allow escaping via $${...} (handled in _replace_placeholders).
@@ -48,8 +38,7 @@ def validate_yaml_to_dict(yaml_text: str) -> Dict[str, Any]:
     Raises HTTP 400 with actionable error messages on failure.
 
     Notes:
-      - If 'gpu' block exists under spec.resources.hardware.gpu, we require 'count'.
-        'type' is optional to align with runtime matching fallback.
+      - 基于 Pydantic 模型进行结构化校验，错误信息会提示具体字段路径。
     """
     try:
         data = yaml.safe_load(yaml_text)
@@ -58,33 +47,11 @@ def validate_yaml_to_dict(yaml_text: str) -> Dict[str, Any]:
 
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="YAML root must be a mapping/dict")
-
-    # Required path presence checks
-    for path in REQUIRED_FIELDS:
-        cur: Any = data
-        for key in path.split("."):
-            if not isinstance(cur, dict) or key not in cur:
-                raise HTTPException(status_code=400, detail=f"Missing required field: {path}")
-            cur = cur[key]
-
-    # Basic type sanity (best-effort, do not over-validate)
-    _ensure_is_dict(safe_get(data, "metadata"), "metadata")
-    _ensure_is_dict(safe_get(data, "spec"), "spec")
-    _ensure_is_dict(safe_get(data, "spec.resources"), "spec.resources")
-    _ensure_is_dict(safe_get(data, "spec.resources.hardware"), "spec.resources.hardware")
-
-    # GPU requirements: require 'count' if gpu section exists; 'type' is optional
-    gpu = safe_get(data, "spec.resources.hardware.gpu", {}) or {}
-    if gpu:
-        if safe_get(gpu, "count") is None:
-            raise HTTPException(status_code=400, detail="Missing spec.resources.hardware.gpu.count")
-
-    return data
-
-
-def _ensure_is_dict(val: Any, path: str) -> None:
-    if val is not None and not isinstance(val, dict):
-        raise HTTPException(status_code=400, detail=f"Field '{path}' must be a mapping/dict")
+    try:
+        normalized = TaskDocumentModel.model_validate(data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=format_validation_error(exc))
+    return normalized.model_dump(mode="python")
 
 
 def deep_merge(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:

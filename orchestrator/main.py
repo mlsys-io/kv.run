@@ -35,6 +35,10 @@ from task import TaskRecord, TaskStatus
 from dispatch import DispatchManager
 from aggregation import maybe_aggregate_parent
 from results import write_result, read_result, result_file_path, ResultPayload
+from state_store import StateManager
+from manifest_utils import sync_manifest, ARTIFACTS_DIR
+from event_schema import parse_event, TaskEvent, WorkerEvent
+from metrics import MetricsRecorder
 
 # -------------------------
 # Settings & globals
@@ -110,6 +114,45 @@ DISPATCHER.configure_task_store(
     done_status=TaskStatus.DONE,
 )
 
+STATE_DIR = Path(os.getenv("ORCHESTRATOR_STATE_DIR", RESULTS_DIR.parent / "state")).expanduser().resolve()
+STATE_FLUSH_INTERVAL = parse_float_env("STATE_FLUSH_INTERVAL_SEC", 5.0)
+STATE_MANAGER = StateManager(
+    state_dir=STATE_DIR,
+    task_store=TASK_STORE,
+    tasks=TASKS,
+    tasks_lock=TASKS_LOCK,
+    parent_shards=PARENT_SHARDS,
+    child_to_parent=CHILD_TO_PARENT,
+    logger=logger,
+    flush_interval=STATE_FLUSH_INTERVAL,
+)
+METRICS_DIR = STATE_DIR / "metrics"
+METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
+
+_restored_tasks = STATE_MANAGER.load_snapshot()
+if _restored_tasks:
+    logger.info("Restoring %d pending tasks from snapshot", len(_restored_tasks))
+    restored_count = 0
+    for task_id in _restored_tasks:
+        payload = TASK_STORE.get_parsed(task_id)
+        if not payload:
+            logger.warning("Skip requeue for %s: missing parsed spec", task_id)
+            continue
+        with TASKS_LOCK:
+            rec = TASKS.get(task_id)
+        if not rec:
+            logger.warning("Skip requeue for %s: missing TaskRecord", task_id)
+            continue
+        try:
+            DISPATCHER.enqueue_for_dispatch(task_id, payload, rec)
+            restored_count += 1
+        except Exception as exc:
+            logger.exception("Failed to enqueue restored task %s: %s", task_id, exc)
+    if restored_count:
+        TASK_STORE.flush_pool()
+        logger.info("Requeued %d tasks after restoration", restored_count)
+        STATE_MANAGER.mark_dirty()
+
 # -------------------------
 # App & routes
 # -------------------------
@@ -118,6 +161,10 @@ app = FastAPI(title="Orchestrator", version="1.0.0")
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+@app.get("/metrics")
+async def get_metrics(_: Any = Depends(require_auth)):
+    return METRICS_RECORDER.snapshot()
 
 @app.get("/workers")
 async def list_workers(_: Any = Depends(require_auth)):
@@ -173,6 +220,11 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
         logger=logger,
     )
 
+    expected_artifacts: List[str] = []
+    if rec:
+        expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+    sync_manifest(file_path.parent, task_id, expected_artifacts)
+    STATE_MANAGER.mark_dirty()
     return {"ok": True, "path": str(file_path)}
 
 
@@ -215,19 +267,26 @@ async def upload_result_file(
         raise HTTPException(status_code=400, detail="invalid filename")
 
     base_dir = result_file_path(RESULTS_DIR, safe_task_id).parent
-    target_path = (base_dir / filename.name).resolve()
+    target_path = (base_dir / ARTIFACTS_DIR / filename.name).resolve()
 
     try:
         target_path.relative_to(base_dir)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid filename")
 
-    base_dir.mkdir(parents=True, exist_ok=True)
+    (base_dir / ARTIFACTS_DIR).mkdir(parents=True, exist_ok=True)
 
     with target_path.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
     logger.info("Stored artifact for task %s at %s", safe_task_id, target_path)
+    expected_artifacts: List[str] = []
+    with TASKS_LOCK:
+        rec = TASKS.get(safe_task_id)
+        if rec:
+            expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+    sync_manifest(base_dir, safe_task_id, expected_artifacts)
+    STATE_MANAGER.mark_dirty()
     return {"ok": True, "path": str(target_path)}
 
 
@@ -272,10 +331,20 @@ def _tasks_events_loop() -> None:
                     logger.warning("Bad tasks.events payload: %s", e)
                     continue
 
-                ev_type = str(data.get("type", "")).upper()
-                task_id = str(data.get("task_id") or "")
-                worker_id = data.get("worker_id")
-                err_msg = data.get("error")
+                try:
+                    event = parse_event(data)
+                except Exception as exc:
+                    logger.warning("Failed to parse task event payload: %s (%s)", data, exc)
+                    continue
+                if not isinstance(event, TaskEvent):
+                    logger.debug("Ignoring non-task event on tasks channel: %s", data)
+                    continue
+
+                ev_type = event.type
+                task_id = event.task_id
+                worker_id = event.worker_id
+                err_msg = event.error
+                METRICS_RECORDER.record_task_event(event)
 
                 if not task_id:
                     continue
@@ -283,10 +352,12 @@ def _tasks_events_loop() -> None:
                 with TASKS_LOCK:
                     rec = TASKS.get(task_id)
                 parent_id = CHILD_TO_PARENT.get(task_id)
+                state_dirty = False
 
                 if ev_type == 'TASK_SUCCEEDED':
                     logger.info("Task succeeded: %s", task_id)
                     TASK_STORE.clear_from_pool(task_id)
+                    state_dirty = True
                     if rec:
                         with TASKS_LOCK:
                             rec.status = TaskStatus.DONE
@@ -308,6 +379,8 @@ def _tasks_events_loop() -> None:
                                         parent_rec.status = TaskStatus.DONE
                                         parent_rec.error = None
                     TASK_STORE.flush_pool()
+                    if state_dirty:
+                        STATE_MANAGER.mark_dirty()
                     continue
 
                 elif ev_type == 'TASK_FAILED':
@@ -322,6 +395,7 @@ def _tasks_events_loop() -> None:
                             rec.retries += 1
                             rec.last_failed_worker = worker_id
                             retries_left = rec.max_retries - rec.retries
+                        state_dirty = True
 
                     if parent_id:
                         if rec and retries_left >= 0:
@@ -333,12 +407,22 @@ def _tasks_events_loop() -> None:
                                 task=rec.parsed,
                                 exclude_worker_id=worker_id,
                             )
+                            METRICS_RECORDER.record_task_event(
+                                TaskEvent(
+                                    type="TASK_REQUEUED",
+                                    task_id=task_id,
+                                    worker_id=worker_id,
+                                    error=reason,
+                                )
+                            )
                             with TASKS_LOCK:
                                 parent_rec = TASKS.get(parent_id)
                                 if parent_rec:
                                     parent_rec.status = TaskStatus.WAITING
                                     parent_rec.error = f"Waiting on shard retry: {task_id}"
                             TASK_STORE.flush_pool()
+                            if state_dirty:
+                                STATE_MANAGER.mark_dirty()
                             continue
                         else:
                             with TASKS_LOCK:
@@ -350,6 +434,8 @@ def _tasks_events_loop() -> None:
                                     rec.next_retry_at = None
                             _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
                             TASK_STORE.flush_pool()
+                            if state_dirty:
+                                STATE_MANAGER.mark_dirty()
                             continue
                     elif rec and retries_left >= 0:
                         parsed = TASK_STORE.get_parsed(task_id)
@@ -362,6 +448,15 @@ def _tasks_events_loop() -> None:
                                 task=parsed,
                                 exclude_worker_id=worker_id,
                             )
+                            METRICS_RECORDER.record_task_event(
+                                TaskEvent(
+                                    type="TASK_REQUEUED",
+                                    task_id=task_id,
+                                    worker_id=worker_id,
+                                    error=reason,
+                                )
+                            )
+                            STATE_MANAGER.mark_dirty()
                         continue
 
                     if rec:
@@ -369,7 +464,10 @@ def _tasks_events_loop() -> None:
                             rec.next_retry_at = None
                         _propagate_merge_failure(rec)
                         _record_dead_letter(task_id, rec, worker_id, err_msg, parent_id=parent_id)
+                        state_dirty = True
                     TASK_STORE.flush_pool()
+                    if state_dirty:
+                        STATE_MANAGER.mark_dirty()
                     continue
 
                 else:
@@ -488,9 +586,14 @@ def _finalize_merge_children(parent_id: str, child_payloads: Dict[str, Dict[str,
                 child_rec.error = None
                 child_rec.merged_parent_id = None
                 child_rec.merge_slice = None
+                expected_child_artifacts = ((child_rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+            else:
+                expected_child_artifacts = []
+        sync_manifest(path.parent, child_id, expected_child_artifacts)
         TASK_STORE.mark_released(child_id)
 
     TASK_STORE.clear_merge(parent_id)
+    STATE_MANAGER.mark_dirty()
 
 
 def _workers_events_loop() -> None:
@@ -510,11 +613,19 @@ def _workers_events_loop() -> None:
                 except Exception as exc:
                     logger.debug("Bad workers.events payload: %s", exc)
                     continue
-                log_worker_event(logger, data)
+                try:
+                    event = parse_event(data)
+                except Exception as exc:
+                    logger.debug("Failed to parse worker event: %s (%s)", data, exc)
+                    continue
+                if not isinstance(event, WorkerEvent):
+                    logger.debug("Ignoring non-worker event on workers channel: %s", data)
+                    continue
+                log_worker_event(logger, event)
+                METRICS_RECORDER.record_worker_event(event)
 
-                ev_type = str(data.get("type", "")).upper()
-                if ev_type == "UNREGISTER":
-                    _reschedule_tasks_for_worker(data.get("worker_id"))
+                if event.type == "UNREGISTER":
+                    _reschedule_tasks_for_worker(event.worker_id)
         except Exception as exc:
             logger.warning("workers.events listener error: %s; reconnecting soon...", exc)
             time.sleep(2)
@@ -552,6 +663,37 @@ def _record_dead_letter(
         payload["load"] = rec.load
         payload["slo_seconds"] = rec.slo_seconds
     TASK_STORE.record_dead_letter(payload)
+    STATE_MANAGER.mark_dirty()
+
+
+def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
+    children = list(parent_rec.merged_children or [])
+    if not children:
+        return
+
+    parent_id = parent_rec.task_id
+    error_msg = parent_rec.error or "Merged parent failed"
+
+    with TASKS_LOCK:
+        parent_rec.merged_children = None
+        parent_rec.merge_slice = None
+
+    for child in children:
+        child_id = child.get("task_id")
+        if not child_id:
+            continue
+        with TASKS_LOCK:
+            child_rec = TASKS.get(child_id)
+            if child_rec:
+                child_rec.status = TaskStatus.FAILED
+                child_rec.error = error_msg
+                child_rec.merged_parent_id = None
+                child_rec.merge_slice = None
+        TASK_STORE.mark_released(child_id)
+        logger.info("Propagated merged failure from %s to child %s", parent_id, child_id)
+
+    TASK_STORE.clear_merge(parent_id)
+    STATE_MANAGER.mark_dirty()
 
 
 def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
@@ -599,6 +741,7 @@ def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
     if not to_reschedule:
         return
 
+    changed = False
     for task_id, parent_id in to_reschedule:
         with TASKS_LOCK:
             rec = TASKS.get(task_id)
@@ -613,6 +756,7 @@ def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
             exclude_worker_id=safe_worker_id,
         )
         logger.info("Rescheduling %s after worker %s unregistered", task_id, safe_worker_id)
+        changed = True
 
         if parent_id:
             with TASKS_LOCK:
@@ -620,16 +764,23 @@ def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
                 if parent_rec and parent_rec.status == TaskStatus.DISPATCHED:
                     parent_rec.status = TaskStatus.WAITING
                     parent_rec.error = f"Waiting on shard retry: {task_id}"
+                    changed = True
+    if changed:
+        STATE_MANAGER.mark_dirty()
     
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    STATE_MANAGER.start()
     try:
-        TASK_STORE.flush_pool()
-    except Exception as exc:
-        logger.warning("Initial dispatch scan failed: %s", exc)
-    threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True).start()
-    threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True).start()
-    yield
+        try:
+            TASK_STORE.flush_pool()
+        except Exception as exc:
+            logger.warning("Initial dispatch scan failed: %s", exc)
+        threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True).start()
+        threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True).start()
+        yield
+    finally:
+        STATE_MANAGER.stop()
 
 
 app.router.lifespan_context = _lifespan
@@ -688,6 +839,13 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
             TASKS[task_id] = rec_obj
 
         DISPATCHER.enqueue_for_dispatch(task_id, task, rec_obj)
+        METRICS_RECORDER.record_task_event(
+            TaskEvent(
+                type="TASK_SUBMITTED",
+                task_id=task_id,
+                payload={"taskType": (task.get("spec") or {}).get("taskType")},
+            )
+        )
 
         with TASKS_LOCK:
             rec = TASKS[task_id]
@@ -703,6 +861,7 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
             })
 
     TASK_STORE.flush_pool()
+    STATE_MANAGER.mark_dirty()
     return {"ok": True, "count": len(entries), "tasks": results}
 
 @app.get("/api/v1/tasks")

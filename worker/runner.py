@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from manifest_utils import prepare_output_dir, sync_manifest
 
 
 class Runner:
@@ -42,6 +43,7 @@ class Runner:
         # Ensure each task still gets an isolated directory
         if chosen.name != task_id:
             chosen = chosen / task_id
+        prepare_output_dir(chosen)
         return chosen
 
     def _write_results(self, task_id: str, task: Dict[str, Any], out_dir: Path, result: Optional[Dict[str, Any]]):
@@ -49,6 +51,8 @@ class Runner:
             return
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        expected = ((task or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+        sync_manifest(out_dir, task_id, expected)
         self._maybe_emit_http(task_id, task, result)
 
     def _maybe_emit_http(self, task_id: str, task: Dict[str, Any], result: Dict[str, Any]) -> None:

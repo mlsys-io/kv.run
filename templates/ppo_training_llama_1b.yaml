@@ -80,8 +80,8 @@ spec:
   output:
     destination:
       type: "local"
-      path: "/ignored/by/current-worker"  # Placeholder; current worker writes to RESULTS_DIR
+      path: "./ppo_training_llama"
     artifacts:
       - "responses.json"
-      - "trained_model/"  # Only saved if save_model: true
       - "logs"
+      - "artifacts/checkpoints"

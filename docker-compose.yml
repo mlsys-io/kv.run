@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: mloc-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
+  orchestrator:
+    image: ghcr.io/astral-sh/uv:0.4.19-python3.12
+    container_name: mloc-orchestrator
+    working_dir: /workspace
+    command: >
+      sh -c "uv sync --extra inference && uv run python orchestrator/main.py"
+    environment:
+      - PYTHONPATH=/workspace
+      - PORT=${ORCHESTRATOR_PORT:-8000}
+    env_file:
+      - .env
+    volumes:
+      - .:/workspace
+      - ./data/orchestrator/results:${ORCHESTRATOR_RESULTS_DIR:-/data/orchestrator/results}
+      - ./data/orchestrator/state:${ORCHESTRATOR_STATE_DIR:-/data/orchestrator/state}
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    depends_on:
+      - redis
+
+  worker:
+    image: ghcr.io/astral-sh/uv:0.4.19-python3.12
+    container_name: mloc-worker
+    working_dir: /workspace
+    command: >
+      sh -c "uv sync --extra inference && uv run python worker/main.py"
+    environment:
+      - PYTHONPATH=/workspace
+    env_file:
+      - .env
+    volumes:
+      - .:/workspace
+      - ./data/worker/results:${RESULTS_DIR:-/data/worker/results}
+    depends_on:
+      - redis
+      - orchestrator

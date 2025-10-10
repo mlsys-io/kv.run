@@ -14,6 +14,8 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from event_schema import WorkerEvent
+
 
 # -------------------------
 # Environment & time helpers
@@ -132,20 +134,20 @@ def get_logger(
 
     return logger
 
-def log_worker_event(logger, event: Dict[str, Any]) -> None:
-    ev_type = str(event.get("type", "")).upper()
-    worker_id = event.get("worker_id")
+def log_worker_event(logger, event: WorkerEvent) -> None:
+    ev_type = event.type
+    worker_id = event.worker_id
     if ev_type == "REGISTER":
         logger.info(
             "Worker registered: id=%s status=%s tags=%s",
             worker_id,
-            event.get("status"),
-            event.get("tags"),
+            event.status,
+            event.tags,
         )
     elif ev_type == "UNREGISTER":
         logger.info("Worker unregistered: id=%s", worker_id)
     elif ev_type == "STATUS":
-        logger.debug("Worker status: id=%s status=%s", worker_id, event.get("status"))
+        logger.debug("Worker status: id=%s status=%s", worker_id, event.status)
     elif ev_type == "HEARTBEAT":
         logger.debug("Worker heartbeat: id=%s", worker_id)
         

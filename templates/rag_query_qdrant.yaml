@@ -11,7 +11,7 @@ spec:
     replicas: 1
     hardware:
       cpu: "2"
-      memory: "2Gi"
+      memory: "4Gi"
   qdrant:
     url: "https://YOUR-CLUSTER-ID.us-east.aws.cloud.qdrant.io:6333"
     api_key: "${QDRANT_API_KEY}"
@@ -50,7 +50,8 @@ spec:
   output:
     destination:
       type: "local"
-      path: "./"
+      path: "./rag_query_qdrant"
     artifacts:
       - "responses.json"
-
+      - "logs"
+      - "artifacts"

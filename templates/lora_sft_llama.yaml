@@ -7,6 +7,9 @@ apiVersion: mloc/v1
 kind: LoRASFTTask
 metadata:
   name: llama-lora-demo
+  owner: research
+  annotations:
+    description: "LoRA fine-tuning pipeline for Llama models"
 
 spec:
   taskType: "lora_sft"
@@ -16,7 +19,7 @@ spec:
     replicas: 1
     hardware:
       cpu: "8"
-      memory: "48GiB"
+      memory: "48Gi"
       gpu:
         count: 1
         type: "any"
@@ -68,4 +71,5 @@ spec:
       path: "./lora_sft_llama"
     artifacts:
       - "responses.json"
-      - "final_lora"
+      - "logs"
+      - "artifacts/lora_adapter"
