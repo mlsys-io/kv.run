@@ -40,13 +40,26 @@ training pipelines.
   workers write to the same location.
 
 ## Quick Start (local)
-### 1. Install dependencies
+### 1. Install dependencies (via uv)
 ```bash
-pip install mloc[inference]            # Orchestrator + CPU worker baseline
-pip install mloc[inference,rag,agent]  # 增加 RAG 与 Agent 执行链路
-pip install mloc[inference,training]   # 启用微调、LoRA、PPO/DPO 等训练能力
+# 安装 uv（如系统已安装可跳过，更多方式参考 https://docs.astral.sh/uv ）
+pip install uv
+
+# 创建并激活隔离环境
+uv venv .venv
+source .venv/bin/activate
+
+# 同步 orchestrator + 默认 worker 所需依赖（含 transformers/torch）
+uv sync --extra inference
+
+# 如需其它能力，可追加 extras：
+# uv sync --extra inference --extra rag       # 启用 RAG
+# uv sync --extra inference --extra agent     # 启用 Agent 执行器
+# uv sync --all-extras                        # 安装全部可选组件
 ```
-详见 `docs/executors.md` 获取每个 `taskType` 对应的执行器和可选依赖说明。
+详见 `docs/executors.md` 获取每个 `taskType` 对应的执行器和可选依赖说明。`uv sync`
+会读取仓库内的 `uv.lock`，确保不同机器之间依赖版本一致。
+
 Start Redis:
 ```bash
 redis-server
@@ -57,7 +70,7 @@ redis-server
 export REDIS_URL="redis://localhost:6379/0"
 export ORCHESTRATOR_TOKEN="dev-token"  # optional auth
 export ORCHESTRATOR_RESULTS_DIR=./results_host
-python orchestrator/main.py
+uv run python orchestrator/main.py
 # listens on 0.0.0.0:8000 (override with PORT)
 ```
 
@@ -66,7 +79,7 @@ python orchestrator/main.py
 export REDIS_URL="redis://localhost:6379/0"
 export RESULTS_DIR=./results_workers    # or an NFS mount
 export ORCHESTRATOR_BASE_URL="http://127.0.0.1:8000"  # enable HTTP artifact uploads
-python worker/main.py
+uv run python worker/main.py
 ```
 Workers register with Redis, stream heartbeats, and execute incoming tasks.
 If the YAML sets `spec.output.destination.path`, results go there; otherwise
@@ -150,7 +163,7 @@ spec:
 轻量级单元测试覆盖任务池、manifest、聚合与指标逻辑：
 
 ```bash
-pytest tests/test_core_flow.py
+uv run pytest tests/test_core_flow.py
 ```
 运行结果会记录在 `.codex/testing.md` 与 `verification.md`，方便回溯。
 
