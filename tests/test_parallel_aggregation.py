@@ -7,7 +7,7 @@ from pathlib import Path
 
 from orchestrator.aggregation import maybe_aggregate_parent
 from orchestrator.task import TaskRecord, TaskStatus
-from manifest_utils import sync_manifest
+from orchestrator.manifest_utils import sync_manifest
 
 
 def _make_child_payload(text: str) -> dict[str, object]:

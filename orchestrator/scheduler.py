@@ -198,6 +198,11 @@ def choose_strategy(task: Dict[str, Any], idle_pool: List[Worker], queued: int) 
         # If capacity allows more than 'min_meaningful', expand to max_shards
         if max_shards > min_meaningful:
             target = max_shards
+        # Reserve capacity so remaining queued tasks can still dispatch.
+        others_waiting = max(queued - 1, 0)
+        reserve_for_others = max(0, min(len(idle_pool), others_waiting))
+        max_for_current = max(1, len(idle_pool) - reserve_for_others)
+        target = max(1, min(target, max_for_current))
         return Strategy(mode="data_parallel", shard_count=target, prefer_best=True)
 
     if ratio <= LOW_AVAIL_RATIO:
@@ -319,9 +324,19 @@ def make_shard_messages(
         if base_split:
             try:
                 shard_split = compute_shard_split(base_split, i, total)
-                data = dict(spec.get("data") or base_data)
-                data["split"] = shard_split
-                spec["data"] = data
+                # HF dataset slicing only accepts integer percent ranges; skip
+                # override if we would emit fractional percentages.
+                if "[" in shard_split and "]" in shard_split:
+                    bracket = shard_split.split("[", 1)[1].rsplit("]", 1)[0]
+                    parts = [p for p in bracket.split(":") if p]
+                    has_fraction = any("." in part for part in parts)
+                else:
+                    has_fraction = False
+
+                if not has_fraction:
+                    data = dict(spec.get("data") or base_data)
+                    data["split"] = shard_split
+                    spec["data"] = data
             except Exception:
                 # Fallback: keep original split and rely on spec.shard at executor
                 pass

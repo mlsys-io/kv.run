@@ -192,6 +192,7 @@ class HFTransformersExecutor(Executor):
                 seed = int(data.get("seed", 42))
                 buffer_size = data.get("buffer_size", None)
                 dataset = dataset.shuffle(seed=seed) if buffer_size is None else dataset.shuffle(seed=seed, buffer_size=int(buffer_size))
+            dataset = self._maybe_apply_dataset_shard(dataset, spec)
             column = data.get("column", "text")
             if column not in dataset.column_names:
                 raise ExecutionError(f"Column '{column}' not found in dataset. Available: {dataset.column_names}")
@@ -307,3 +308,21 @@ class HFTransformersExecutor(Executor):
         }
 
         return result
+
+    def _maybe_apply_dataset_shard(self, dataset, spec: Dict[str, Any]):
+        """Apply dataset.shard when spec includes shard metadata."""
+        shard_cfg = spec.get("shard") if isinstance(spec, dict) else None
+        if not shard_cfg:
+            return dataset
+        try:
+            total = int(shard_cfg.get("total", 1))
+            index = int(shard_cfg.get("index", 0))
+        except Exception as exc:  # pragma: no cover - validation
+            raise ExecutionError(f"Invalid shard metadata: {exc}") from exc
+        if total <= 1:
+            return dataset
+        contiguous = bool(shard_cfg.get("contiguous", True))
+        try:
+            return dataset.shard(num_shards=total, index=index, contiguous=contiguous)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ExecutionError(f"Failed to shard dataset ({index}/{total}): {exc}")

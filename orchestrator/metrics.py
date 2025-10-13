@@ -89,7 +89,12 @@ class MetricsRecorder:
         else:
             self.record_worker_event(event)
 
-    def record_task_event(self, event: TaskEvent) -> None:
+    def record_task_event(self, event: TaskEvent, *, is_child: bool = False) -> None:
+        # Skip shard child tasks; only count primary tasks in aggregated metrics.
+        if is_child or self._is_child_task(event):
+            self._append_event(event)
+            self._write_metrics()
+            return
         with self._lock:
             ev_type = event.type
             if ev_type == "TASK_SUCCEEDED":
@@ -114,7 +119,22 @@ class MetricsRecorder:
                 self._on_task_requeued(meta, event)
 
             self._append_event(event)
-            self._write_metrics()
+        self._write_metrics()
+
+    def _is_child_task(self, event: TaskEvent) -> bool:
+        payload = event.payload or {}
+        if payload.get("is_child_task") is True:
+            return True
+        if payload.get("parent_task_id"):
+            return True
+        shard_index = payload.get("shard_index")
+        if shard_index is None:
+            shard_index = payload.get("shard", {}).get("index") if isinstance(payload.get("shard"), dict) else None
+        try:
+            shard_index = int(shard_index) if shard_index is not None else None
+        except (TypeError, ValueError):
+            shard_index = None
+        return shard_index not in (None, 0)
 
     def record_worker_event(self, event: WorkerEvent) -> None:
         with self._lock:

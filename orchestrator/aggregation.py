@@ -23,7 +23,7 @@ def maybe_aggregate_parent(
     tasks_lock: threading.RLock,
     results_dir: Path,
     logger,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """
     Collect a shard result and, when all shards have arrived, aggregate the
     parent result exactly once and (optionally) deliver it to an HTTP endpoint.
@@ -49,18 +49,18 @@ def maybe_aggregate_parent(
     """
     parent_id = child_to_parent.get(child_task_id)
     if not parent_id:
-        return
+        return None
 
     # ---- Record the child payload (idempotent) under the lock ----
     with tasks_lock:
         info = parent_shards.get(parent_id)
         parent_rec = tasks.get(parent_id)
         if not info or not parent_rec:
-            return
+            return None
 
         # If already finalized or in-flight aggregation, no need to proceed.
         if info.get("aggregated") or info.get("aggregating"):
-            return
+            return None
 
         results: Dict[str, Any] = info.setdefault("results", {})
 
@@ -84,11 +84,11 @@ def maybe_aggregate_parent(
                 parent_id,
                 missing_children,
             )
-            return
+            return None
 
         # Not all shards present yet; nothing else to do now.
         if total <= 0 or collected < total:
-            return
+            return None
 
         # Exactly one thread flips to "aggregating" and proceeds to I/O.
         info["aggregating"] = True
@@ -132,14 +132,15 @@ def maybe_aggregate_parent(
     # ---- Cleanup and finalize under the lock ----
     with tasks_lock:
         info = parent_shards.get(parent_id)
-        if not info:
-            return
-        info["aggregated"] = True
-        info.pop("aggregating", None)
-        info.pop("results", None)
-        for cid in list(info.get("children", [])):
-            child_to_parent.pop(cid, None)
-        parent_shards.pop(parent_id, None)
+        if info:
+            info["aggregated"] = True
+            info.pop("aggregating", None)
+            info.pop("results", None)
+            for cid in list(info.get("children", [])):
+                child_to_parent.pop(cid, None)
+            parent_shards.pop(parent_id, None)
+
+    return aggregated_content
 
 
 def _json_equal(a: Any, b: Any) -> bool:

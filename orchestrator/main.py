@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse
 from utils import (
     parse_int_env,
     parse_float_env,
+    parse_bool_env,
     get_logger,
     log_worker_event,
     now_iso,
@@ -117,19 +118,31 @@ DISPATCHER.configure_task_store(
 )
 
 STATE_DIR = Path(os.getenv("ORCHESTRATOR_STATE_DIR", RESULTS_DIR.parent / "state")).expanduser().resolve()
+STATE_ENABLED = parse_bool_env("ORCHESTRATOR_STATE_ENABLED", False)
 STATE_FLUSH_INTERVAL = parse_float_env("STATE_FLUSH_INTERVAL_SEC", 5.0)
-STATE_MANAGER = StateManager(
-    state_dir=STATE_DIR,
-    task_store=TASK_STORE,
-    tasks=TASKS,
-    tasks_lock=TASKS_LOCK,
-    parent_shards=PARENT_SHARDS,
-    child_to_parent=CHILD_TO_PARENT,
-    logger=logger,
-    flush_interval=STATE_FLUSH_INTERVAL,
-)
-METRICS_DIR = STATE_DIR / "metrics"
+if STATE_ENABLED:
+    STATE_MANAGER: Optional[StateManager] = StateManager(
+        state_dir=STATE_DIR,
+        task_store=TASK_STORE,
+        tasks=TASKS,
+        tasks_lock=TASKS_LOCK,
+        parent_shards=PARENT_SHARDS,
+        child_to_parent=CHILD_TO_PARENT,
+        logger=logger,
+        flush_interval=STATE_FLUSH_INTERVAL,
+    )
+else:
+    STATE_MANAGER = None
+    logger.info("State persistence disabled. Set ORCHESTRATOR_STATE_ENABLED=1 to enable state snapshots.")
+
+DEFAULT_METRICS_DIR = STATE_DIR / "metrics" if STATE_ENABLED else RESULTS_DIR.parent / "metrics"
+METRICS_DIR = Path(os.getenv("ORCHESTRATOR_METRICS_DIR", str(DEFAULT_METRICS_DIR))).expanduser().resolve()
 METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
+
+
+def _state_mark_dirty() -> None:
+    if STATE_MANAGER:
+        STATE_MANAGER.mark_dirty()
 
 def _export_metrics_on_exit() -> None:
     try:
@@ -146,7 +159,10 @@ def _export_metrics_on_exit() -> None:
 
 atexit.register(_export_metrics_on_exit)
 
-_restored_tasks = STATE_MANAGER.load_snapshot()
+if STATE_MANAGER:
+    _restored_tasks = STATE_MANAGER.load_snapshot()
+else:
+    _restored_tasks = []
 if _restored_tasks:
     logger.info("Restoring %d pending tasks from snapshot", len(_restored_tasks))
     restored_count = 0
@@ -168,7 +184,7 @@ if _restored_tasks:
     if restored_count:
         TASK_STORE.flush_pool()
         logger.info("Requeued %d tasks after restoration", restored_count)
-        STATE_MANAGER.mark_dirty()
+        _state_mark_dirty()
 
 # -------------------------
 # App & routes
@@ -226,7 +242,7 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
     if child_payloads:
         _finalize_merge_children(task_id, child_payloads)
 
-    maybe_aggregate_parent(
+    aggregated_payload = maybe_aggregate_parent(
         task_id,
         content,
         child_to_parent=CHILD_TO_PARENT,
@@ -237,11 +253,26 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
         logger=logger,
     )
 
+    if aggregated_payload:
+        meta = aggregated_payload.get("metadata") or {}
+        METRICS_RECORDER.record_task_event(
+            TaskEvent(
+                type="TASK_SUCCEEDED",
+                task_id=aggregated_payload.get("task_id", task_id),
+                worker_id=aggregated_payload.get("worker_id"),
+                payload={
+                    "aggregated": True,
+                    "shards": meta.get("shards"),
+                },
+            ),
+            is_child=False,
+        )
+
     expected_artifacts: List[str] = []
     if rec:
         expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
     sync_manifest(file_path.parent, task_id, expected_artifacts)
-    STATE_MANAGER.mark_dirty()
+    _state_mark_dirty()
     return {"ok": True, "path": str(file_path)}
 
 
@@ -303,7 +334,7 @@ async def upload_result_file(
         if rec:
             expected_artifacts = ((rec.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
     sync_manifest(base_dir, safe_task_id, expected_artifacts)
-    STATE_MANAGER.mark_dirty()
+    _state_mark_dirty()
     return {"ok": True, "path": str(target_path)}
 
 
@@ -361,14 +392,15 @@ def _tasks_events_loop() -> None:
                 task_id = event.task_id
                 worker_id = event.worker_id
                 err_msg = event.error
-                METRICS_RECORDER.record_task_event(event)
 
                 if not task_id:
                     continue
 
                 with TASKS_LOCK:
                     rec = TASKS.get(task_id)
-                parent_id = CHILD_TO_PARENT.get(task_id)
+                    parent_id = CHILD_TO_PARENT.get(task_id)
+
+                METRICS_RECORDER.record_task_event(event, is_child=bool(parent_id))
                 state_dirty = False
 
                 if ev_type == "TASK_STARTED":
@@ -415,7 +447,7 @@ def _tasks_events_loop() -> None:
                                         parent_rec.error = None
                     TASK_STORE.flush_pool()
                     if state_dirty:
-                        STATE_MANAGER.mark_dirty()
+                        _state_mark_dirty()
                     continue
 
                 elif ev_type == 'TASK_FAILED':
@@ -451,7 +483,8 @@ def _tasks_events_loop() -> None:
                                     task_id=task_id,
                                     worker_id=worker_id,
                                     error=reason,
-                                )
+                                ),
+                                is_child=True,
                             )
                             with TASKS_LOCK:
                                 parent_rec = TASKS.get(parent_id)
@@ -460,7 +493,7 @@ def _tasks_events_loop() -> None:
                                     parent_rec.error = f"Waiting on shard retry: {task_id}"
                             TASK_STORE.flush_pool()
                             if state_dirty:
-                                STATE_MANAGER.mark_dirty()
+                                _state_mark_dirty()
                             continue
                         else:
                             with TASKS_LOCK:
@@ -474,7 +507,7 @@ def _tasks_events_loop() -> None:
                             METRICS_RECORDER.finalize_task_failure(task_id)
                             TASK_STORE.flush_pool()
                             if state_dirty:
-                                STATE_MANAGER.mark_dirty()
+                                _state_mark_dirty()
                             continue
                     elif rec and retries_left >= 0:
                         parsed = TASK_STORE.get_parsed(task_id)
@@ -495,7 +528,7 @@ def _tasks_events_loop() -> None:
                                     error=reason,
                                 )
                             )
-                            STATE_MANAGER.mark_dirty()
+                            _state_mark_dirty()
                         continue
 
                     if rec:
@@ -507,7 +540,7 @@ def _tasks_events_loop() -> None:
                     METRICS_RECORDER.finalize_task_failure(task_id)
                     TASK_STORE.flush_pool()
                     if state_dirty:
-                        STATE_MANAGER.mark_dirty()
+                        _state_mark_dirty()
                     continue
 
                 else:
@@ -633,7 +666,7 @@ def _finalize_merge_children(parent_id: str, child_payloads: Dict[str, Dict[str,
         TASK_STORE.mark_released(child_id)
 
     TASK_STORE.clear_merge(parent_id)
-    STATE_MANAGER.mark_dirty()
+    _state_mark_dirty()
 
 
 def _workers_events_loop() -> None:
@@ -703,7 +736,7 @@ def _record_dead_letter(
         payload["load"] = rec.load
         payload["slo_seconds"] = rec.slo_seconds
     TASK_STORE.record_dead_letter(payload)
-    STATE_MANAGER.mark_dirty()
+    _state_mark_dirty()
 
 
 def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
@@ -733,7 +766,7 @@ def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
         logger.info("Propagated merged failure from %s to child %s", parent_id, child_id)
 
     TASK_STORE.clear_merge(parent_id)
-    STATE_MANAGER.mark_dirty()
+    _state_mark_dirty()
 
 
 def _propagate_merge_failure(parent_rec: TaskRecord) -> None:
@@ -806,11 +839,12 @@ def _reschedule_tasks_for_worker(worker_id: Optional[str]) -> None:
                     parent_rec.error = f"Waiting on shard retry: {task_id}"
                     changed = True
     if changed:
-        STATE_MANAGER.mark_dirty()
+        _state_mark_dirty()
     
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
-    STATE_MANAGER.start()
+    if STATE_MANAGER:
+        STATE_MANAGER.start()
     try:
         try:
             TASK_STORE.flush_pool()
@@ -820,7 +854,8 @@ async def _lifespan(_: FastAPI):
         threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True).start()
         yield
     finally:
-        STATE_MANAGER.stop()
+        if STATE_MANAGER:
+            STATE_MANAGER.stop()
 
 
 app.router.lifespan_context = _lifespan
@@ -909,7 +944,7 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
             })
 
     TASK_STORE.flush_pool()
-    STATE_MANAGER.mark_dirty()
+    _state_mark_dirty()
     return {"ok": True, "count": len(entries), "tasks": results}
 
 @app.get("/api/v1/tasks")

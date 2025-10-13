@@ -5,22 +5,22 @@ _IMPORT_ERRORS: Dict[str, str] = {}
 
 def _safe_import(name: str, module: str) -> Optional[type]:
     try:
-        pkg = importlib.import_module(module)
+        pkg = importlib.import_module(module, package=__package__)
         return getattr(pkg, name)
     except Exception as exc:  # noqa: broad-except
         _IMPORT_ERRORS[name] = str(exc)
         return None
 
 
-VLLMExecutor = _safe_import("VLLMExecutor", "worker.executors.vllm_executor")
-PPOExecutor = _safe_import("PPOExecutor", "worker.executors.ppo_executor")
-DPOExecutor = _safe_import("DPOExecutor", "worker.executors.dpo_executor")
-SFTExecutor = _safe_import("SFTExecutor", "worker.executors.sft_executor")
-LoRASFTExecutor = _safe_import("LoRASFTExecutor", "worker.executors.lora_sft_executor")
-HFTransformersExecutor = _safe_import("HFTransformersExecutor", "worker.executors.transformers_executor")
-RAGExecutor = _safe_import("RAGExecutor", "worker.executors.rag_executor")
-AgentExecutor = _safe_import("AgentExecutor", "worker.executors.agent_executor")
-EchoExecutor = _safe_import("EchoExecutor", "worker.executors.echo_executor")
+VLLMExecutor = _safe_import("VLLMExecutor", ".vllm_executor")
+PPOExecutor = _safe_import("PPOExecutor", ".ppo_executor")
+DPOExecutor = _safe_import("DPOExecutor", ".dpo_executor")
+SFTExecutor = _safe_import("SFTExecutor", ".sft_executor")
+LoRASFTExecutor = _safe_import("LoRASFTExecutor", ".lora_sft_executor")
+HFTransformersExecutor = _safe_import("HFTransformersExecutor", ".transformers_executor")
+RAGExecutor = _safe_import("RAGExecutor", ".rag_executor")
+AgentExecutor = _safe_import("AgentExecutor", ".agent_executor")
+EchoExecutor = _safe_import("EchoExecutor", ".echo_executor")
 
 EXECUTOR_REGISTRY: Dict[str, Optional[type]] = {
     "vllm": VLLMExecutor,

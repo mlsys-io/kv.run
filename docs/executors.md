@@ -25,7 +25,7 @@
 ```
 <RESULTS_DIR>/<task_id>/
 ├── responses.json           # 主结果
-├── manifest.json            # manifest_utils 生成的索引
+├── manifest.json            # orchestrator.manifest_utils 生成的索引
 ├── logs/                    # 执行日志（可为空）
 └── artifacts/               # 额外工件，如 checkpoint、检索数据等
 ```

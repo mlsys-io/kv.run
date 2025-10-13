@@ -29,8 +29,8 @@ if "fastapi" not in sys.modules:
     sys.modules["fastapi"] = fastapi_stub
 
 import utils  # noqa: F401  确保顶层模块可被后续相对导入使用
-from event_schema import TaskEvent, WorkerEvent, parse_event, serialize_event
-from manifest_utils import prepare_output_dir, sync_manifest
+from orchestrator.event_schema import TaskEvent, WorkerEvent, parse_event, serialize_event
+from orchestrator.manifest_utils import prepare_output_dir, sync_manifest
 from orchestrator.aggregation import maybe_aggregate_parent
 from orchestrator.metrics import MetricsRecorder
 from orchestrator.results import write_result, read_result

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Redis 事件统一 schema，供 orchestrator 与 worker 共用。"""
+"""Event schema definitions scoped to the orchestrator service."""
 
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -15,9 +15,9 @@ def _now_iso() -> str:
 class BaseEvent(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    type: str = Field(..., description="事件类型，需为大写枚举值。")
-    ts: str = Field(default_factory=_now_iso, description="事件时间戳（ISO8601）。")
-    worker_id: Optional[str] = Field(default=None, description="关联的 worker_id。")
+    type: str = Field(..., description="Event type, expected to be an uppercase enum value.")
+    ts: str = Field(default_factory=_now_iso, description="Event timestamp (ISO8601).")
+    worker_id: Optional[str] = Field(default=None, description="Associated worker identifier.")
 
     @field_validator("type")
     @classmethod
@@ -29,10 +29,10 @@ class BaseEvent(BaseModel):
 
 
 class TaskEvent(BaseEvent):
-    task_id: str = Field(..., description="关联的任务 ID。")
-    status: Optional[str] = Field(default=None, description="任务状态。")
-    error: Optional[str] = Field(default=None, description="错误信息（若有）。")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="附加数据。")
+    task_id: str = Field(..., description="Associated task identifier.")
+    status: Optional[str] = Field(default=None, description="Task status.")
+    error: Optional[str] = Field(default=None, description="Error message if any.")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Additional event payload.")
 
     @field_validator("task_id")
     @classmethod
@@ -44,10 +44,10 @@ class TaskEvent(BaseEvent):
 
 
 class WorkerEvent(BaseEvent):
-    status: Optional[str] = Field(default=None, description="Worker 状态（IDLE/RUNNING 等）。")
-    tags: Optional[list[str]] = Field(default=None, description="Worker 标签。")
-    metrics: Dict[str, Any] = Field(default_factory=dict, description="心跳上报的指标。")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="额外上下文信息。")
+    status: Optional[str] = Field(default=None, description="Worker status (IDLE/RUNNING/etc).")
+    tags: Optional[list[str]] = Field(default=None, description="Worker tags.")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="Metrics reported in heartbeat.")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Additional context.")
 
 
 Event = TaskEvent | WorkerEvent

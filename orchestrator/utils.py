@@ -42,6 +42,18 @@ def parse_float_env(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return float(default)
 
+def parse_bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    normalized = val.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
 def now_iso() -> str:
     """Return the current UTC time in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()

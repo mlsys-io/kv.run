@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from manifest_utils import prepare_output_dir, sync_manifest
+from orchestrator.manifest_utils import prepare_output_dir, sync_manifest
 from orchestrator.results import write_result
 
 

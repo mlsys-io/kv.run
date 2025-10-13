@@ -138,22 +138,26 @@ spec:
 - If you prefer classic shared storage, point both `RESULTS_DIR` variables at a
   common mount and skip HTTP uploads.
 
-每次任务运行后会调用 `manifest_utils.sync_manifest` 同步 `manifest.json`，其中对
+每次任务运行后会调用 `orchestrator.manifest_utils.sync_manifest` 同步 `manifest.json`，其中对
 在模板中声明的 `spec.output.artifacts` 会标注 `status` 为 `present` 或 `missing`，
 方便在验证阶段快速定位缺失工件。
 
 ## State & Metrics
 
-- `StateManager` 会定期将 `TaskStore`、任务记录和父子分片信息写入
-  `${ORCHESTRATOR_STATE_DIR:-./state}/task_state.json`，重启时自动恢复。
-- 行为指标通过 `metrics/metrics.json` 持久化，同时在 `/metrics` HTTP 接口中提供
-  实时快照。原始事件以 JSONL 形式写入 `metrics/events.log`。
+- `StateManager` 默认关闭；设置 `ORCHESTRATOR_STATE_ENABLED=1` 后，会定期将
+  `TaskStore`、任务记录和父子分片信息写入
+  `${ORCHESTRATOR_STATE_DIR:-./state}/task_state.json`，并在重启时自动恢复。
+- 指标快照默认写入 `${ORCHESTRATOR_METRICS_DIR:-./metrics}/metrics.json`，同时在
+  `/metrics` HTTP 接口中提供实时快照。原始事件以 JSONL 形式写入
+  `${ORCHESTRATOR_METRICS_DIR:-./metrics}/events.log`。
 
 ### Key environment variables
 
 | 变量 | 默认值 | 说明 |
 | ---- | ------ | ---- |
-| `ORCHESTRATOR_STATE_DIR` | `./state` | 状态快照与指标输出目录 |
+| `ORCHESTRATOR_STATE_ENABLED` | `0` | 是否启用状态快照与恢复 |
+| `ORCHESTRATOR_STATE_DIR` | `./state` | 状态快照目录（启用快照时生效） |
+| `ORCHESTRATOR_METRICS_DIR` | 取决于 `STATE_ENABLED`（默认为 `./metrics`） | 指标输出目录 |
 | `STATE_FLUSH_INTERVAL_SEC` | `5` | 状态写盘周期 |
 | `RESULTS_DIR` | `./results_host` | Orchestrator 结果目录 |
 | `ORCHESTRATOR_TOKEN` | 无 | 可选的 Bearer Token，用于保护 API |
