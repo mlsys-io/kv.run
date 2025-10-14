@@ -9,7 +9,7 @@ import uuid
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from worker_cls import Worker, get_worker_from_redis, is_stale_by_redis
 from scheduler import idle_satisfying_pool, select_workers_for_task
@@ -205,6 +205,8 @@ class TaskPoolManager:
         self._done_status = done_status
 
         self._model_worker_cache: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
+        self._model_queue_counts: Counter[str] = Counter()
+        self._model_queue_lock = threading.RLock()
 
         self._flush_lock = threading.RLock()
         self._flush_timer: Optional[threading.Timer] = None
@@ -222,9 +224,9 @@ class TaskPoolManager:
         *,
         exclude_worker_id: Optional[str] = None,
     ) -> None:
-        batch = self._pool.add(
-            PoolEntry(task_id=task_id, task=task, record=record, exclude_worker_id=exclude_worker_id)
-        )
+        entry = PoolEntry(task_id=task_id, task=task, record=record, exclude_worker_id=exclude_worker_id)
+        self._update_model_queue_counts([entry], delta=1)
+        batch = self._pool.add(entry)
         if batch:
             self._dispatch_batch(batch)
         self._ensure_flush_timer()
@@ -299,6 +301,7 @@ class TaskPoolManager:
             self._ensure_flush_timer()
             return
 
+        self._update_model_queue_counts(ready_entries, delta=-1)
         plans = self._optimize_batch(ready_entries)
 
         for plan in plans:
@@ -314,6 +317,26 @@ class TaskPoolManager:
                 self._logger.warning("Dispatch planning failed for %s: %s", plan.task_id, exc)
 
         self._ensure_flush_timer()
+
+    def _update_model_queue_counts(self, entries: Iterable[PoolEntry], delta: int) -> None:
+        if not entries or delta == 0:
+            return
+        with self._model_queue_lock:
+            for entry in entries:
+                if not self._is_inference_task(entry.task):
+                    continue
+                model = self._extract_model_name(entry.task)
+                if not model:
+                    continue
+                new_value = self._model_queue_counts.get(model, 0) + delta
+                if new_value <= 0:
+                    self._model_queue_counts.pop(model, None)
+                else:
+                    self._model_queue_counts[model] = new_value
+
+    def _snapshot_model_queue_counts(self) -> Counter[str]:
+        with self._model_queue_lock:
+            return Counter(self._model_queue_counts)
 
     def _apply_inference_merges(
         self,
@@ -512,23 +535,21 @@ class TaskPoolManager:
         Build dispatch plans and try to:
           - precompute eligible pools (with exclude ids),
           - co-locate when workers are tight (pair tasks that share workers),
-          - apply model stickiness (reuse a cached IDLE worker for the same model).
+          - apply model stickiness (reuse a cached IDLE worker for the same model),
+          - convey engine-retention hints when more work is queued for a model.
         """
         if not entries:
             return []
 
         plans: List[DispatchPlan] = []
         pool_map: Dict[str, List[Worker]] = {}
-        model_counts: Counter[str] = Counter()
         inference_entries: List[PoolEntry] = []
+        pending_counts = self._snapshot_model_queue_counts()
 
-        # 1) Basic plan assembly + per-task eligible pools
+        # 1) Build dispatch plans and cache the eligible worker pools.
         for entry in entries:
-            exclude_ids: Set[str] = set()
-            if entry.exclude_worker_id:
-                exclude_ids.add(entry.exclude_worker_id)
-
-            pool = idle_satisfying_pool(self._rds, entry.task, exclude_ids=exclude_ids)
+            exclude_ids: Set[str] = {entry.exclude_worker_id} if entry.exclude_worker_id else set()
+            pool = idle_satisfying_pool(self._rds, entry.task, exclude_ids=exclude_ids) or []
             pool_map[entry.task_id] = pool
 
             plans.append(
@@ -542,16 +563,20 @@ class TaskPoolManager:
 
             if self._is_inference_task(entry.task):
                 inference_entries.append(entry)
-                model_name = self._extract_model_name(entry.task)
-                if model_name:
-                    model_counts[model_name] += 1
 
         plans, inference_entries = self._apply_inference_merges(plans, pool_map, inference_entries)
-        model_counts = Counter()
+
+        # Keep worker pools that correspond to surviving plans only.
+        if plans:
+            active_ids = {plan.task_id for plan in plans}
+            pool_map = {task_id: pool_map.get(task_id, []) for task_id in active_ids}
+
+        model_counts: Counter[str] = Counter()
         for entry in inference_entries:
             model_name = self._extract_model_name(entry.task)
             if model_name:
                 model_counts[model_name] += 1
+        remaining_by_model = Counter(model_counts)
 
         # 2) Co-location when workers are tight: pair tasks sharing common workers
         available_workers = {w.worker_id for workers in pool_map.values() for w in workers}
@@ -560,41 +585,65 @@ class TaskPoolManager:
         if worker_shortage and len(inference_entries) >= 2:
             ordered = sorted(inference_entries, key=lambda e: getattr(e.record, "submitted_ts", 0.0))
             paired: Set[str] = set()
+            candidate_cache: Dict[str, Tuple[List[Worker], Dict[str, Worker]]] = {}
+            for entry in inference_entries:
+                task_pool = pool_map.get(entry.task_id, [])
+                if task_pool:
+                    candidate_cache[entry.task_id] = (task_pool, {w.worker_id: w for w in task_pool})
+
             for idx, entry in enumerate(ordered):
-                if entry.task_id in paired:
+                task_id = entry.task_id
+                if task_id in paired:
                     continue
-                pool_a = pool_map.get(entry.task_id, [])
+                pool_a = candidate_cache.get(task_id)
                 if not pool_a:
                     continue
-                cand_a = {w.worker_id: w for w in pool_a}
+                workers_a, cand_a = pool_a
+                load_a = getattr(entry.record, "load", 0)
+
                 for other in ordered[idx + 1 :]:
-                    if other.task_id in paired:
+                    other_id = other.task_id
+                    if other_id in paired:
                         continue
-                    pool_b = pool_map.get(other.task_id, [])
+                    pool_b = candidate_cache.get(other_id)
                     if not pool_b:
                         continue
-                    cand_b = {w.worker_id: w for w in pool_b}
-                    common_ids = list(set(cand_a.keys()) & set(cand_b.keys()))
+                    workers_b, cand_b = pool_b
+                    common_ids = set(cand_a.keys()) & set(cand_b.keys())
                     if not common_ids:
                         continue
-                    combined: Dict[str, Worker] = dict(cand_a)
-                    combined.update(cand_b)
-                    candidates = [combined[cid] for cid in common_ids]
 
+                    candidates: List[Worker] = []
+                    seen: Set[str] = set()
+                    for worker in workers_a:
+                        worker_id = worker.worker_id
+                        if worker_id in common_ids and worker_id not in seen:
+                            candidates.append(worker)
+                            seen.add(worker_id)
+                    for worker in workers_b:
+                        worker_id = worker.worker_id
+                        if worker_id in common_ids and worker_id not in seen:
+                            candidates.append(worker)
+                            seen.add(worker_id)
+
+                    if not candidates:
+                        continue
+
+                    task_load = max(load_a, getattr(other.record, "load", 0))
                     chosen = select_workers_for_task(
                         candidates,
                         shard_count=1,
                         prefer_best=True,
-                        task_load=max(getattr(entry.record, "load", 0), getattr(other.record, "load", 0)),
+                        task_load=task_load,
                     )
                     if not chosen:
                         continue
 
                     target_worker = chosen[0].worker_id
-                    self._set_plan_preference(plans, entry.task_id, target_worker)
-                    self._set_plan_preference(plans, other.task_id, target_worker)
-                    paired.add(entry.task_id)
-                    paired.add(other.task_id)
+                    self._set_plan_preference(plans, task_id, target_worker)
+                    self._set_plan_preference(plans, other_id, target_worker)
+                    paired.add(task_id)
+                    paired.add(other_id)
                     break
 
         # 3) Model stickiness: reuse previous IDLE worker for popular models
@@ -614,6 +663,21 @@ class TaskPoolManager:
             pool = pool_map.get(plan.task_id, [])
             if any(w.worker_id == cached_worker for w in pool):
                 plan.preferred_worker_id = cached_worker
+
+        # 4) Host-driven engine retention: decide whether workers should keep the inference engine warm.
+        for plan in plans:
+            if not self._is_inference_task(plan.parsed):
+                continue
+            model_name = self._extract_model_name(plan.parsed)
+            if not model_name:
+                continue
+            remaining = remaining_by_model.get(model_name, 0)
+            future_in_batch = remaining - 1 if remaining > 0 else 0
+            queued_elsewhere = pending_counts.get(model_name, 0)
+            retain_engine = (future_in_batch + queued_elsewhere) > 0
+            self._set_release_after_run_flag(plan, retain_engine)
+            if remaining > 0:
+                remaining_by_model[model_name] = future_in_batch
 
         return plans
 
@@ -690,6 +754,21 @@ class TaskPoolManager:
                 self._flush_timer = None
 
     # ---- helpers ----
+
+    def _set_release_after_run_flag(self, plan: DispatchPlan, retain_engine: bool) -> None:
+        spec = plan.parsed.setdefault("spec", {})
+        model_cfg = spec.get("model")
+        if isinstance(model_cfg, dict):
+            vllm_cfg = model_cfg.get("vllm")
+            if vllm_cfg is None:
+                vllm_cfg = {}
+                model_cfg["vllm"] = vllm_cfg
+            if isinstance(vllm_cfg, dict):
+                vllm_cfg["release_after_run"] = not retain_engine
+
+        metadata = plan.parsed.setdefault("metadata", {})
+        annotations = metadata.setdefault("annotations", {})
+        annotations["retain_inference_engine"] = bool(retain_engine)
 
     def _set_plan_preference(self, plans: List[DispatchPlan], task_id: str, worker_id: str) -> None:
         for plan in plans:
