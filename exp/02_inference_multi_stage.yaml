@@ -15,7 +15,7 @@ spec:
       memory: "64Gi"
       gpu:
         type: "any"
-        count: 2
+        count: 1
         
   data:
     type: "dataset"
@@ -41,14 +41,13 @@ spec:
             memory: "64Gi"
             gpu:
               type: "any"
-              count: 2
+              count: 1
         model:
           source:
             type: "huggingface"
             identifier: "meta-llama/Llama-3.1-8B-Instruct"
             revision: "main"
           vllm:
-            tensor_parallel_size: 2
             gpu_memory_utilization: 0.9
             trust_remote_code: true
         inference:
@@ -80,7 +79,6 @@ spec:
             identifier: "meta-llama/Llama-3.1-8B-Instruct"
             revision: "main"
           vllm:
-            tensor_parallel_size: 2
             gpu_memory_utilization: 0.9
             trust_remote_code: true
         inference:
@@ -111,7 +109,6 @@ spec:
             identifier: "meta-llama/Meta-Llama-3.1-8B-Instruct"
             revision: "main"
           vllm:
-            tensor_parallel_size: 2
             gpu_memory_utilization: 0.9
             trust_remote_code: true
         inference:

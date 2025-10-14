@@ -16,7 +16,7 @@ spec:
       memory: "64Gi"
       gpu:
         type: "any"
-        count: 2
+        count: 1
 
   model:
     source:
@@ -46,8 +46,7 @@ spec:
           response_column: "answer"
           separator: "\n\nAnswer: "
         training:
-          allow_multi_gpu: true
-          visible_devices: "0,1"
+          allow_multi_gpu: false
           num_train_epochs: 1
           batch_size: 2
           gradient_accumulation_steps: 4
@@ -71,16 +70,12 @@ spec:
     - name: lora-infer
       spec:
         taskType: "inference"
-        parallel:
-          enabled: true
-          max_shards: 2
         model:
           adapters:
             - type: "lora"
               url: "${lora-train.result.final_lora_archive_url}"
               apply: "merge"
           vllm:
-            tensor_parallel_size: 2
             gpu_memory_utilization: 0.6
             trust_remote_code: true
         data:

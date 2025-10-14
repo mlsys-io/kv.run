@@ -16,7 +16,7 @@ spec:
       memory: "64Gi"
       gpu:
         type: "any"
-        count: 2
+        count: 1
 
   model:
     source:
@@ -45,8 +45,7 @@ spec:
     separator: "\n\nAnswer: "
 
   training:
-    allow_multi_gpu: true
-    visible_devices: "0,1"
+    allow_multi_gpu: false
     num_train_epochs: 1
     batch_size: 2
     gradient_accumulation_steps: 4

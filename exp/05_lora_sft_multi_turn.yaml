@@ -16,7 +16,7 @@ spec:
       memory: "64Gi"
       gpu:
         type: "any"
-        count: 2
+        count: 1
 
   model:
     source:
@@ -56,8 +56,7 @@ spec:
           response_column: "answer"
           separator: "\n\nTutor Turn 1: "
         training:
-          allow_multi_gpu: true
-          visible_devices: "0,1"
+          allow_multi_gpu: false
           num_train_epochs: 1
           batch_size: 2
           gradient_accumulation_steps: 4
@@ -84,8 +83,7 @@ spec:
           response_column: "answer"
           separator: "\n\nTutor Turn 2: "
         training:
-          allow_multi_gpu: true
-          visible_devices: "0,1"
+          allow_multi_gpu: false
           num_train_epochs: 1
           batch_size: 2
           gradient_accumulation_steps: 4
