@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""增强版指标记录器：跟踪任务耗时、SLO 达成率与 worker 成本/功耗。"""
-
 import json
 import time
 from datetime import datetime, timezone
@@ -9,9 +7,9 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, Optional, Set, Tuple
 
-from event_schema import Event, TaskEvent, WorkerEvent, serialize_event
-from task import categorize_task_type
-from utils import parse_iso_ts
+from .event_schema import Event, TaskEvent, WorkerEvent, serialize_event
+from .task_models import categorize_task_type
+from .utils import parse_iso_ts
 
 
 def _now_iso() -> str:
@@ -24,10 +22,6 @@ def _fresh_timing_bucket() -> Dict[str, Dict[str, float]]:
         "execution": {"sum": 0.0, "count": 0},
         "total": {"sum": 0.0, "count": 0},
     }
-
-
-def _fresh_slo_bucket() -> Dict[str, int]:
-    return {"with_slo": 0, "met": 0, "breached": 0, "missing": 0}
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -71,9 +65,6 @@ class MetricsRecorder:
             "training": _fresh_timing_bucket(),
             "other": _fresh_timing_bucket(),
         }
-        self._slo: Dict[str, Dict[str, int]] = {
-            bucket: _fresh_slo_bucket() for bucket in self._timings
-        }
 
         self._worker_meta: Dict[str, Dict[str, Any]] = {}
 
@@ -90,7 +81,6 @@ class MetricsRecorder:
             self.record_worker_event(event)
 
     def record_task_event(self, event: TaskEvent, *, is_child: bool = False) -> None:
-        # Skip shard child tasks; only count primary tasks in aggregated metrics.
         if is_child or self._is_child_task(event):
             self._append_event(event)
             self._write_metrics()
@@ -178,7 +168,6 @@ class MetricsRecorder:
                 )
 
             self._record_timing(meta, queue_time, exec_time, total_time)
-            self._record_slo(meta, total_time, outcome="failed")
 
             meta["finalized"] = True
             meta["pending_failure"] = None
@@ -213,7 +202,6 @@ class MetricsRecorder:
     def format_report(self, report: Dict[str, Any]) -> str:
         counters = report.get("counters", {})
         timings = report.get("task_timings", {})
-        slo = report.get("slo", {})
         workers = report.get("workers", {})
 
         def _fmt(avg: Optional[float]) -> str:
@@ -231,18 +219,6 @@ class MetricsRecorder:
             f"execution={_fmt(overall.get('execution_avg_sec'))}, "
             f"total={_fmt(overall.get('total_avg_sec'))}",
         ]
-
-        slo_overall = slo.get("overall", {})
-        with_slo = slo_overall.get("with_slo", 0)
-        if with_slo:
-            rate = slo_overall.get("completion_rate")
-            rate_str = f"{rate:.1%}" if rate is not None else "n/a"
-            lines.append(
-                f"SLO: with_slo={with_slo}, met={slo_overall.get('met', 0)}, "
-                f"breached={slo_overall.get('breached', 0)}, rate={rate_str}"
-            )
-        else:
-            lines.append("SLO: no tasks declared SLO targets")
 
         totals = workers.get("totals", {})
         lines.append(
@@ -270,7 +246,6 @@ class MetricsRecorder:
                 "dispatched_ts": None,
                 "start_ts": None,
                 "finished_ts": None,
-                "slo_seconds": None,
                 "attempts": 0,
                 "pending_failure": None,
                 "finalized": False,
@@ -288,16 +263,12 @@ class MetricsRecorder:
     def _ensure_category(self, category: str) -> None:
         if category not in self._timings:
             self._timings[category] = _fresh_timing_bucket()
-            self._slo[category] = _fresh_slo_bucket()
 
     def _on_task_submitted(self, meta: Dict[str, Any], event: TaskEvent) -> None:
         ts = parse_iso_ts(event.ts)
         meta["submitted_ts"] = ts
         meta["last_queue_ts"] = ts
         payload = event.payload or {}
-        slo = _safe_float(payload.get("sloSeconds"))
-        if slo is not None:
-            meta["slo_seconds"] = slo
         task_type = payload.get("taskType")
         if task_type:
             meta["task_type"] = task_type
@@ -341,7 +312,6 @@ class MetricsRecorder:
         )
 
         self._record_timing(meta, queue_time, exec_time, total_time)
-        self._record_slo(meta, total_time, outcome="success")
 
         meta["finalized"] = True
         meta["last_durations"] = {
@@ -398,15 +368,16 @@ class MetricsRecorder:
         elif queue_anchor is not None:
             queue_time = max(0.0, finished_ts - queue_anchor)
 
+        exec_time = None
         if runtime_override is not None:
             exec_time = max(0.0, runtime_override)
         elif start_ts is not None:
             exec_time = max(0.0, finished_ts - start_ts)
-        else:
-            exec_time = None
 
         total_time = None
-        if queue_anchor is not None:
+        if queue_time is not None and exec_time is not None:
+            total_time = queue_time + exec_time
+        elif queue_anchor is not None:
             total_time = max(0.0, finished_ts - queue_anchor)
 
         return queue_time, exec_time, total_time
@@ -420,247 +391,113 @@ class MetricsRecorder:
     ) -> None:
         category = meta.get("category") or "other"
         self._ensure_category(category)
-        for bucket in ("overall", category):
-            timings = self._timings[bucket]
+        for bucket_name in {"overall", category}:
+            bucket = self._timings[bucket_name]
             if queue_time is not None:
-                timings["queue"]["sum"] += queue_time
-                timings["queue"]["count"] += 1
+                bucket["queue"]["sum"] += queue_time
+                bucket["queue"]["count"] += 1
             if exec_time is not None:
-                timings["execution"]["sum"] += exec_time
-                timings["execution"]["count"] += 1
+                bucket["execution"]["sum"] += exec_time
+                bucket["execution"]["count"] += 1
             if total_time is not None:
-                timings["total"]["sum"] += total_time
-                timings["total"]["count"] += 1
-
-    def _record_slo(self, meta: Dict[str, Any], total_time: Optional[float], *, outcome: str) -> None:
-        category = meta.get("category") or "other"
-        self._ensure_category(category)
-
-        slo_value = meta.get("slo_seconds")
-        for bucket in ("overall", category):
-            stats = self._slo[bucket]
-            if slo_value is None:
-                stats["missing"] += 1
-                continue
-            stats["with_slo"] += 1
-            if outcome == "success" and total_time is not None and total_time <= slo_value:
-                stats["met"] += 1
-            else:
-                stats["breached"] += 1
+                bucket["total"]["sum"] += total_time
+                bucket["total"]["count"] += 1
 
     # ------------------------------------------------------------------ #
     # Worker helpers
     # ------------------------------------------------------------------ #
 
-    def _ensure_worker_meta(self, worker_id: str) -> Dict[str, Any]:
-        meta = self._worker_meta.get(worker_id)
-        if meta:
-            return meta
-        meta = {
-            "cost_per_hour": None,
-            "start_ts": None,
-            "end_ts": None,
-            "uptime_override": None,
-            "power": {
-                "cpu_sum": 0.0,
-                "cpu_count": 0,
-                "gpu_sum": 0.0,
-                "gpu_count": 0,
-                "per_gpu": {},
-            },
-            "reported_summary": None,
-        }
-        self._worker_meta[worker_id] = meta
-        return meta
-
     def _on_worker_register(self, worker_id: str, event: WorkerEvent) -> None:
-        meta = self._ensure_worker_meta(worker_id)
-        meta["start_ts"] = parse_iso_ts(event.ts)
+        meta = self._worker_meta.setdefault(worker_id, {})
+        meta["registered_at"] = event.ts
         payload = event.payload or {}
-        cost = _safe_float(payload.get("cost_per_hour"))
-        if cost is not None:
-            meta["cost_per_hour"] = cost
-        power_sample = payload.get("power_metrics")
-        self._update_worker_power(meta, power_sample)
+        meta["cost_per_hour"] = _safe_float(payload.get("cost_per_hour"))
+        power = payload.get("power_metrics") or {}
+        if isinstance(power, dict):
+            meta["power_samples"] = [power]
 
     def _on_worker_unregister(self, worker_id: str, event: WorkerEvent) -> None:
-        meta = self._ensure_worker_meta(worker_id)
-        meta["end_ts"] = parse_iso_ts(event.ts)
+        meta = self._worker_meta.setdefault(worker_id, {})
+        meta["unregistered_at"] = event.ts
         payload = event.payload or {}
-        uptime = _safe_float(payload.get("uptime_sec"))
-        if uptime is not None:
-            meta["uptime_override"] = max(0.0, uptime)
+        meta["cost_per_hour"] = meta.get("cost_per_hour") or _safe_float(payload.get("cost_per_hour"))
+        meta["uptime_sec"] = _safe_float(payload.get("uptime_sec"))
         summary = payload.get("power_summary")
         if isinstance(summary, dict):
-            meta["reported_summary"] = summary
+            meta["power_summary"] = summary
 
     def _on_worker_heartbeat(self, worker_id: str, event: WorkerEvent) -> None:
+        meta = self._worker_meta.setdefault(worker_id, {})
         metrics = event.metrics or {}
-        self._update_worker_power(self._ensure_worker_meta(worker_id), metrics.get("power"))
+        power = metrics.get("power")
+        if power and isinstance(power, dict):
+            samples = meta.setdefault("power_samples", [])
+            samples.append(power)
 
     def _on_worker_status(self, worker_id: str, event: WorkerEvent) -> None:
-        self._on_worker_heartbeat(worker_id, event)
-
-    def _update_worker_power(self, meta: Dict[str, Any], sample: Any) -> None:
-        if not isinstance(sample, dict):
-            return
-        power_meta = meta["power"]
-
-        cpu_power = _safe_float(sample.get("cpu_watts"))
-        if cpu_power is not None:
-            power_meta["cpu_sum"] += cpu_power
-            power_meta["cpu_count"] += 1
-
-        gpu = sample.get("gpu_watts")
-        if isinstance(gpu, dict):
-            total_gpu = _safe_float(gpu.get("total"))
-            if total_gpu is not None:
-                power_meta["gpu_sum"] += total_gpu
-                power_meta["gpu_count"] += 1
-
-            per_gpu = gpu.get("per_gpu")
-            if isinstance(per_gpu, list):
-                for entry in per_gpu:
-                    if not isinstance(entry, dict):
-                        continue
-                    idx = str(entry.get("index"))
-                    val = _safe_float(entry.get("power_w"))
-                    if idx is None or val is None:
-                        continue
-                    bucket = power_meta["per_gpu"].setdefault(idx, {"sum": 0.0, "count": 0})
-                    bucket["sum"] += val
-                    bucket["count"] += 1
+        meta = self._worker_meta.setdefault(worker_id, {})
+        meta["status"] = event.status
 
     # ------------------------------------------------------------------ #
-    # Snapshot assembly
+    # Persistence helpers
     # ------------------------------------------------------------------ #
-
-    def _write_metrics(self) -> None:
-        payload = self._build_snapshot()
-        try:
-            self._metrics_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as exc:  # noqa: broad-except
-            self._logger.warning("Failed to write metrics snapshot: %s", exc)
 
     def _append_event(self, event: Event) -> None:
         try:
+            serialized = serialize_event(event)
             with self._events_log.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(serialize_event(event), ensure_ascii=False))
-                fh.write("\n")
+                fh.write(json.dumps(serialized, ensure_ascii=False) + "\n")
         except Exception as exc:  # noqa: broad-except
-            self._logger.debug("Failed to append event log: %s", exc)
+            self._logger.debug("Failed to log event %s: %s", event, exc)
+
+    def _write_metrics(self) -> None:
+        snapshot = self._build_snapshot()
+        try:
+            self._metrics_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: broad-except
+            self._logger.debug("Failed to write metrics snapshot: %s", exc)
 
     def _build_snapshot(self) -> Dict[str, Any]:
-        worker_entries, worker_totals = self._build_worker_snapshot()
+        counters = dict(self._counters)
+        timings = {
+            bucket: self._summarize_timing(values)
+            for bucket, values in self._timings.items()
+        }
+        workers = self._summarize_workers()
         return {
-            "last_updated": _now_iso(),
-            "counters": dict(self._counters),
-            "active_workers": sorted(self._active_workers),
+            "generated_at": _now_iso(),
+            "counters": counters,
+            "task_timings": timings,
+            "workers": workers,
             "active_workers_count": len(self._active_workers),
-            "task_timings": self._build_timing_summary(),
-            "slo": self._build_slo_summary(),
-            "workers": {
-                "entries": worker_entries,
-                "totals": worker_totals,
-            },
-            "completed_tasks": len(self._completed_tasks),
+            "completed_tasks": sorted(self._completed_tasks),
         }
 
-    def _build_timing_summary(self) -> Dict[str, Any]:
+    def _summarize_timing(self, bucket: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
         summary: Dict[str, Any] = {}
-        for category, bucket in self._timings.items():
-            summary[category] = {
-                "queue_avg_sec": self._avg(bucket["queue"]),
-                "queue_samples": bucket["queue"]["count"],
-                "execution_avg_sec": self._avg(bucket["execution"]),
-                "execution_samples": bucket["execution"]["count"],
-                "total_avg_sec": self._avg(bucket["total"]),
-                "total_samples": bucket["total"]["count"],
-            }
+        for name, payload in bucket.items():
+            count = payload.get("count", 0)
+            total = payload.get("sum", 0.0)
+            summary[f"{name}_avg_sec"] = (total / count) if count else None
+            summary[f"{name}_count"] = count
+            summary[f"{name}_total_sec"] = total
         return summary
 
-    def _build_slo_summary(self) -> Dict[str, Any]:
-        summary: Dict[str, Any] = {}
-        for category, stats in self._slo.items():
-            with_slo = stats.get("with_slo", 0)
-            rate = (stats.get("met", 0) / with_slo) if with_slo else None
-            summary[category] = {
-                "with_slo": with_slo,
-                "met": stats.get("met", 0),
-                "breached": stats.get("breached", 0),
-                "missing": stats.get("missing", 0),
-                "completion_rate": rate,
-            }
-        return summary
-
-    def _build_worker_snapshot(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        now = time.time()
-        entries: Dict[str, Any] = {}
-        total_cost = 0.0
-
+    def _summarize_workers(self) -> Dict[str, Any]:
+        totals: Dict[str, Any] = {
+            "accrued_cost_usd": 0.0,
+            "uptime_sec": 0.0,
+        }
+        detailed = {}
         for worker_id, meta in self._worker_meta.items():
-            start_ts = meta.get("start_ts")
-            end_ts = meta.get("end_ts") or now
-            uptime_override = meta.get("uptime_override")
-            uptime_sec = (
-                uptime_override
-                if uptime_override is not None
-                else (max(0.0, end_ts - start_ts) if start_ts is not None else None)
-            )
-
-            cost_per_hour = meta.get("cost_per_hour")
-            accrued_cost = None
-            if uptime_sec is not None and cost_per_hour is not None:
-                accrued_cost = (uptime_sec / 3600.0) * cost_per_hour
-                total_cost += accrued_cost
-
-            power = meta.get("power", {})
-            cpu_avg = self._avg(
-                {"sum": power.get("cpu_sum", 0.0), "count": power.get("cpu_count", 0)}
-            )
-            gpu_avg = self._avg(
-                {"sum": power.get("gpu_sum", 0.0), "count": power.get("gpu_count", 0)}
-            )
-
-            summary = meta.get("reported_summary") or {}
-            if isinstance(summary, dict):
-                cpu_avg = summary.get("avg_cpu_watts", cpu_avg)
-                gpu_avg = summary.get("avg_gpu_watts", gpu_avg)
-
-            per_gpu_avg = {}
-            per_gpu_meta = power.get("per_gpu", {})
-            for idx, stats in per_gpu_meta.items():
-                per_gpu_avg[idx] = self._avg(stats)
-
-            if isinstance(summary.get("per_gpu_avg_watts"), dict):
-                per_gpu_avg.update(summary["per_gpu_avg_watts"])
-
-            entries[worker_id] = {
-                "status": "active" if worker_id in self._active_workers else "offline",
-                "cost_per_hour": cost_per_hour,
-                "uptime_sec": uptime_sec,
-                "accrued_cost_usd": accrued_cost,
-                "avg_cpu_watts": cpu_avg,
-                "avg_gpu_watts": gpu_avg,
-                "per_gpu_avg_watts": per_gpu_avg,
-                "power_samples": {
-                    "cpu": power.get("cpu_count", 0),
-                    "gpu": power.get("gpu_count", 0),
-                },
-            }
-
-        totals = {
-            "accrued_cost_usd": total_cost,
-            "worker_count": len(entries),
+            info = dict(meta)
+            cost = _safe_float(info.get("cost_per_hour"))
+            uptime = _safe_float(info.get("uptime_sec"))
+            if cost is not None and uptime is not None:
+                totals["accrued_cost_usd"] += (cost / 3600.0) * uptime
+                totals["uptime_sec"] += uptime
+            detailed[worker_id] = info
+        return {
+            "totals": totals,
+            "workers": detailed,
         }
-        return entries, totals
-
-    @staticmethod
-    def _avg(bucket: Dict[str, float]) -> Optional[float]:
-        count = bucket.get("count", 0)
-        if not count:
-            return None
-        return bucket.get("sum", 0.0) / count

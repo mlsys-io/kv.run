@@ -1,12 +1,16 @@
-from typing import Optional, Dict, Any, List
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
 import time
-from utils import now_iso
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+from .utils import now_iso
 
 TRAINING_TASK_TYPES = {"sft", "lora_sft", "ppo", "dpo", "training"}
 
+
 def categorize_task_type(task_type: Optional[str]) -> str:
-    """Map a taskType string into a coarse-grained category."""
     if not task_type:
         return "other"
     normalized = task_type.strip().lower()
@@ -16,12 +20,13 @@ def categorize_task_type(task_type: Optional[str]) -> str:
         return "training"
     return "other"
 
+
 class TaskStatus(str):
     PENDING = "PENDING"
     DISPATCHED = "DISPATCHED"
     FAILED = "FAILED"
     DONE = "DONE"
-    WAITING = "WAITING"
+
 
 class TaskRecord(BaseModel):
     task_id: str
@@ -30,7 +35,7 @@ class TaskRecord(BaseModel):
     status: str = TaskStatus.PENDING
     task_type: Optional[str] = None
     category: Optional[str] = None
-    assigned_worker: Optional[str] = None  # "MULTI" for sharded parent
+    assigned_worker: Optional[str] = None
     topic: Optional[str] = None
     submitted_at: str = Field(default_factory=now_iso)
     submitted_ts: float = Field(default_factory=time.time)
@@ -49,7 +54,6 @@ class TaskRecord(BaseModel):
     last_failed_worker: Optional[str] = None
     graph_node_name: Optional[str] = None
     load: int = 0
-    slo_seconds: Optional[float] = None
     merged_children: Optional[List[Dict[str, Any]]] = None
     merged_parent_id: Optional[str] = None
     merge_slice: Optional[Dict[str, int]] = None

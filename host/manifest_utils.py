@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""Manifest helpers scoped to orchestrator output management."""
-
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -15,18 +13,12 @@ ARTIFACTS_DIR = "artifacts"
 
 
 def prepare_output_dir(base_dir: Path) -> None:
-    """Ensure the base directory and standard sub-directories exist."""
     base_dir.mkdir(parents=True, exist_ok=True)
     (base_dir / LOGS_DIR).mkdir(parents=True, exist_ok=True)
     (base_dir / ARTIFACTS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def sync_manifest(base_dir: Path, task_id: str, expected: Iterable[str]) -> Dict[str, Any]:
-    """
-    Build a manifest by reconciling expected versus actual files.
-
-    expected comes from spec.output.artifacts and is interpreted relative to base_dir.
-    """
     prepare_output_dir(base_dir)
     expected_set = {_normalize_artifact_name(item) for item in expected or [] if item}
     expected_set.update({RESPONSES_NAME, LOGS_DIR, ARTIFACTS_DIR})
@@ -40,12 +32,12 @@ def sync_manifest(base_dir: Path, task_id: str, expected: Iterable[str]) -> Dict
         entries.append(entry)
         added.add(_path_key(rel_path))
 
-    # Capture additional files/directories that exist but were not declared.
     for item in base_dir.iterdir():
-        key = _path_key(item.relative_to(base_dir))
+        relative = item.relative_to(base_dir)
+        key = _path_key(relative)
         if key in added or item.name == MANIFEST_NAME:
             continue
-        entry = _describe_path(base_dir, item.relative_to(base_dir), required=False)
+        entry = _describe_path(base_dir, relative, required=False)
         entries.append(entry)
 
     manifest = {
@@ -57,12 +49,8 @@ def sync_manifest(base_dir: Path, task_id: str, expected: Iterable[str]) -> Dict
     return manifest
 
 
-# -------------------------
-# Helpers
-# -------------------------
-
 def _path_key(path: Path) -> str:
-    return str(path.as_posix())
+    return path.as_posix()
 
 
 def _infer_type(rel_path: Path) -> str:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""Event schema definitions scoped to the orchestrator service."""
-
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -15,13 +13,13 @@ def _now_iso() -> str:
 class BaseEvent(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    type: str = Field(..., description="Event type, expected to be an uppercase enum value.")
-    ts: str = Field(default_factory=_now_iso, description="Event timestamp (ISO8601).")
-    worker_id: Optional[str] = Field(default=None, description="Associated worker identifier.")
+    type: str = Field(..., description="Event type (uppercase).")
+    ts: str = Field(default_factory=_now_iso, description="ISO8601 timestamp.")
+    worker_id: Optional[str] = Field(default=None, description="Worker identifier.")
 
     @field_validator("type")
     @classmethod
-    def _normalize_type(cls, value: str) -> str:
+    def _uppercase_type(cls, value: str) -> str:
         value = (value or "").strip().upper()
         if not value:
             raise ValueError("event type must not be empty")
@@ -44,9 +42,9 @@ class TaskEvent(BaseEvent):
 
 
 class WorkerEvent(BaseEvent):
-    status: Optional[str] = Field(default=None, description="Worker status (IDLE/RUNNING/etc).")
+    status: Optional[str] = Field(default=None, description="Worker status.")
     tags: Optional[list[str]] = Field(default=None, description="Worker tags.")
-    metrics: Dict[str, Any] = Field(default_factory=dict, description="Metrics reported in heartbeat.")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="Heartbeat metrics.")
     payload: Dict[str, Any] = Field(default_factory=dict, description="Additional context.")
 
 
