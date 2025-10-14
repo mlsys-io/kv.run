@@ -71,7 +71,7 @@ export REDIS_URL="redis://localhost:6379/0"
 export ORCHESTRATOR_TOKEN="dev-token"  # optional auth
 export ORCHESTRATOR_RESULTS_DIR=./results_host
 uv run python orchestrator/main.py
-# listens on 0.0.0.0:8000 (override with PORT)
+# listens on 0.0.0.0:8000 (override with HOST_APP_PORT/PORT or pass --port)
 ```
 
 ### 3. Run a Worker

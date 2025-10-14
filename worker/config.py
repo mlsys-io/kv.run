@@ -44,9 +44,7 @@ class WorkerConfig:
 
         log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
-        cost_raw = os.getenv("WORKER_COST_PER_HOUR")
-        if cost_raw is None:
-            raise SystemExit("WORKER_COST_PER_HOUR must be set, e.g. 3.5 for $3.5/hour")
+        cost_raw = (os.getenv("WORKER_COST_PER_HOUR") or "").strip() or "1.0"
         try:
             cost_per_hour = float(cost_raw)
         except ValueError as exc:

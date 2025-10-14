@@ -174,10 +174,17 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
 
     if isinstance(gpu_req, dict) and gpu_req:
         required_count = gpu_req.get("count")
+        if required_count is not None:
+            try:
+                required_count = int(required_count)
+            except Exception:
+                required_count = None
         required_type = str(gpu_req.get("type") or "").strip().lower()
+        if required_type in {"", "any", "auto", "*"}:
+            required_type = ""
         gpu_info = safe_get(hw, "gpu.gpus", []) or safe_get(hw, "gpus", [])
         if isinstance(gpu_info, list) and gpu_info:
-            if required_count is not None and len(gpu_info) < int(required_count):
+            if required_count is not None and len(gpu_info) < required_count:
                 return False
             if required_type:
                 pattern = re.compile(re.escape(required_type), re.IGNORECASE)
@@ -189,7 +196,7 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
                 count = int(count)
             except Exception:
                 count = 0
-            if required_count is not None and count < int(required_count):
+            if required_count is not None and count < required_count:
                 return False
             type_value = (
                 safe_get(hw, "gpu.type")

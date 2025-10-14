@@ -11,6 +11,7 @@ AGENTS.md
 
 # Results
 results/
+metrics/
 
 # C extensions
 *.so

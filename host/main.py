@@ -68,7 +68,9 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_DIR = Path(os.getenv("HOST_STATE_DIR", RESULTS_DIR.parent / "state")).expanduser().resolve()
 STATE_DIR.mkdir(parents=True, exist_ok=True)
-METRICS_DIR = Path(os.getenv("HOST_METRICS_DIR", STATE_DIR / "metrics")).expanduser().resolve()
+metrics_base_default = RESULTS_DIR.parent / "metrics"
+metrics_env = os.getenv("HOST_METRICS_DIR") or os.getenv("ORCHESTRATOR_METRICS_DIR")
+METRICS_DIR = Path(metrics_env or metrics_base_default).expanduser().resolve()
 
 # Redis connection
 REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379/0"
@@ -488,13 +490,49 @@ async def _lifespan(_: FastAPI):
 app.router.lifespan_context = _lifespan
 
 
-def main() -> None:
+def main(argv: Optional[List[str]] = None) -> None:
+    import argparse
     import uvicorn
 
-    host_value = os.getenv("HOST_APP_HOST", "0.0.0.0")
-    port_value = parse_int_env("HOST_APP_PORT", 8000)
-    reload_enabled = parse_bool_env("HOST_APP_RELOAD", False)
-    log_level = os.getenv("HOST_APP_LOG_LEVEL", os.getenv("LOG_LEVEL", "info")).lower()
+    parser = argparse.ArgumentParser(description="Run the MLOC orchestrator service.")
+    parser.add_argument(
+        "--host",
+        help="Bind address (defaults to HOST_APP_HOST env or 0.0.0.0).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="Bind port (defaults to HOST_APP_PORT, then PORT env, else 8000).",
+    )
+    parser.add_argument(
+        "--reload",
+        dest="reload",
+        action="store_true",
+        help="Enable auto-reload (overrides HOST_APP_RELOAD).",
+    )
+    parser.add_argument(
+        "--no-reload",
+        dest="reload",
+        action="store_false",
+        help="Disable auto-reload.",
+    )
+    parser.set_defaults(reload=None)
+    parser.add_argument(
+        "--log-level",
+        help="Uvicorn log level (defaults to HOST_APP_LOG_LEVEL or LOG_LEVEL).",
+    )
+
+    args = parser.parse_args(argv)
+
+    host_value = args.host or os.getenv("HOST_APP_HOST", "0.0.0.0")
+    port_default = parse_int_env("PORT", 8000)
+    port_value = args.port if args.port is not None else parse_int_env("HOST_APP_PORT", port_default)
+
+    reload_default = parse_bool_env("HOST_APP_RELOAD", False)
+    reload_enabled = reload_default if args.reload is None else args.reload
+
+    log_level_env = args.log_level or os.getenv("HOST_APP_LOG_LEVEL") or os.getenv("LOG_LEVEL", "info")
+    log_level = str(log_level_env).lower()
 
     uvicorn.run(
         "host.main:app",
