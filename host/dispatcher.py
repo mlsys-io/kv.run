@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import redis
 
+from .task_models import TaskStatus
 from .task_runtime import TaskRuntime
 from .results import result_file_path
 from .utils import now_iso
@@ -123,34 +124,50 @@ class Dispatcher:
 
     def _resolve_stage_references(self, task_id: str, payload: Dict[str, Any], record) -> Dict[str, Any]:
         """
-        Replace ${stage.result.foo} references with values from completed stage results.
+        Replace ${stage.result.foo} references with values from completed stage results
+        and attach upstream result payloads for graph-aware executors.
         """
         if not isinstance(payload, dict):
             return payload
 
-        if not self._contains_placeholder(payload):
-            return payload
-
         context = self._build_stage_context(record)
-        if not context:
-            return payload
+        has_placeholders = self._contains_placeholder(payload)
 
-        def _transform(value):
-            if isinstance(value, dict):
-                return {k: _transform(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [_transform(item) for item in value]
-            if isinstance(value, str):
-                exact = _PLACEHOLDER_PATTERN.fullmatch(value)
-                if exact:
-                    return self._resolve_reference(exact.group(1), context)
-                return _PLACEHOLDER_PATTERN.sub(
-                    lambda m: str(self._resolve_reference(m.group(1), context)),
-                    value,
-                )
-            return value
+        resolved = payload
+        if has_placeholders:
+            if not context:
+                return payload
 
-        resolved = _transform(payload)
+            def _transform(value):
+                if isinstance(value, dict):
+                    return {k: _transform(v) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [_transform(item) for item in value]
+                if isinstance(value, str):
+                    exact = _PLACEHOLDER_PATTERN.fullmatch(value)
+                    if exact:
+                        return self._resolve_reference(exact.group(1), context)
+                    return _PLACEHOLDER_PATTERN.sub(
+                        lambda m: str(self._resolve_reference(m.group(1), context)),
+                        value,
+                    )
+                return value
+
+            resolved = _transform(payload)
+        else:
+            # Ensure we copy payload only when we need to attach upstream context
+            resolved = copy.deepcopy(payload)
+
+        upstream_results = self._collect_upstream_results(context, task_id) if context else {}
+        if upstream_results:
+            spec = resolved.setdefault("spec", {})
+            existing = spec.get("_upstreamResults")
+            merged = {}
+            if isinstance(existing, dict):
+                merged.update(copy.deepcopy(existing))
+            merged.update(upstream_results)
+            spec["_upstreamResults"] = merged
+
         return resolved
 
     def _contains_placeholder(self, value: Any) -> bool:
@@ -199,6 +216,28 @@ class Dispatcher:
         if value is None:
             raise ValueError(f"Missing value for reference '{expr}'")
         return value
+
+    def _collect_upstream_results(self, context: Dict[str, Any], current_task_id: str) -> Dict[str, Any]:
+        results: Dict[str, Any] = {}
+        for name, record in context.items():
+            if not record or record.task_id == current_task_id:
+                continue
+            if record.status != TaskStatus.DONE:
+                continue
+            try:
+                data = self._load_stage_result(record.task_id)
+            except StageReferenceNotReady as exc:
+                raise exc
+            except Exception as exc:
+                self._logger.debug(
+                    "Failed to load upstream result for %s (%s): %s",
+                    name,
+                    record.task_id,
+                    exc,
+                )
+                continue
+            results[name] = data
+        return results
 
     def _load_stage_result(self, stage_task_id: str) -> Dict[str, Any]:
         path = result_file_path(self._results_dir, stage_task_id)
