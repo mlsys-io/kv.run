@@ -20,6 +20,7 @@ if __name__ == "__main__" and __package__ is None:
 
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     __package__ = "host"
+    sys.modules.setdefault("host.main", sys.modules[__name__])
 
 from .dispatcher import Dispatcher
 from .event_schema import TaskEvent, WorkerEvent, parse_event
@@ -55,7 +56,7 @@ LOG_BACKUP_COUNT = parse_int_env("LOG_BACKUP_COUNT", 5)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 logger = get_logger(
-    name="host-orchestrator",
+    name="host",
     log_file=LOG_FILE,
     max_bytes=LOG_MAX_BYTES,
     backup_count=LOG_BACKUP_COUNT,
