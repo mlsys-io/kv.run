@@ -228,6 +228,27 @@ class MetricsRecorder:
                 totals.get("accrued_cost_usd", 0.0) or 0.0,
             )
         )
+        energy_total = totals.get("estimated_energy_kwh")
+        cpu_energy = totals.get("cpu_energy_kwh")
+        gpu_energy = totals.get("gpu_energy_kwh")
+        reporters = int(totals.get("workers_with_energy", 0) or 0)
+        uptime_hours = (totals.get("uptime_sec") or 0.0) / 3600.0
+
+        def _fmt_energy(value: Optional[float]) -> str:
+            if isinstance(value, (int, float)):
+                return f"{value:.3f}kWh"
+            return "n/a"
+
+        lines.append(
+            "Energy: total=%s, cpu=%s, gpu=%s, uptime=%.2fh, reporters=%d"
+            % (
+                _fmt_energy(energy_total),
+                _fmt_energy(cpu_energy),
+                _fmt_energy(gpu_energy),
+                uptime_hours,
+                reporters,
+            )
+        )
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
@@ -422,6 +443,7 @@ class MetricsRecorder:
         payload = event.payload or {}
         meta["cost_per_hour"] = meta.get("cost_per_hour") or _safe_float(payload.get("cost_per_hour"))
         meta["uptime_sec"] = _safe_float(payload.get("uptime_sec"))
+        meta["accrued_cost_usd"] = _safe_float(payload.get("accrued_cost_usd"))
         summary = payload.get("power_summary")
         if isinstance(summary, dict):
             meta["power_summary"] = summary
@@ -429,6 +451,18 @@ class MetricsRecorder:
     def _on_worker_heartbeat(self, worker_id: str, event: WorkerEvent) -> None:
         meta = self._worker_meta.setdefault(worker_id, {})
         metrics = event.metrics or {}
+        uptime = _safe_float(metrics.get("uptime_sec"))
+        if uptime is not None:
+            meta["uptime_sec"] = uptime
+        accrued_cost = _safe_float(metrics.get("accrued_cost_usd"))
+        if accrued_cost is not None:
+            meta["accrued_cost_usd"] = accrued_cost
+        energy_total = _safe_float(metrics.get("estimated_energy_kwh"))
+        if energy_total is not None:
+            meta["estimated_energy_kwh"] = energy_total
+        power_summary = metrics.get("power_summary")
+        if isinstance(power_summary, dict):
+            meta["power_summary"] = power_summary
         power = metrics.get("power")
         if power and isinstance(power, dict):
             samples = meta.setdefault("power_samples", [])
@@ -487,16 +521,44 @@ class MetricsRecorder:
         totals: Dict[str, Any] = {
             "accrued_cost_usd": 0.0,
             "uptime_sec": 0.0,
+            "estimated_energy_kwh": 0.0,
+            "cpu_energy_kwh": 0.0,
+            "gpu_energy_kwh": 0.0,
+            "workers_with_energy": 0,
         }
         detailed = {}
         for worker_id, meta in self._worker_meta.items():
             info = dict(meta)
             cost = _safe_float(info.get("cost_per_hour"))
             uptime = _safe_float(info.get("uptime_sec"))
-            if cost is not None and uptime is not None:
-                totals["accrued_cost_usd"] += (cost / 3600.0) * uptime
+            accrued_cost = _safe_float(info.get("accrued_cost_usd"))
+            if uptime is not None:
                 totals["uptime_sec"] += uptime
+            if accrued_cost is not None:
+                totals["accrued_cost_usd"] += accrued_cost
+            elif cost is not None and uptime is not None:
+                totals["accrued_cost_usd"] += (cost / 3600.0) * uptime
+            summary = info.get("power_summary")
+            if isinstance(summary, dict):
+                energy_total = _safe_float(summary.get("estimated_energy_kwh"))
+                breakdown = summary.get("estimated_energy_breakdown") or {}
+                if energy_total is not None:
+                    totals["estimated_energy_kwh"] += energy_total
+                    totals["workers_with_energy"] += 1
+                    info["estimated_energy_kwh"] = energy_total
+                if isinstance(breakdown, dict):
+                    cpu_energy = _safe_float(breakdown.get("cpu_kwh"))
+                    gpu_energy = _safe_float(breakdown.get("gpu_kwh"))
+                    if cpu_energy is not None:
+                        totals["cpu_energy_kwh"] += cpu_energy
+                    if gpu_energy is not None:
+                        totals["gpu_energy_kwh"] += gpu_energy
+                    info["estimated_energy_breakdown"] = breakdown
             detailed[worker_id] = info
+        if totals["workers_with_energy"] == 0:
+            totals["estimated_energy_kwh"] = None
+            totals["cpu_energy_kwh"] = None
+            totals["gpu_energy_kwh"] = None
         return {
             "totals": totals,
             "workers": detailed,

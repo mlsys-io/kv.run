@@ -36,6 +36,11 @@ class Lifecycle:
 
     def _metrics(self) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {}
+        uptime = None
+        if self._started_ts is not None:
+            uptime = max(0.0, time.time() - self._started_ts)
+            metrics["uptime_sec"] = uptime
+            metrics["accrued_cost_usd"] = (self.cost_per_hour / 3600.0) * uptime
         try:
             la = os.getloadavg()
             metrics["loadavg"] = {"1m": la[0], "5m": la[1], "15m": la[2]}
@@ -47,6 +52,15 @@ class Lifecycle:
             power_sample = None
         if power_sample:
             metrics["power"] = power_sample
+        try:
+            power_summary = self.power_monitor.summary()
+        except Exception:
+            power_summary = None
+        if power_summary:
+            metrics["power_summary"] = power_summary
+            energy_total = power_summary.get("estimated_energy_kwh")
+            if isinstance(energy_total, (int, float)):
+                metrics["estimated_energy_kwh"] = energy_total
         return metrics
 
     def start(self, env: Dict[str, Any], hardware: Dict[str, Any], tags: List[str]):
@@ -126,11 +140,13 @@ class Lifecycle:
         uptime = None
         if self._started_ts is not None:
             uptime = max(0.0, time.time() - self._started_ts)
+        accrued_cost = (self.cost_per_hour / 3600.0) * uptime if uptime is not None else None
         summary = self.power_monitor.summary()
         try:
             self.rworker.unregister(
                 cost_per_hour=self.cost_per_hour,
                 uptime_sec=uptime,
+                accrued_cost_usd=accrued_cost,
                 power_summary=summary,
             )
         except Exception:

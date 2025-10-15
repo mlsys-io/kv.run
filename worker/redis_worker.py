@@ -107,6 +107,7 @@ class RedisWorker:
         *,
         cost_per_hour: Optional[float] = None,
         uptime_sec: Optional[float] = None,
+        accrued_cost_usd: Optional[float] = None,
         power_summary: Optional[Dict[str, Any]] = None,
     ):
         with self.rds.pipeline() as p:
@@ -118,6 +119,8 @@ class RedisWorker:
                 payload["cost_per_hour"] = cost_per_hour
             if uptime_sec is not None:
                 payload["uptime_sec"] = uptime_sec
+            if accrued_cost_usd is not None:
+                payload["accrued_cost_usd"] = accrued_cost_usd
             if power_summary is not None:
                 payload["power_summary"] = power_summary
             evt = WorkerEvent(type="UNREGISTER", worker_id=self.worker_id, payload=payload)

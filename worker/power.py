@@ -44,8 +44,8 @@ class PowerMonitor:
 
         self._cpu_sum = 0.0
         self._cpu_samples = 0
-        self._gpu_sum = 0.0
-        self._gpu_samples = 0
+        self._gpu_total_sum = 0.0
+        self._gpu_total_samples = 0
         self._per_gpu: Dict[str, Dict[str, float]] = {}
 
     def sample(self) -> Dict[str, Any]:
@@ -53,8 +53,8 @@ class PowerMonitor:
         ts = time.time()
         cpu_power = self._read_cpu_power(ts)
         gpu_entries = self._read_gpu_power()
-        gpu_total = 0.0
         per_gpu_payload: List[Dict[str, Any]] = []
+        valid_gpu_totals: List[float] = []
 
         if cpu_power is not None:
             self._cpu_sum += cpu_power
@@ -66,14 +66,17 @@ class PowerMonitor:
             per_gpu_payload.append(entry)
             if power is None:
                 continue
-            gpu_total += power
-            self._gpu_sum += power
-            self._gpu_samples += 1
+            valid_gpu_totals.append(power)
             bucket = self._per_gpu.setdefault(idx, {"sum": 0.0, "count": 0})
             bucket["sum"] += power
             bucket["count"] += 1
 
-        gpu_total_value = gpu_total if gpu_entries else None
+        gpu_total_value: Optional[float] = None
+        if valid_gpu_totals:
+            gpu_total_value = sum(valid_gpu_totals)
+            self._gpu_total_sum += gpu_total_value
+            self._gpu_total_samples += 1
+
         return {
             "timestamp": _now_iso(),
             "cpu_watts": cpu_power,
@@ -87,19 +90,35 @@ class PowerMonitor:
         """Return aggregated averages and uptime."""
         uptime_sec = max(0.0, time.time() - self._start_ts)
         avg_cpu = self._cpu_sum / self._cpu_samples if self._cpu_samples else None
-        avg_gpu = self._gpu_sum / self._gpu_samples if self._gpu_samples else None
+        avg_gpu_total = (
+            self._gpu_total_sum / self._gpu_total_samples if self._gpu_total_samples else None
+        )
         per_gpu_avg = {
             idx: (stats["sum"] / stats["count"] if stats["count"] else None)
             for idx, stats in self._per_gpu.items()
         }
+        hours = uptime_sec / 3600.0 if uptime_sec else 0.0
+        cpu_energy_kwh = (avg_cpu * hours / 1000.0) if avg_cpu is not None and hours > 0 else None
+        gpu_energy_kwh = (
+            (avg_gpu_total * hours / 1000.0) if avg_gpu_total is not None and hours > 0 else None
+        )
+        total_energy_components = [
+            value for value in (cpu_energy_kwh, gpu_energy_kwh) if value is not None
+        ]
+        total_energy_kwh = sum(total_energy_components) if total_energy_components else None
         return {
             "uptime_sec": uptime_sec,
             "avg_cpu_watts": avg_cpu,
-            "avg_gpu_watts": avg_gpu,
+            "avg_gpu_watts": avg_gpu_total,
             "per_gpu_avg_watts": per_gpu_avg,
+            "estimated_energy_kwh": total_energy_kwh,
+            "estimated_energy_breakdown": {
+                "cpu_kwh": cpu_energy_kwh,
+                "gpu_kwh": gpu_energy_kwh,
+            },
             "samples": {
                 "cpu": self._cpu_samples,
-                "gpu": self._gpu_samples,
+                "gpu": self._gpu_total_samples,
             },
         }
 
