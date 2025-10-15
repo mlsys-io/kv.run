@@ -467,7 +467,8 @@ async def download_result_file(task_id: str, filename: str, _: Any = Depends(req
         raise HTTPException(status_code=400, detail="invalid filename")
 
     base_dir = result_file_path(RESULTS_DIR, task_id).parent
-    target_path = (base_dir / sanitized.name).resolve()
+    artifact_dir = base_dir / ARTIFACTS_DIR
+    target_path = (artifact_dir / sanitized.name).resolve()
 
     try:
         target_path.relative_to(base_dir)
@@ -475,7 +476,15 @@ async def download_result_file(task_id: str, filename: str, _: Any = Depends(req
         raise HTTPException(status_code=400, detail="invalid filename")
 
     if not target_path.exists() or not target_path.is_file():
-        raise HTTPException(status_code=404, detail="artifact not found")
+        fallback = (base_dir / sanitized.name).resolve()
+        try:
+            fallback.relative_to(base_dir)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid filename")
+        if not fallback.exists() or not fallback.is_file():
+            raise HTTPException(status_code=404, detail="artifact not found")
+        target_path = fallback
+
     return FileResponse(target_path)
 
 

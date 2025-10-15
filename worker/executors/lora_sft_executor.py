@@ -293,10 +293,15 @@ class LoRASFTExecutor(Executor):
 
             with archive_path.open("rb") as fh:
                 files = {"file": (archive_path.name, fh, "application/zip")}
+                headers = {
+                    k: v
+                    for k, v in (destination.get("headers") or {}).items()
+                    if str(k).lower() != "content-type"
+                }
                 response = requests.post(
                     upload_url,
                     files=files,
-                    headers=destination["headers"],
+                    headers=headers,
                     timeout=destination["timeout"],
                 )
                 response.raise_for_status()

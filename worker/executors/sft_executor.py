@@ -356,7 +356,12 @@ class SFTExecutor(Executor):
             import requests
             with archive_path.open("rb") as fh:
                 files = {"file": (archive_path.name, fh, "application/zip")}
-                response = requests.post(upload_url, files=files, headers=destination["headers"],
+                headers = {
+                    k: v
+                    for k, v in (destination.get("headers") or {}).items()
+                    if str(k).lower() != "content-type"
+                }
+                response = requests.post(upload_url, files=files, headers=headers,
                                          timeout=destination["timeout"])
                 response.raise_for_status()
             download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
