@@ -58,7 +58,12 @@ def _expand_specs(yaml_text: str) -> List[ParsedTaskSpec]:
         base_clean["spec"].pop("stages", None)
         base_clean["spec"].pop("graph", None)
 
+    stages = safe_get(data, "spec.stages")
     graph_nodes = safe_get(data, "spec.graph.nodes")
+    if stages and graph_nodes:
+        raise ValueError("spec.stages cannot be combined with spec.graph")
+    if isinstance(stages, list) and stages:
+        return _expand_stages(data, base_clean, stages)
     if isinstance(graph_nodes, list) and graph_nodes:
         return _expand_graph_nodes(data, base_clean, graph_nodes)
 
@@ -162,6 +167,56 @@ def _normalize_dep_list(raw: Any) -> List[str]:
     if not isinstance(raw, list):
         raise ValueError("dependsOn must be a list")
     return [str(dep).strip() for dep in raw if str(dep).strip()]
+
+
+def _expand_stages(
+    base: Dict[str, Any],
+    base_clean: Dict[str, Any],
+    stages: List[Dict[str, Any]],
+) -> List[ParsedTaskSpec]:
+    indexed: Dict[str, Dict[str, Any]] = {}
+    base_name = str(safe_get(base, "metadata.name", "task"))
+
+    for idx, stage in enumerate(stages):
+        if not isinstance(stage, dict):
+            raise ValueError(f"Stage[{idx}] must be a mapping/dict")
+        name = stage.get("name") or stage.get("id") or f"stage-{idx+1}"
+        name = str(name).strip()
+        if not name:
+            raise ValueError(f"Stage[{idx}] requires a non-empty name")
+        if name in indexed:
+            raise ValueError(f"Duplicate stage '{name}'")
+        indexed[name] = dict(stage)
+
+    results: List[ParsedTaskSpec] = []
+    ordered_names = list(indexed.keys())
+    for idx, name in enumerate(ordered_names):
+        stage = indexed[name]
+        if "spec" in stage and not isinstance(stage["spec"], dict):
+            raise ValueError(f"Stage '{name}'.spec must be a mapping/dict")
+
+        stage_spec = stage.get("spec") or {}
+        effective = _deep_merge(base_clean, {"spec": stage_spec})
+        eff = copy.deepcopy(effective)
+        eff_md = eff.setdefault("metadata", {})
+        eff_md["name"] = f"{base_name}:{name}"
+
+        depends_raw = stage.get("dependsOn")
+        depends_on = _normalize_dep_list(depends_raw) if depends_raw is not None else []
+        if not depends_on and idx > 0:
+            depends_on = [ordered_names[idx - 1]]
+
+        results.append(
+            ParsedTaskSpec(
+                spec=eff,
+                depends_on=depends_on,
+                local_name=name,
+                graph_node_name=name,
+                load=_compute_task_load(eff),
+            )
+        )
+
+    return results
 
 
 def _compute_task_load(task: Dict[str, Any]) -> int:

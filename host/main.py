@@ -100,7 +100,7 @@ async def require_auth(request: Request):
 
 # Task runtime & metrics
 RUNTIME = TaskRuntime(logger)
-DISPATCHER = Dispatcher(RUNTIME, RDS, logger=logger)
+DISPATCHER = Dispatcher(RUNTIME, RDS, RESULTS_DIR, logger=logger)
 METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
 STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []
