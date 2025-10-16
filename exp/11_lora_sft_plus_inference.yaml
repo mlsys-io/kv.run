@@ -28,6 +28,7 @@ spec:
     - name: lora-train
       spec:
         taskType: "lora_sft"
+
         lora:
           r: 16
           alpha: 32
@@ -39,6 +40,7 @@ spec:
             - "v_proj"
             - "o_proj"
           task_type: "CAUSAL_LM"
+
         data:
           dataset_name: "openai/gsm8k"
           config_name: "main"
@@ -46,6 +48,7 @@ spec:
           prompt_column: "question"
           response_column: "answer"
           separator: "\n\nAnswer: "
+
         training:
           allow_multi_gpu: false
           num_train_epochs: 1
@@ -59,6 +62,7 @@ spec:
           gradient_checkpointing: true
           packing: false
           bf16: true
+
         output:
           destination:
             type: "http"
@@ -71,6 +75,7 @@ spec:
     - name: lora-infer
       spec:
         taskType: "inference"
+
         model:
           adapters:
             - type: "lora"
@@ -79,6 +84,7 @@ spec:
           vllm:
             gpu_memory_utilization: 0.6
             trust_remote_code: true
+
         data:
           type: "dataset"
           url: "openai/gsm8k"
@@ -87,12 +93,14 @@ spec:
           column: "question"
           shuffle: true
           seed: 99
+
         inference:
           system_prompt: |
             Use the adapter-trained reasoning style to solve the math word problem accurately.
           max_tokens: 256
           temperature: 0.2
           top_p: 0.9
+
         output:
           destination:
             type: "local"

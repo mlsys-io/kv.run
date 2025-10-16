@@ -1808,6 +1808,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "pytest" },
+    { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "redis" },
     { name = "requests" },
@@ -1904,6 +1905,7 @@ requires-dist = [
     { name = "psycopg2-binary", marker = "extra == 'analytics'", specifier = ">=2.9.10" },
     { name = "pymupdf", marker = "extra == 'analytics'", specifier = ">=1.25.3" },
     { name = "pytest", specifier = ">=8.4.2" },
+    { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qdrant-client", marker = "extra == 'rag'", specifier = ">=1.15.1" },
     { name = "redis", specifier = ">=6.4.0" },

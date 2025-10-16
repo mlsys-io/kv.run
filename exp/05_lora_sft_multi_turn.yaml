@@ -49,6 +49,7 @@ spec:
     - name: tutor-first-turn
       spec:
         taskType: "lora_sft"
+
         data:
           dataset_name: "openai/gsm8k"
           config_name: "main"
@@ -56,6 +57,7 @@ spec:
           prompt_column: "question"
           response_column: "answer"
           separator: "\n\nTutor Turn 1: "
+
         training:
           allow_multi_gpu: false
           num_train_epochs: 1
@@ -73,10 +75,12 @@ spec:
     - name: tutor-followup-turn
       spec:
         taskType: "lora_sft"
+
         checkpoint:
           load:
             type: "http"
             url: "${tutor-first-turn.result.final_lora_archive_url}"
+
         data:
           dataset_name: "openai/gsm8k"
           config_name: "main"
@@ -84,6 +88,7 @@ spec:
           prompt_column: "question"
           response_column: "answer"
           separator: "\n\nTutor Turn 2: "
+
         training:
           allow_multi_gpu: false
           num_train_epochs: 1

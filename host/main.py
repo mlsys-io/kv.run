@@ -27,6 +27,7 @@ from .worker_selector import DEFAULT_WORKER_SELECTION
 from .manifest_utils import ARTIFACTS_DIR, sync_manifest
 from .metrics import MetricsRecorder
 from .results import ResultPayload, read_result, result_file_path, write_result
+from .task_metadata import extract_model_dataset_names
 from .task_runtime import TaskRuntime
 from .utils import (
     get_logger,
@@ -43,6 +44,7 @@ from .worker_registry import (
     list_workers_from_redis,
     sort_workers,
     update_worker_status,
+    record_worker_cache,
 )
 
 
@@ -184,6 +186,14 @@ def _handle_task_event(event: TaskEvent) -> None:
     elif event_type == "TASK_SUCCEEDED":
         RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
         if event.worker_id:
+            try:
+                record = RUNTIME.get_record(event.task_id)
+                if record:
+                    models, datasets = extract_model_dataset_names(record.parsed)
+                    if models or datasets:
+                        record_worker_cache(RDS, event.worker_id, models=models, datasets=datasets)
+            except Exception as exc:
+                logger.debug("Failed to update cache metadata for worker %s: %s", event.worker_id, exc)
             try:
                 update_worker_status(RDS, event.worker_id, "IDLE")
             except Exception:

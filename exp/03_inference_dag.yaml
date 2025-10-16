@@ -27,19 +27,12 @@ spec:
       gpu_memory_utilization: 0.9
       trust_remote_code: true
 
-  output:
-    destination:
-      type: "http"
-      url: "http://localhost:8000/api/v1/results"
-    artifacts:
-      - "responses.json"
-      - "logs"
-
   graph:
     nodes:
       - name: branch-a
         spec:
           taskType: "inference"
+
           data:
             type: "dataset"
             url: "openai/gsm8k"
@@ -47,15 +40,18 @@ spec:
             split: "train[:100]"
             column: "question"
             shuffle: false
+
           inference:
             system_prompt: |
               Produce a high-level reasoning outline before answering the math problem.
             max_tokens: 192
             temperature: 0.25
             top_p: 0.9
+
       - name: branch-b
         spec:
           taskType: "inference"
+
           data:
             type: "dataset"
             url: "openai/gsm8k"
@@ -63,18 +59,21 @@ spec:
             split: "train[:100]"
             column: "question"
             shuffle: false
+
           inference:
             system_prompt: |
               Verify the draft solution for the same problem and report a concise numeric answer with confidence.
             max_tokens: 128
             temperature: 0.15
             top_p: 0.85
+
       - name: synthesis
         dependsOn:
           - "branch-a"
           - "branch-b"
         spec:
           taskType: "inference"
+
           data:
             type: "graph_template"
             template:
@@ -90,9 +89,18 @@ spec:
                   - "Column A contains structured reasoning drafts; Column B contains verified final answers."
                 closing:
                   - "Compare the approaches, flag any mismatched answers, and produce guidance for a unified response style."
+
           inference:
             system_prompt: |
               Combine the outline and direct answer into a structured explanation with a final answer.
             max_tokens: 256
             temperature: 0.2
             top_p: 0.85
+
+  output:
+    destination:
+      type: "http"
+      url: "http://localhost:8000/api/v1/results"
+    artifacts:
+      - "responses.json"
+      - "logs"

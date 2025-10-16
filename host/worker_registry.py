@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,8 @@ class Worker(BaseModel):
     hardware: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
     last_seen: Optional[str] = None
+    cached_models: List[str] = Field(default_factory=list)
+    cached_datasets: List[str] = Field(default_factory=list)
 
 
 def is_stale_by_redis(rds, worker_id: str) -> bool:
@@ -45,9 +47,22 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
         except Exception:
             return default
 
+    def _ensure_str_list(items: Any) -> List[str]:
+        if not isinstance(items, list):
+            return []
+        result: List[str] = []
+        for item in items:
+            if isinstance(item, str):
+                norm = item.strip()
+                if norm:
+                    result.append(norm)
+        return result
+
     env = _loads(raw.get("env_json"), {})
     hardware = _loads(raw.get("hardware_json"), {})
     tags = _loads(raw.get("tags_json"), [])
+    cached_models = _ensure_str_list(_loads(raw.get("cache_models_json"), []))
+    cached_datasets = _ensure_str_list(_loads(raw.get("cache_datasets_json"), []))
 
     pid_val = raw.get("pid")
     try:
@@ -64,6 +79,8 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
         hardware=hardware,
         tags=tags,
         last_seen=raw.get("last_seen") or None,
+        cached_models=cached_models,
+        cached_datasets=cached_datasets,
     )
 
 
@@ -93,6 +110,90 @@ def update_worker_status(rds, worker_id: str, status: str) -> None:
         pipe.hset(r_worker_key(worker_id), mapping={"status": status, "last_seen": payload["ts"]})
         pipe.publish("workers.events", json.dumps(payload, ensure_ascii=False))
         pipe.execute()
+
+
+def _normalize_cache_value(value: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed if trimmed else None
+
+
+def _merge_unique(existing: List[str], additions: Iterable[str]) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for value in existing:
+        normalized = _normalize_cache_value(value)
+        if not normalized or normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+        merged.append(normalized)
+    for value in additions:
+        normalized = _normalize_cache_value(value)
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        merged.append(normalized)
+    return merged
+
+
+def record_worker_cache(
+    rds,
+    worker_id: str,
+    *,
+    models: Optional[Iterable[str]] = None,
+    datasets: Optional[Iterable[str]] = None,
+) -> None:
+    models_list = [v for v in (models or []) if _normalize_cache_value(v)]
+    datasets_list = [v for v in (datasets or []) if _normalize_cache_value(v)]
+    if not models_list and not datasets_list:
+        return
+
+    key = r_worker_key(worker_id)
+    if not rds.exists(key):
+        return
+
+    try:
+        current_models_json, current_datasets_json = rds.hmget(
+            key,
+            "cache_models_json",
+            "cache_datasets_json",
+        )
+    except Exception:
+        return
+
+    try:
+        current_models = json.loads(current_models_json) if current_models_json else []
+        if not isinstance(current_models, list):
+            current_models = []
+    except Exception:
+        current_models = []
+
+    try:
+        current_datasets = json.loads(current_datasets_json) if current_datasets_json else []
+        if not isinstance(current_datasets, list):
+            current_datasets = []
+    except Exception:
+        current_datasets = []
+
+    updated_models = _merge_unique(current_models, models_list)
+    updated_datasets = _merge_unique(current_datasets, datasets_list)
+
+    mapping: Dict[str, str] = {}
+    if updated_models != current_models:
+        mapping["cache_models_json"] = json.dumps(updated_models, ensure_ascii=False)
+    if updated_datasets != current_datasets:
+        mapping["cache_datasets_json"] = json.dumps(updated_datasets, ensure_ascii=False)
+    if not mapping:
+        return
+
+    try:
+        rds.hset(key, mapping=mapping)
+    except Exception:
+        return
 
 
 def idle_satisfying_pool(rds, task: Dict[str, Any]) -> List[Worker]:

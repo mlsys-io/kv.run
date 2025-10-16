@@ -5,7 +5,7 @@ import json
 import time
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis
 
@@ -13,7 +13,9 @@ from .task_models import TaskStatus
 from .task_runtime import TaskRuntime
 from .results import result_file_path
 from .utils import now_iso
+from .task_metadata import extract_model_dataset_names
 from .worker_registry import (
+    Worker,
     idle_satisfying_pool,
     update_worker_status,
 )
@@ -51,6 +53,7 @@ class Dispatcher:
             return True
 
         task_payload = copy.deepcopy(record.parsed)
+        model_names, dataset_names = extract_model_dataset_names(task_payload)
         pool = idle_satisfying_pool(self._redis, task_payload)
         if not pool:
             self._logger.debug("No idle worker available for %s; requeueing", task_id)
@@ -58,7 +61,19 @@ class Dispatcher:
             self._runtime.requeue(task_id)
             return False
 
-        worker = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
+        preferred_pool = self._cached_worker_candidates(pool, model_names, dataset_names)
+        candidate_pool = preferred_pool or pool
+        if preferred_pool:
+            self._logger.debug(
+                "Preferring cached worker candidates for %s (models=%s datasets=%s)",
+                task_id,
+                model_names,
+                dataset_names,
+            )
+
+        worker = select_worker(candidate_pool, self._worker_selection_strategy, logger=self._logger)
+        if not worker and preferred_pool:
+            worker = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
         if not worker:
             self._logger.debug("No suitable worker selected for %s; requeueing", task_id)
             self._runtime.mark_pending(task_id)
@@ -123,6 +138,37 @@ class Dispatcher:
                 self._runtime.mark_pending(task_id)
                 self._runtime.requeue(task_id, front=True)
                 time.sleep(1.0)
+
+    def _cached_worker_candidates(
+        self,
+        pool: List[Worker],
+        model_names: List[str],
+        dataset_names: List[str],
+    ) -> List[Worker]:
+        if not pool or (not model_names and not dataset_names):
+            return []
+
+        def _score(worker: Worker) -> int:
+            score = 0
+            cached_models = {m.lower() for m in (worker.cached_models or []) if isinstance(m, str)}
+            cached_datasets = {d.lower() for d in (worker.cached_datasets or []) if isinstance(d, str)}
+            if model_names:
+                score += sum(1 for name in model_names if name.lower() in cached_models)
+            if dataset_names:
+                score += sum(1 for name in dataset_names if name.lower() in cached_datasets)
+            return score
+
+        scored: List[Tuple[Worker, int]] = []
+        for worker in pool:
+            value = _score(worker)
+            if value > 0:
+                scored.append((worker, value))
+
+        if not scored:
+            return []
+
+        max_score = max(score for _, score in scored)
+        return [worker for worker, score in scored if score == max_score]
 
     # ------------------------------------------------------------------ #
     # Stage reference handling

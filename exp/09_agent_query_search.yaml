@@ -8,8 +8,6 @@ metadata:
 
 spec:
   taskType: "agent"
-  configName: "simple_search"
-  task: "Research techniques relevant to solving GSM8K math word problems and summarize 3 actionable tips."
 
   resources:
     replicas: 1
@@ -19,6 +17,9 @@ spec:
       gpu:
         type: "any"
         count: 0
+
+  configName: "simple_search"
+  task: "Research techniques relevant to solving GSM8K math word problems and summarize 3 actionable tips."
 
   agent:
     timeout: 180
