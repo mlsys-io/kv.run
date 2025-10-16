@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import copy
 import json
 import os
 import threading
@@ -22,8 +21,9 @@ if __name__ == "__main__" and __package__ is None:
     __package__ = "host"
     sys.modules.setdefault("host.main", sys.modules[__name__])
 
-from .dispatcher import Dispatcher
 from .event_schema import TaskEvent, WorkerEvent, parse_event
+from .dispatcher_factory import DEFAULT_DISPATCH_MODE, create_dispatcher
+from .worker_selector import DEFAULT_WORKER_SELECTION
 from .manifest_utils import ARTIFACTS_DIR, sync_manifest
 from .metrics import MetricsRecorder
 from .results import ResultPayload, read_result, result_file_path, write_result
@@ -98,7 +98,16 @@ async def require_auth(request: Request):
 
 # Task runtime & metrics
 RUNTIME = TaskRuntime(logger)
-DISPATCHER = Dispatcher(RUNTIME, RDS, RESULTS_DIR, logger=logger)
+dispatch_mode = os.getenv("ORCHESTRATOR_DISPATCH_MODE", DEFAULT_DISPATCH_MODE)
+worker_selection = os.getenv("ORCHESTRATOR_WORKER_SELECTION", DEFAULT_WORKER_SELECTION)
+DISPATCHER = create_dispatcher(
+    dispatch_mode,
+    RUNTIME,
+    RDS,
+    RESULTS_DIR,
+    logger=logger,
+    worker_selection_strategy=worker_selection,
+)
 METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
 STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []

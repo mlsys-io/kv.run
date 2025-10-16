@@ -15,9 +15,9 @@ from .results import result_file_path
 from .utils import now_iso
 from .worker_registry import (
     idle_satisfying_pool,
-    sort_workers,
     update_worker_status,
 )
+from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
 
 _PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -36,11 +36,13 @@ class Dispatcher:
         results_dir: Path,
         *,
         logger,
+        worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
     ) -> None:
         self._runtime = runtime
         self._redis = redis_client
         self._logger = logger
         self._results_dir = Path(results_dir)
+        self._worker_selection_strategy = worker_selection_strategy
 
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
@@ -56,8 +58,12 @@ class Dispatcher:
             self._runtime.requeue(task_id)
             return False
 
-        sorted_pool = sort_workers(pool) if pool else pool
-        worker = sorted_pool[0]
+        worker = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
+        if not worker:
+            self._logger.debug("No suitable worker selected for %s; requeueing", task_id)
+            self._runtime.mark_pending(task_id)
+            self._runtime.requeue(task_id)
+            return False
 
         message = {
             "task_id": task_id,

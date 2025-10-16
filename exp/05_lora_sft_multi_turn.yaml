@@ -48,6 +48,7 @@ spec:
   stages:
     - name: tutor-first-turn
       spec:
+        taskType: "lora_sft"
         data:
           dataset_name: "openai/gsm8k"
           config_name: "main"
@@ -71,6 +72,7 @@ spec:
 
     - name: tutor-followup-turn
       spec:
+        taskType: "lora_sft"
         checkpoint:
           load:
             type: "http"

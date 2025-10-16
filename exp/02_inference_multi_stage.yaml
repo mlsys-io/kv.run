@@ -34,6 +34,7 @@ spec:
   stages:
     - name: "draft-solver"
       spec:
+        taskType: "inference"
         resources:
           replicas: 1
           hardware:
@@ -65,6 +66,7 @@ spec:
 
     - name: "refine-explainer"
       spec:
+        taskType: "inference"
         resources:
           replicas: 1
           hardware:
@@ -96,6 +98,7 @@ spec:
 
     - name: "json-formatter"
       spec:
+        taskType: "inference"
         resources:
           hardware:
             cpu: "16"

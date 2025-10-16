@@ -27,6 +27,7 @@ spec:
   stages:
     - name: lora-train
       spec:
+        taskType: "lora_sft"
         lora:
           r: 16
           alpha: 32
