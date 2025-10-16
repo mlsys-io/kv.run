@@ -67,8 +67,6 @@ logger = get_logger(
 RESULTS_DIR = Path(os.getenv("RESULTS_DIR", "./results_host")).expanduser().resolve()
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-STATE_DIR = Path(os.getenv("HOST_STATE_DIR", RESULTS_DIR.parent / "state")).expanduser().resolve()
-STATE_DIR.mkdir(parents=True, exist_ok=True)
 metrics_base_default = RESULTS_DIR.parent / "metrics"
 metrics_env = os.getenv("HOST_METRICS_DIR") or os.getenv("ORCHESTRATOR_METRICS_DIR")
 METRICS_DIR = Path(metrics_env or metrics_base_default).expanduser().resolve()
