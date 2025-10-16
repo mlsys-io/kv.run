@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 def _now_iso() -> str:
@@ -33,6 +33,32 @@ def _detect_cpu_energy_file() -> Optional[str]:
     return None
 
 
+def _parse_cuda_visible_devices(value: Optional[str]) -> Optional[Set[int]]:
+    """Parse CUDA_VISIBLE_DEVICES into a set of GPU indices."""
+    if value is None:
+        return None
+
+    stripped = value.strip()
+    if stripped == "":
+        return set()
+
+    tokens = [token.strip() for token in value.split(",") if token.strip()]
+    if not tokens:
+        return set()
+
+    indices: Set[int] = set()
+    for token in tokens:
+        lowered = token.lower()
+        if lowered == "nodevfiles":
+            return set()
+        try:
+            indices.add(int(token))
+        except ValueError:
+            # Non-numeric tokens (e.g. GPU UUIDs/MIG identifiers) are not handled; fall back.
+            return None
+    return indices
+
+
 class PowerMonitor:
     """Tracks CPU/GPU power draw samples and aggregates averages."""
 
@@ -47,6 +73,7 @@ class PowerMonitor:
         self._gpu_total_sum = 0.0
         self._gpu_total_samples = 0
         self._per_gpu: Dict[str, Dict[str, float]] = {}
+        self._visible_gpu_indices = _parse_cuda_visible_devices(os.environ.get("CUDA_VISIBLE_DEVICES"))
 
     def sample(self) -> Dict[str, Any]:
         """Collect a single power sample."""
@@ -156,6 +183,10 @@ class PowerMonitor:
     def _read_gpu_power(self) -> List[Dict[str, Any]]:
         if not shutil.which("nvidia-smi"):
             return []
+
+        visible = self._visible_gpu_indices
+        if visible is not None and not visible:
+            return []
         try:
             proc = subprocess.run(
                 ["nvidia-smi", "--query-gpu=index,power.draw", "--format=csv,noheader,nounits"],
@@ -182,5 +213,7 @@ class PowerMonitor:
                 power = float(parts[1])
             except ValueError:
                 power = None
+            if visible is not None and idx not in visible:
+                continue
             entries.append({"index": idx, "power_w": power})
         return entries
