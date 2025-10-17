@@ -1,0 +1,95 @@
+# 先用 llama 1B 在 GSM8K 上做轻量 SFT，再加载生成的检查点对 TruthfulQA 做推理评估。
+apiVersion: mloc/v1
+kind: SFTTask
+metadata:
+  name: llama1b-sft-plus-infer
+  owner: demo
+  annotations:
+    description: "Lightweight SFT followed by factual QA inference using the fine-tuned weights"
+
+spec:
+  taskType: "sft"
+
+  resources:
+    replicas: 1
+    hardware:
+      cpu: "12"
+      memory: "48Gi"
+      gpu:
+        type: "any"
+        count: 1
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "meta-llama/Llama-3.2-1B-Instruct"
+      revision: "main"
+
+  output:
+    destination:
+      type: "http"
+      url: "http://localhost:8000/api/v1/results"
+      timeoutSec: 30
+    artifacts:
+      - "responses.json"
+      - "final_model"
+
+  stages:
+    - name: sft-train
+      spec:
+        taskType: "sft"
+        data:
+          dataset_name: "openai/gsm8k"
+          config_name: "main"
+          split: "train[:5%]"
+          prompt_column: "question"
+          response_column: "answer"
+          separator: "\n\nAnswer: "
+          max_samples: 200
+        training:
+          num_train_epochs: 1
+          batch_size: 4
+          gradient_accumulation_steps: 4
+          learning_rate: 5.0e-5
+          max_seq_length: 512
+          logging_steps: 10
+          save_steps: 50
+          save_model: true
+          gradient_checkpointing: false
+          packing: false
+        output:
+          destination:
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+          artifacts:
+            - "responses.json"
+            - "final_model"
+            - "logs"
+
+    - name: truthfulqa-inference
+      spec:
+        taskType: "inference"
+        checkpoint:
+          load:
+            type: "http"
+            url: "${sft-train.result.final_model_archive_url}"
+        data:
+          type: "dataset"
+          url: "truthfulqa/truthful_qa"
+          split: "validation[:150]"
+          column: "question"
+          shuffle: true
+          seed: 97
+        inference:
+          system_prompt: |
+            Use the fine-tuned tutor style to answer factually and explicitly mark uncertainty when unsure.
+          max_tokens: 192
+          temperature: 0.2
+          top_p: 0.85
+        output:
+          destination:
+            type: "local"
+            path: "./runs/composite_llama1b/03_sft_infer/truthfulqa"
+          artifacts:
+            - "responses.json"
+            - "logs"
