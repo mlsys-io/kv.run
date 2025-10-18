@@ -162,6 +162,46 @@ spec:
 | `RESULTS_DIR` | `./results_host` | Orchestrator 结果目录 |
 | `ORCHESTRATOR_TOKEN` | 无 | 可选的 Bearer Token，用于保护 API |
 
+
+## Host Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string (fallback when env unset). |
+| `RESULTS_DIR` | `./results_host` | Directory where orchestrator writes ingested results. |
+| `ORCHESTRATOR_TOKEN` | – | Optional bearer token to protect APIs. |
+| `ORCHESTRATOR_DISPATCH_MODE` | `adaptive` | Scheduler flavour (`adaptive`, `fixed_pipeline`, `static_round_robin`). |
+| `ORCHESTRATOR_WORKER_SELECTION` | `best_fit` | Worker selection policy (`best_fit`, `first_fit`). |
+| `ENABLE_CONTEXT_REUSE` | `true` | Co-locate tasks on workers with cached artifacts when possible. |
+| `ENABLE_TASK_MERGE` | `true` | Enables DAG-level coalescing of identical tasks. |
+| `TASK_MERGE_MAX_BATCH_SIZE` | `4` | Max number of siblings merged per dispatch. |
+| `ENABLE_ELASTIC_SCALING` | `true` | Global toggle for auto disable/enable logic. |
+| `ELASTIC_AUTO_DISABLE_IDLE_SEC` | `60` | Idle duration before auto-disabling an idle worker (when queue <= threshold). |
+| `ELASTIC_AUTO_DISABLE_QUEUE_MAX` | `0` | Max ready-queue length that still allows idle auto-disable. |
+| `ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD` | `0` | Ready queue length that triggers auto re-enable of disabled workers. |
+| `ELASTIC_AUTO_POLL_INTERVAL_SEC` | `30` | Elastic manager poll interval. |
+| `ELASTIC_AUTO_TOGGLE_COOLDOWN_SEC` | `>=60` | Cooldown before toggling the same worker again. |
+| `ELASTIC_AUTO_MIN_ACTIVE_WORKERS` | `1` | Minimum enabled workers kept alive. |
+| `HOST_METRICS_DIR` / `ORCHESTRATOR_METRICS_DIR` | `./metrics` | Metrics snapshot & event log directory. |
+| `LOG_LEVEL` | `INFO` | Orchestrator log level. |
+| `HOST_APP_PORT` / `PORT` | `8000` | HTTP bind ports. |
+| `HOST_APP_HOST` | `0.0.0.0` | HTTP bind address. |
+
+## Worker Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_URL` | – | Redis connection string (required). |
+| `RESULTS_DIR` | `./results_workers` | Working directory for task outputs. |
+| `TASK_TOPIC` | `tasks` | Redis pub/sub channel to subscribe. |
+| `HEARTBEAT_INTERVAL_SEC` | `30` | Heartbeat cadence. TTL auto set to `max(120, 4*interval)`. |
+| `WORKER_ID` | random | Optional persistent identifier. |
+| `WORKER_TAGS` | empty | Comma-separated scheduler hints (e.g. `gpu,a100`). |
+| `LOG_LEVEL` | `INFO` | Worker logging level. |
+| `ORCHESTRATOR_BASE_URL` | – | Base URL for retrieving uploaded artifacts in staged flows. |
+| `RESULTS_UPLOAD_URL` | – | Override default HTTP upload endpoint. |
+| `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata reported during registration. |
+| `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | – | Optional bandwidth cap; affects reported hardware info and callback throttling. |
+| `WORKER_EXECUTOR_MASK` | – | Limit worker to specific executors (comma separated). |
+| `WORKER_LOG_TO_STDOUT` | `true` | Disable to log only to file handler. |
 ## Testing
 
 轻量级单元测试覆盖任务池、manifest、聚合与指标逻辑：

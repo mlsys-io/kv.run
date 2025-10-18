@@ -16,6 +16,7 @@ This rewrite follows vLLM's **LoRA Adapters** guidance:
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import time
@@ -25,6 +26,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from datasets import load_dataset
+
+try:
+    import torch
+except Exception:  # pragma: no cover - optional dependency
+    torch = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +67,29 @@ class VLLMExecutor(Executor):
         super().__init__()
         self._llm: Optional[LLM] = None
         self._model_name: Optional[str] = None
-        self._prompts: List[str] = []
-        self._inf: Dict[str, Any] = {}
+        self._batched_prompts: List[str] = []
+        self._prompt_owners: List[str] = []
         self._adapter_specs: List[Dict[str, Any]] = []
         self._merged_adapters: List[str] = []
         self._runtime_specs: List[Dict[str, Any]] = []
         self._release_llm_after_run = True
         self._llm_kwargs: Dict[str, Any] = {}
         self._offline_model_dir: Optional[Path] = None
+        self._base_inference: Dict[str, Any] = {}
+
+    @staticmethod
+    def _detect_available_gpus() -> int:
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if vis:
+            candidates = [dev.strip() for dev in str(vis).split(",") if dev.strip()]
+            if candidates:
+                return len(candidates)
+        try:
+            if torch is not None and torch.cuda.is_available():
+                return torch.cuda.device_count()
+        except Exception:
+            pass
+        return 1
 
     # --------------------------------------------------------------------- #
     # Lifecycle
@@ -89,9 +110,17 @@ class VLLMExecutor(Executor):
         adapter_specs = self._extract_adapter_specs(spec)
         vllm_cfg = (spec.get("model") or {}).get("vllm", {}) or {}
 
+        requested_tp = vllm_cfg.get("tensor_parallel_size")
+        try:
+            tensor_parallel_size = int(requested_tp) if requested_tp is not None else 0
+        except Exception:
+            tensor_parallel_size = 0
+        if tensor_parallel_size <= 0:
+            tensor_parallel_size = max(1, self._detect_available_gpus())
+
         kwargs: Dict[str, Any] = dict(
             model=ident,
-            tensor_parallel_size=int(vllm_cfg.get("tensor_parallel_size", 1)),
+            tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=float(vllm_cfg.get("gpu_memory_utilization", 0.9)),
             trust_remote_code=bool(vllm_cfg.get("trust_remote_code", False)),
         )
@@ -123,12 +152,19 @@ class VLLMExecutor(Executor):
     # Data preparation
     # --------------------------------------------------------------------- #
     def prepare_data(self, spec: Dict[str, Any]) -> None:
+        entry = self._collect_prompts_for_spec(spec, task_id="__standalone__")
+        self._batched_prompts = list(entry["prompts"])
+        self._prompt_owners = [entry["task_id"]] * len(entry["prompts"])
+        self._base_inference = entry["inference"]
+
+    def _collect_prompts_for_spec(self, spec: Dict[str, Any], *, task_id: str) -> Dict[str, Any]:
         data = spec.get("data") or {}
         if not data:
             raise ExecutionError("spec.data is required.")
 
         dtype = data.get("type")
         append_system_prompt = True
+        prompts: List[str] = []
         if dtype == "dataset":
             data_url = data.get("url")
             if not data_url:
@@ -147,45 +183,102 @@ class VLLMExecutor(Executor):
                 raise ExecutionError(
                     f"Column '{column}' not found in dataset. Available: {dataset.column_names}"
                 )
-            self._prompts = [str(x) for x in dataset[column]]
+            prompts = [str(x) for x in dataset[column]]
         elif dtype == "list":
             items = data.get("items", [])
             if not isinstance(items, list) or any(not isinstance(x, str) for x in items):
                 raise ExecutionError("spec.data.items must be a list of strings for type == 'list'.")
-            self._prompts = items
+            prompts = [str(x) for x in items]
         elif dtype == "graph_template":
-            self._prompts = build_prompts_from_graph_template(data, spec)
+            prompts = build_prompts_from_graph_template(data, spec)
             template_cfg = data.get("template") or {}
             append_system_prompt = bool(template_cfg.get("append_system_prompt", False))
         else:
             raise ExecutionError(f"Unsupported spec.data.type: {dtype!r}")
 
-        self._inf = spec.get("inference", {}) or {}
-        system_prompt = self._inf.get("system_prompt")
+        inference_cfg = copy.deepcopy(spec.get("inference", {}) or {})
+        system_prompt = inference_cfg.get("system_prompt") or inference_cfg.get("systemPrompt")
         if system_prompt and append_system_prompt:
-            self._prompts = [f"{system_prompt}\n{p}" for p in self._prompts]
+            prompts = [f"{system_prompt}\n{p}" for p in prompts]
+
+        return {
+            "task_id": task_id,
+            "prompts": prompts,
+            "inference": inference_cfg,
+            "data": copy.deepcopy(data),
+        }
+
+    def _normalize_inference_for_sampling(self, inference: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in inference.items():
+            if key in {"system_prompt", "systemPrompt"}:
+                continue
+            normalized[key] = copy.deepcopy(value)
+        return normalized
+
+    def _build_sampling_params(self, inference: Dict[str, Any]) -> SamplingParams:
+        cfg = copy.deepcopy(inference)
+        cfg.pop("system_prompt", None)
+        cfg.pop("systemPrompt", None)
+        return SamplingParams(  # type: ignore[call-arg]
+            temperature=float(cfg.get("temperature", 0.7)),
+            top_p=float(cfg.get("top_p", 0.95)),
+            top_k=int(cfg.get("top_k", -1)),
+            max_tokens=int(cfg.get("max_tokens", 512)),
+            presence_penalty=float(cfg.get("presence_penalty", 0.0)),
+            frequency_penalty=float(cfg.get("frequency_penalty", 0.0)),
+            stop=cfg.get("stop"),
+        )
 
     # --------------------------------------------------------------------- #
     # Execution
     # --------------------------------------------------------------------- #
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:  # type: ignore[override]
         spec = (task or {}).get("spec") or {}
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            raise ExecutionError("task_id is required for inference execution")
+
         self._ensure_llm(spec)
-        self.prepare_data(spec)
-        self._prepare_adapters(spec, out_dir)
 
-        sampling = SamplingParams(  # type: ignore[call-arg]
-            temperature=float(self._inf.get("temperature", 0.7)),
-            top_p=float(self._inf.get("top_p", 0.95)),
-            top_k=int(self._inf.get("top_k", -1)),
-            max_tokens=int(self._inf.get("max_tokens", 512)),
-            presence_penalty=float(self._inf.get("presence_penalty", 0.0)),
-            frequency_penalty=float(self._inf.get("frequency_penalty", 0.0)),
-            stop=self._inf.get("stop"),
-        )
+        merge_children = task.get("merge_children") or []
+        entries: List[Dict[str, Any]] = []
+        parent_entry = self._collect_prompts_for_spec(spec, task_id=task_id)
+        entries.append(parent_entry)
 
-        if not self._prompts:
+        for child in merge_children:
+            if not isinstance(child, dict):
+                continue
+            child_id = str(child.get("task_id") or "").strip()
+            child_spec = child.get("spec") or {}
+            if not child_id or not child_spec:
+                continue
+            try:
+                entries.append(self._collect_prompts_for_spec(child_spec, task_id=child_id))
+            except ExecutionError as exc:
+                raise ExecutionError(f"Failed to prepare merged child task {child_id}: {exc}") from exc
+
+        self._batched_prompts = []
+        self._prompt_owners = []
+        for entry in entries:
+            owner = entry["task_id"]
+            for prompt in entry["prompts"]:
+                self._batched_prompts.append(prompt)
+                self._prompt_owners.append(owner)
+
+        if not self._batched_prompts:
             raise ExecutionError("No prompts prepared. Check spec.data configuration.")
+
+        self._base_inference = copy.deepcopy(parent_entry["inference"])
+        base_sampling_cfg = self._normalize_inference_for_sampling(self._base_inference)
+        for entry in entries[1:]:
+            other_cfg = self._normalize_inference_for_sampling(entry["inference"])
+            if other_cfg != base_sampling_cfg:
+                raise ExecutionError("Merged tasks must share inference parameters (excluding system_prompt).")
+
+        sampling = self._build_sampling_params(self._base_inference)
+
+        self._prepare_adapters(spec, out_dir)
 
         # Build per-request LoRA payload(s)
         lora_payload = self._build_lora_requests(out_dir)
@@ -196,16 +289,15 @@ class VLLMExecutor(Executor):
         t0 = time.time()
         try:
             outputs = self._llm.generate(
-                self._prompts,
+                self._batched_prompts,
                 sampling_params=sampling,
                 **generate_kwargs,
             )  # type: ignore[attr-defined]
         except TypeError as exc:
-            # Some builds don't accept list/arg name for lora_request; try a single adapter fallback
             single = self._maybe_single_lora(lora_payload)
             if single is not None:
                 outputs = self._llm.generate(
-                    self._prompts,
+                    self._batched_prompts,
                     sampling_params=sampling,
                     lora_request=single,
                 )
@@ -215,36 +307,81 @@ class VLLMExecutor(Executor):
                 ) from exc
         latency = time.time() - t0
 
-        items: List[Dict[str, Any]] = []
-        prompt_tokens = 0
-        completion_tokens = 0
+        per_task_items: Dict[str, List[Dict[str, Any]]] = {}
+        usage_by_task: Dict[str, Dict[str, int]] = {}
+        counts_by_task: Dict[str, int] = {}
 
-        for i, out in enumerate(outputs):
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+
+        for idx, out in enumerate(outputs):
+            owner = self._prompt_owners[idx] if idx < len(self._prompt_owners) else task_id
+            owner_items = per_task_items.setdefault(owner, [])
+            local_index = len(owner_items)
             out_outputs = getattr(out, "outputs", None)
             if not out_outputs:
-                items.append({"index": i, "output": "", "finish_reason": None})
+                owner_items.append({"index": local_index, "output": "", "finish_reason": None})
+                usage_by_task.setdefault(owner, {"prompt_tokens": 0, "completion_tokens": 0})
+                counts_by_task[owner] = counts_by_task.get(owner, 0) + 1
                 continue
+
             best = out_outputs[0]
             text = getattr(best, "text", "") or ""
             finish_reason = getattr(best, "finish_reason", None)
-            items.append({"index": i, "output": text, "finish_reason": finish_reason})
+            owner_items.append({"index": local_index, "output": text, "finish_reason": finish_reason})
+
             prompt_token_ids = getattr(out, "prompt_token_ids", None) or []
             best_token_ids = getattr(best, "token_ids", None) or []
-            prompt_tokens += len(prompt_token_ids)
-            completion_tokens += len(best_token_ids)
+            prompt_len = len(prompt_token_ids)
+            completion_len = len(best_token_ids)
 
-        return {
+            total_prompt_tokens += prompt_len
+            total_completion_tokens += completion_len
+
+            usage_entry = usage_by_task.setdefault(owner, {"prompt_tokens": 0, "completion_tokens": 0})
+            usage_entry["prompt_tokens"] += prompt_len
+            usage_entry["completion_tokens"] += completion_len
+            counts_by_task[owner] = counts_by_task.get(owner, 0) + 1
+
+        for owner, usage in usage_by_task.items():
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            usage["latency_sec"] = latency
+            usage["num_requests"] = counts_by_task.get(owner, 0)
+
+        parent_usage = {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+            "latency_sec": latency,
+            "num_requests": len(self._batched_prompts),
+        }
+
+        result: Dict[str, Any] = {
             "ok": True,
             "model": self._model_name,
-            "items": items,
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-                "latency_sec": latency,
-                "num_requests": len(self._prompts),
-            },
+            "items": per_task_items.get(task_id, []),
+            "usage": parent_usage,
         }
+
+        child_results: Dict[str, Any] = {}
+        for child in merge_children:
+            if not isinstance(child, dict):
+                continue
+            child_id = str(child.get("task_id") or "").strip()
+            if not child_id:
+                continue
+            child_payload = {
+                "items": per_task_items.get(child_id, []),
+            }
+            usage = usage_by_task.get(child_id)
+            if usage:
+                child_payload["usage"] = usage
+            child_results[child_id] = child_payload
+
+        if child_results:
+            result["children"] = child_results
+
+        return result
 
     def _maybe_apply_dataset_shard(self, dataset, spec: Dict[str, Any]):
         shard_cfg = spec.get("shard") if isinstance(spec, dict) else None
@@ -267,10 +404,12 @@ class VLLMExecutor(Executor):
         if self._release_llm_after_run:
             self._llm = None
         self._llm_kwargs = {}
-        self._prompts = []
+        self._batched_prompts = []
+        self._prompt_owners = []
         self._adapter_specs = []
         self._runtime_specs = []
         self._merged_adapters = []
+        self._base_inference = {}
         if self._offline_model_dir and self._offline_model_dir.exists():
             shutil.rmtree(self._offline_model_dir, ignore_errors=True)
         self._offline_model_dir = None

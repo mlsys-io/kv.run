@@ -24,6 +24,10 @@ def create_dispatcher(
     *,
     logger,
     worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
+    enable_context_reuse: bool = True,
+    enable_task_merge: bool = True,
+    task_merge_max_batch_size: int = 4,
+    elastic_coordinator=None,
 ):
     """
     Instantiate a dispatcher according to the selected baseline.
@@ -44,10 +48,18 @@ def create_dispatcher(
 
     dispatcher_cls: Type[Dispatcher] = _DISPATCHER_REGISTRY[normalized]
     logger.info("Initializing dispatcher in %s mode", normalized)
-    return dispatcher_cls(
-        runtime,
-        redis_client,
-        results_dir,
-        logger=logger,
-        worker_selection_strategy=worker_selection_strategy,
-    )
+    base_kwargs = {
+        "runtime": runtime,
+        "redis_client": redis_client,
+        "results_dir": results_dir,
+        "logger": logger,
+        "worker_selection_strategy": worker_selection_strategy,
+    }
+    if dispatcher_cls is Dispatcher:
+        base_kwargs.update(
+            enable_context_reuse=enable_context_reuse,
+            enable_task_merge=enable_task_merge,
+            task_merge_max_batch_size=task_merge_max_batch_size,
+            elastic_coordinator=elastic_coordinator,
+        )
+    return dispatcher_cls(**base_kwargs)

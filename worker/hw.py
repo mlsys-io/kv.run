@@ -11,7 +11,7 @@ import platform
 import socket
 import subprocess
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def _run(cmd: List[str]) -> str:
@@ -22,7 +22,7 @@ def _run(cmd: List[str]) -> str:
         return ""
 
 
-def collect_hw() -> Dict[str, Any]:
+def collect_hw(*, bandwidth_bytes_per_sec: Optional[float] = None) -> Dict[str, Any]:
     # CPU
     cpu = {"logical_cores": os.cpu_count() or 0, "model": platform.processor() or platform.machine()}
     # Memory
@@ -55,4 +55,8 @@ def collect_hw() -> Dict[str, Any]:
     except Exception:
         ip = None
 
-    return {"cpu": cpu, "memory": mem, "gpu": gpu, "network": {"ip": ip}}
+    network: Dict[str, Any] = {"ip": ip}
+    if bandwidth_bytes_per_sec is not None:
+        network["bandwidth_bytes_per_sec"] = bandwidth_bytes_per_sec
+
+    return {"cpu": cpu, "memory": mem, "gpu": gpu, "network": network}

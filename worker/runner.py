@@ -2,6 +2,7 @@
 """Pub/Sub runner that executes assigned tasks using pluggable executors."""
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,7 +14,17 @@ from manifest_utils import prepare_output_dir, sync_manifest
 
 
 class Runner:
-    def __init__(self, lifecycle, rds, topic: str, results_dir: Path, executors: Dict[str, Any], default_executor: Any, logger: Any):
+    def __init__(
+        self,
+        lifecycle,
+        rds,
+        topic: str,
+        results_dir: Path,
+        executors: Dict[str, Any],
+        default_executor: Any,
+        logger: Any,
+        network_bandwidth_bytes_per_sec: Optional[float] = None,
+    ):
         self.lifecycle = lifecycle
         self.redis = rds
         self.topic = topic
@@ -21,6 +32,7 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
+        self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
 
     def _resolve_output_dir(self, task_id: str, task: Dict[str, Any]) -> Path:
         """Pick the destination directory for task outputs.
@@ -51,11 +63,49 @@ class Runner:
     def _write_results(self, task_id: str, task: Dict[str, Any], out_dir: Path, result: Optional[Dict[str, Any]]):
         if result is None:
             return
+        self._write_single_result(task_id, task, out_dir, result)
+
+        merge_children = (task or {}).get("merge_children") or []
+        child_lookup: Dict[str, Dict[str, Any]] = {}
+        for entry in merge_children:
+            if isinstance(entry, dict) and entry.get("task_id"):
+                child_lookup[entry["task_id"]] = entry
+
+        children_payload = (result.get("children") if isinstance(result, dict) else {}) or {}
+        for child_id, child_result in children_payload.items():
+            child_info = child_lookup.get(child_id, {})
+            child_task = {
+                "task_id": child_id,
+                "spec": copy.deepcopy(child_info.get("spec") or {}),
+            }
+            child_out_dir = self._resolve_output_dir(child_id, child_task)
+            self._write_single_result(child_id, child_task, child_out_dir, child_result)
+
+    def _write_single_result(self, task_id: str, task: Dict[str, Any], out_dir: Path, payload: Optional[Dict[str, Any]]):
+        if payload is None:
+            return
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        (out_dir / "responses.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2))
         expected = ((task or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
         sync_manifest(out_dir, task_id, expected)
-        self._maybe_emit_http(task_id, task, result)
+        self._maybe_emit_http(task_id, task, payload)
+
+    def _simulate_bandwidth_delay(self, payload_bytes: int, *, destination: str) -> None:
+        if not self.network_bandwidth_bytes_per_sec:
+            return
+        if payload_bytes <= 0:
+            return
+        delay = payload_bytes / self.network_bandwidth_bytes_per_sec
+        if delay <= 0:
+            return
+        self.logger.debug(
+            "HTTP delivery to %s throttled for %.3f sec (payload=%d bytes, bandwidth=%.0f B/s)",
+            destination,
+            delay,
+            payload_bytes,
+            self.network_bandwidth_bytes_per_sec,
+        )
+        time.sleep(delay)
 
     def _maybe_emit_http(self, task_id: str, task: Dict[str, Any], result: Dict[str, Any]) -> None:
         """Send task results to an HTTP endpoint when requested by the spec."""
@@ -81,6 +131,8 @@ class Runner:
             "result": result,
             "worker_id": getattr(rworker, "worker_id", None),
         }
+        payload_size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        self._simulate_bandwidth_delay(payload_size, destination=str(url))
 
         try:
             response = requests.request(method, url, json=payload, headers=headers, timeout=timeout)
@@ -124,6 +176,9 @@ class Runner:
                 task_id = str(data.get("task_id"))
                 task = data.get("task") or {}
                 task.setdefault("task_id", task_id)
+                merge_children = data.get("merged_children") or []
+                if merge_children:
+                    task["merge_children"] = merge_children
                 task_type = (task.get("spec") or {}).get("taskType")
                 parent_task_id = data.get("parent_task_id")
                 shard_index = data.get("shard_index")

@@ -65,3 +65,11 @@ local artifacts, and templates can reference them via absolute paths instead of
 - When pipelines stall, ensure the Stage 1 task produced the expected
   `final_*_archive_url` and the orchestrator's results directory contains the
   uploaded zip file.
+
+
+## Elastic Scaling & Task Merge
+- **Elastic Scaling** is governed by `ENABLE_ELASTIC_SCALING` (default `true`). When enabled, the orchestrator may disable idle workers and re-enable them when backlog grows. Workers do not need extra configuration—they continue heartbeating and are redispatched once re-enabled.
+- Optional tuning knobs live on the host (`ELASTIC_AUTO_DISABLE_IDLE_SEC`, `ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD`, `ELASTIC_AUTO_DISABLE_QUEUE_MAX`, `ELASTIC_AUTO_MIN_ACTIVE_WORKERS`, etc.).
+- **Task Merge**: the orchestrator can coalesce identical inference/RAG tasks. Workers receive a single parent payload with `merge_children`, and executors (e.g. vLLM) emit per-child results under `result.children` which the runner writes to each child directory. No worker-side toggle is required; ensure custom executors respect the `merge_children` contract if you add your own.
+- **Multi-GPU training / inference**: when `CUDA_VISIBLE_DEVICES` (or detected GPUs) exposes more than one device, the vLLM executor automatically sets `tensor_parallel_size`, and the PPO/DPO/SFT executors will launch distributed jobs via `torchrun` unless `training.allow_multi_gpu` is explicitly set to `false`. Override `training.nproc_per_node` to constrain world size.
+- **Bandwidth throttling**: set `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` to simulate capped HTTP throughput; the worker reports the value back to the host and inserts delays before delivering HTTP callbacks.

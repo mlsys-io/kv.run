@@ -5,7 +5,7 @@ import json
 import time
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import redis
 
@@ -20,6 +20,9 @@ from .worker_registry import (
     update_worker_status,
 )
 from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
+
+if TYPE_CHECKING:
+    from .elastic import ElasticCoordinator
 
 _PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -39,12 +42,20 @@ class Dispatcher:
         *,
         logger,
         worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
+        enable_context_reuse: bool = True,
+        enable_task_merge: bool = True,
+        task_merge_max_batch_size: int = 4,
+        elastic_coordinator: Optional["ElasticCoordinator"] = None,
     ) -> None:
         self._runtime = runtime
         self._redis = redis_client
         self._logger = logger
         self._results_dir = Path(results_dir)
         self._worker_selection_strategy = worker_selection_strategy
+        self._context_reuse_enabled = enable_context_reuse
+        self._task_merge_enabled = enable_task_merge
+        self._task_merge_max_batch_size = max(1, task_merge_max_batch_size)
+        self._elastic_coordinator = elastic_coordinator
 
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
@@ -53,15 +64,31 @@ class Dispatcher:
             return True
 
         task_payload = copy.deepcopy(record.parsed)
+        merged_children: List[str] = []
+        if self._task_merge_enabled and self._task_merge_max_batch_size > 1:
+            merged_children = self._runtime.plan_merge(task_id, self._task_merge_max_batch_size)
+            if merged_children:
+                self._logger.debug(
+                    "Coalesced task %s with siblings %s",
+                    task_id,
+                    ", ".join(merged_children),
+                )
+
         model_names, dataset_names = extract_model_dataset_names(task_payload)
-        pool = idle_satisfying_pool(self._redis, task_payload)
+        disabled_workers = None
+        if self._elastic_coordinator and self._elastic_coordinator.enabled:
+            disabled_workers = self._elastic_coordinator.disabled_workers()
+        pool = idle_satisfying_pool(self._redis, task_payload, disabled_workers=disabled_workers)
         if not pool:
             self._logger.debug("No idle worker available for %s; requeueing", task_id)
+            self._runtime.release_merge(task_id)
             self._runtime.mark_pending(task_id)
             self._runtime.requeue(task_id)
             return False
 
-        preferred_pool = self._cached_worker_candidates(pool, model_names, dataset_names)
+        preferred_pool: List[Worker] = []
+        if self._context_reuse_enabled:
+            preferred_pool = self._cached_worker_candidates(pool, model_names, dataset_names)
         candidate_pool = preferred_pool or pool
         if preferred_pool:
             self._logger.debug(
@@ -76,6 +103,7 @@ class Dispatcher:
             worker = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
         if not worker:
             self._logger.debug("No suitable worker selected for %s; requeueing", task_id)
+            self._runtime.release_merge(task_id)
             self._runtime.mark_pending(task_id)
             self._runtime.requeue(task_id)
             return False
@@ -93,25 +121,31 @@ class Dispatcher:
             rendered_task = self._resolve_stage_references(task_id, task_payload, record)
         except StageReferenceNotReady as exc:
             self._logger.debug("Task %s waiting on stage artifacts: %s", task_id, exc)
+            self._runtime.release_merge(task_id)
             self._runtime.requeue(task_id)
             return False
         except Exception as exc:
             self._logger.error("Failed to resolve stage references for %s: %s", task_id, exc)
+            self._runtime.release_merge(task_id)
             self._runtime.mark_failed(task_id, None, {"error": str(exc)}, now_iso(), error=str(exc))
             return True
 
         message["task"] = rendered_task
+        if record.merged_children:
+            message["merged_children"] = copy.deepcopy(record.merged_children)
 
         try:
             receivers = int(self._redis.publish("tasks", json.dumps(message, ensure_ascii=False)))
         except Exception as exc:
             self._logger.warning("Failed to publish task %s: %s", task_id, exc)
+            self._runtime.release_merge(task_id)
             self._runtime.mark_pending(task_id)
             self._runtime.requeue(task_id, front=True)
             return False
 
         if receivers <= 0:
             self._logger.info("No subscribers on tasks channel; delaying task %s", task_id)
+            self._runtime.release_merge(task_id)
             self._runtime.mark_pending(task_id)
             self._runtime.requeue(task_id, front=True)
             return False
@@ -135,6 +169,7 @@ class Dispatcher:
                     time.sleep(0.5)
             except Exception as exc:  # noqa: broad-except
                 self._logger.exception("Dispatch loop error for %s: %s", task_id, exc)
+                self._runtime.release_merge(task_id)
                 self._runtime.mark_pending(task_id)
                 self._runtime.requeue(task_id, front=True)
                 time.sleep(1.0)

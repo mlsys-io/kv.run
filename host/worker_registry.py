@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,8 @@ from .utils import (
     r_hb_key,
     r_worker_key,
 )
+
+ELASTIC_DISABLED_SET = "workers:elastic_disabled"
 
 
 class Worker(BaseModel):
@@ -84,8 +86,13 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
     )
 
 
-def list_workers_from_redis(rds) -> List[Dict[str, Any]]:
+def list_workers_from_redis(
+    rds,
+    *,
+    disabled_workers: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    disabled: Set[str] = set(disabled_workers or [])
     for worker_id in list(rds.smembers(WORKERS_SET)):
         worker = get_worker_from_redis(rds, worker_id)
         if not worker:
@@ -95,7 +102,13 @@ def list_workers_from_redis(rds) -> List[Dict[str, Any]]:
             hb_ts = rds.get(r_hb_key(worker_id))
             if hb_ts:
                 worker.last_seen = hb_ts
-        results.append({**worker.model_dump(), "stale": stale})
+        results.append(
+            {
+                **worker.model_dump(),
+                "stale": stale,
+                "elastic_disabled": worker.worker_id in disabled,
+            }
+        )
     return results
 
 
@@ -196,13 +209,21 @@ def record_worker_cache(
         return
 
 
-def idle_satisfying_pool(rds, task: Dict[str, Any]) -> List[Worker]:
+def idle_satisfying_pool(
+    rds,
+    task: Dict[str, Any],
+    *,
+    disabled_workers: Optional[Iterable[str]] = None,
+) -> List[Worker]:
     available: List[Worker] = []
+    disabled: Set[str] = set(disabled_workers or [])
     for worker_id in rds.smembers(WORKERS_SET):
         worker = get_worker_from_redis(rds, worker_id)
         if not worker or worker.status != "IDLE":
             continue
         if is_stale_by_redis(rds, worker.worker_id):
+            continue
+        if worker.worker_id in disabled:
             continue
         if _hw_satisfies(worker, task):
             available.append(worker)
@@ -308,3 +329,20 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
                 return False
 
     return True
+
+
+def get_elastic_disabled_workers(rds) -> Set[str]:
+    try:
+        members = rds.smembers(ELASTIC_DISABLED_SET)
+    except Exception:
+        return set()
+    return {str(member) for member in members if member}
+
+
+def set_worker_elastic_state(rds, worker_id: str, *, enabled: bool) -> None:
+    with rds.pipeline() as pipe:
+        if enabled:
+            pipe.srem(ELASTIC_DISABLED_SET, worker_id)
+        else:
+            pipe.sadd(ELASTIC_DISABLED_SET, worker_id)
+        pipe.execute()

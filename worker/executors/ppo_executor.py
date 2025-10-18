@@ -5,10 +5,13 @@ PPO (Proximal Policy Optimization) Executor using TRL's simple approach
 Simplified implementation using TRL's built-in training methods.
 """
 
+import json
+import os
+import subprocess
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from datasets import Dataset
 from transformers import AutoTokenizer, GenerationConfig
@@ -29,10 +32,29 @@ class PPOExecutor(Executor):
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         logger.info("Starting PPO training task")
         spec = (task or {}).get("spec") or {}
-        start_time = time.time()
         training_config = spec.get("training", {}) or {}
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        launcher_flag = "KV_PPO_DISTRIBUTED"
+        already_spawned = os.environ.get(launcher_flag) == "1"
+        gpu_count = self._detect_gpu_count(training_config)
+        allow_multi_cfg = training_config.get("allow_multi_gpu")
+        allow_multi = bool(allow_multi_cfg) if allow_multi_cfg is not None else gpu_count > 1
+
+        if allow_multi and not already_spawned and gpu_count > 1:
+            self._spawn_distributed(task, out_dir, gpu_count, launcher_flag, training_config)
+            resp_path = out_dir / "responses.json"
+            if resp_path.exists():
+                return self.load_json(resp_path)
+            return {
+                "training_successful": True,
+                "spawned_torchrun": True,
+                "model_name": (spec.get("model", {}).get("source", {}) or {}).get("identifier"),
+                "output_dir": str(out_dir),
+            }
+
+        start_time = time.time()
 
         try:
             # Get model configuration
@@ -494,3 +516,57 @@ class PPOExecutor(Executor):
             dataset = Dataset.from_dict(dataset_dict)
 
         return dataset
+
+    def _spawn_distributed(
+        self,
+        task: Dict[str, Any],
+        out_dir: Path,
+        n_gpus: int,
+        launcher_flag: str,
+        training_config: Dict[str, Any],
+    ) -> None:
+        launcher_dir = out_dir / "_launcher"
+        launcher_dir.mkdir(parents=True, exist_ok=True)
+        task_file = launcher_dir / "task_spec.json"
+        with task_file.open("w", encoding="utf-8") as fh:
+            json.dump(task, fh)
+
+        nproc = int(training_config.get("nproc_per_node", n_gpus))
+        cmd = [
+            "torchrun",
+            "--nproc_per_node",
+            str(nproc),
+            "-m",
+            "worker.executors.ppo_dist_entry",
+            str(task_file),
+            str(out_dir),
+        ]
+        env = os.environ.copy()
+        env[launcher_flag] = "1"
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+            env["PYTHONPATH"] = f"{str(repo_root)}:" + env.get("PYTHONPATH", "")
+        except Exception:
+            pass
+        logger.info(
+            "Spawning torchrun for PPO: %s (CUDA_VISIBLE_DEVICES=%s)",
+            " ".join(cmd),
+            env.get("CUDA_VISIBLE_DEVICES"),
+        )
+        subprocess.check_call(cmd, env=env)
+
+    @staticmethod
+    def _detect_gpu_count(training_config: Dict[str, Any]) -> int:
+        vis = training_config.get("visible_devices") or os.environ.get("CUDA_VISIBLE_DEVICES")
+        if vis:
+            tokens = [dev.strip() for dev in str(vis).split(",") if dev.strip()]
+            if tokens:
+                return len(tokens)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return torch.cuda.device_count()
+        except Exception:
+            pass
+        return 0

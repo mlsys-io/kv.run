@@ -5,10 +5,13 @@ DPO (Direct Preference Optimization) Executor using TRL's simple approach
 Simple implementation using TRL's DPOTrainer with built-in train() method.
 """
 
+import json
+import os
+import subprocess
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -29,129 +32,31 @@ class DPOExecutor(Executor):
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         logger.info("Starting DPO training task")
         spec = (task or {}).get("spec") or {}
-        start_time = time.time()
         training_config = spec.get("training", {}) or {}
-        checkpoint_dir = out_dir / "checkpoints"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        launcher_flag = "KV_DPO_DISTRIBUTED"
+        already_spawned = os.environ.get(launcher_flag) == "1"
+        gpu_count = self._detect_gpu_count(training_config)
+        allow_multi_cfg = training_config.get("allow_multi_gpu")
+        allow_multi = bool(allow_multi_cfg) if allow_multi_cfg is not None else gpu_count > 1
 
-        try:
-            # Get model configuration
-            model_config = spec.get("model", {})
-            model_source = model_config.get("source", {})
-            self._model_name = model_source.get("identifier", "microsoft/DialoGPT-small")
-
-            logger.info("Loading model and tokenizer...")
-
-            # Load tokenizer
-            tokenizer = AutoTokenizer.from_pretrained(self._model_name)
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-
-            # Load model and reference model
-            model = AutoModelForCausalLM.from_pretrained(self._model_name)
-            ref_model = AutoModelForCausalLM.from_pretrained(self._model_name)
-
-            logger.info("Models loaded: %s", self._model_name)
-
-            # Load dataset
-            logger.info("Loading dataset...")
-            dataset = self._load_dataset(spec)
-            logger.info("Dataset loaded with %d samples", len(dataset))
-
-            logger.info("Creating DPOConfig...")
-            dpo_config = DPOConfig(
-                learning_rate=float(training_config.get("learning_rate", 5e-7)),
-                per_device_train_batch_size=int(training_config.get("batch_size", 4)),
-                gradient_accumulation_steps=int(training_config.get("gradient_accumulation_steps", 1)),
-                num_train_epochs=int(training_config.get("num_train_epochs", 1)),
-                output_dir=str(checkpoint_dir),
-                save_steps=int(training_config.get("save_freq", 500)),
-                logging_steps=10,
-            )
-            logger.info("DPOConfig created successfully")
-
-            # Initialize DPO trainer
-            logger.info("Creating DPOTrainer...")
-            # TRL has changed constructor args across versions. Prefer `tokenizer`,
-            # but gracefully fall back to `processing_class` or no tokenizer.
-            try:
-                dpo_trainer = DPOTrainer(
-                    model=model,
-                    ref_model=ref_model,
-                    args=dpo_config,
-                    train_dataset=dataset,
-                    tokenizer=tokenizer,
-                )
-            except TypeError as e:
-                if "unexpected keyword argument 'tokenizer'" in str(e):
-                    try:
-                        dpo_trainer = DPOTrainer(
-                            model=model,
-                            ref_model=ref_model,
-                            args=dpo_config,
-                            train_dataset=dataset,
-                            processing_class=tokenizer,
-                        )
-                    except TypeError:
-                        # Final fallback: construct without tokenizer-related arg
-                        dpo_trainer = DPOTrainer(
-                            model=model,
-                            ref_model=ref_model,
-                            args=dpo_config,
-                            train_dataset=dataset,
-                        )
-                else:
-                    raise
-            logger.info("DPOTrainer created successfully")
-
-            # Simple training - just call train()
-            logger.info("Starting DPO training...")
-            dpo_trainer.train()
-            logger.info("DPO training completed")
-
-            training_successful = True
-            error_msg = None
-
-            # Save model if requested
-            if training_config.get("save_model", True):
-                try:
-                    logger.info("Saving trained model...")
-                    model_save_path = checkpoint_dir / "final_model"
-                    dpo_trainer.save_model(model_save_path)
-                    logger.info("Model saved to: %s", model_save_path)
-                except Exception as exc:  # pragma: no cover - best effort save
-                    logger.warning("Failed to save model: %s", exc)
-
-        except Exception as exc:
-            training_successful = False
-            error_msg = str(exc)
-            logger.exception("DPO training failed: %s", exc)
-            training_time = time.time() - start_time
-            results = {
-                "training_successful": training_successful,
-                "training_time_seconds": training_time,
-                "error_message": error_msg,
-                "model_name": self._model_name,
-                "dataset_size": len(dataset) if "dataset" in locals() else 0,
+        if allow_multi and not already_spawned and gpu_count > 1:
+            self._spawn_distributed(task, out_dir, gpu_count, launcher_flag, training_config)
+            resp_path = out_dir / "responses.json"
+            if resp_path.exists():
+                return self.load_json(resp_path)
+            return {
+                "training_successful": True,
+                "spawned_torchrun": True,
+                "model_name": (spec.get("model", {}).get("source", {}) or {}).get("identifier"),
                 "output_dir": str(out_dir),
             }
-            self.save_json(out_dir / "responses.json", results)
-            raise ExecutionError(error_msg or "DPO training failed") from exc
 
-        training_time = time.time() - start_time
-
-        results = {
-            "training_successful": training_successful,
-            "training_time_seconds": training_time,
-            "error_message": error_msg,
-            "model_name": self._model_name,
-            "dataset_size": len(dataset),
-            "output_dir": str(out_dir),
-        }
-        self.save_json(out_dir / "responses.json", results)
-
-        logger.info("DPO training task completed in %.2f seconds", training_time)
-        return results
+        result = self._execute_training(task, out_dir)
+        logger.info(
+            "DPO training task completed in %.2f seconds",
+            result.get("training_time_seconds", 0.0),
+        )
+        return result
 
     def _load_dataset(self, spec: Dict[str, Any]) -> Dataset:
         """Load training dataset in DPO format"""
@@ -208,3 +113,157 @@ class DPOExecutor(Executor):
             })
 
         return dataset
+
+    def _execute_training(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
+        spec = (task or {}).get("spec") or {}
+        training_config = spec.get("training", {}) or {}
+        checkpoint_dir = out_dir / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        start_time = time.time()
+        dataset: Optional[Dataset] = None
+
+        try:
+            model_config = spec.get("model", {})
+            model_source = model_config.get("source", {})
+            self._model_name = model_source.get("identifier", "microsoft/DialoGPT-small")
+
+            tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            model = AutoModelForCausalLM.from_pretrained(self._model_name)
+            ref_model = AutoModelForCausalLM.from_pretrained(self._model_name)
+
+            logger.info("Models loaded: %s", self._model_name)
+
+            dataset = self._load_dataset(spec)
+            logger.info("Dataset loaded with %d samples", len(dataset))
+
+            dpo_config = DPOConfig(
+                learning_rate=float(training_config.get("learning_rate", 5e-7)),
+                per_device_train_batch_size=int(training_config.get("batch_size", 4)),
+                gradient_accumulation_steps=int(training_config.get("gradient_accumulation_steps", 1)),
+                num_train_epochs=int(training_config.get("num_train_epochs", 1)),
+                output_dir=str(checkpoint_dir),
+                save_steps=int(training_config.get("save_freq", 500)),
+                logging_steps=10,
+            )
+
+            try:
+                dpo_trainer = DPOTrainer(
+                    model=model,
+                    ref_model=ref_model,
+                    args=dpo_config,
+                    train_dataset=dataset,
+                    tokenizer=tokenizer,
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument 'tokenizer'" in str(exc):
+                    try:
+                        dpo_trainer = DPOTrainer(
+                            model=model,
+                            ref_model=ref_model,
+                            args=dpo_config,
+                            train_dataset=dataset,
+                            processing_class=tokenizer,
+                        )
+                    except TypeError:
+                        dpo_trainer = DPOTrainer(
+                            model=model,
+                            ref_model=ref_model,
+                            args=dpo_config,
+                            train_dataset=dataset,
+                        )
+                else:
+                    raise
+
+            logger.info("Starting DPO training...")
+            dpo_trainer.train()
+            logger.info("DPO training completed")
+
+            if training_config.get("save_model", True):
+                try:
+                    model_save_path = checkpoint_dir / "final_model"
+                    dpo_trainer.save_model(model_save_path)
+                    logger.info("Model saved to: %s", model_save_path)
+                except Exception as exc:  # pragma: no cover - best effort save
+                    logger.warning("Failed to save model: %s", exc)
+
+            training_time = time.time() - start_time
+            results = {
+                "training_successful": True,
+                "training_time_seconds": training_time,
+                "error_message": None,
+                "model_name": self._model_name,
+                "dataset_size": len(dataset),
+                "output_dir": str(out_dir),
+            }
+            self.save_json(out_dir / "responses.json", results)
+            return results
+        except Exception as exc:
+            training_time = time.time() - start_time
+            results = {
+                "training_successful": False,
+                "training_time_seconds": training_time,
+                "error_message": str(exc),
+                "model_name": self._model_name,
+                "dataset_size": len(dataset) if dataset is not None else 0,
+                "output_dir": str(out_dir),
+            }
+            self.save_json(out_dir / "responses.json", results)
+            logger.exception("DPO training failed: %s", exc)
+            raise ExecutionError(results["error_message"] or "DPO training failed") from exc
+
+    def _spawn_distributed(
+        self,
+        task: Dict[str, Any],
+        out_dir: Path,
+        n_gpus: int,
+        launcher_flag: str,
+        training_config: Dict[str, Any],
+    ) -> None:
+        launcher_dir = out_dir / "_launcher"
+        launcher_dir.mkdir(parents=True, exist_ok=True)
+        task_file = launcher_dir / "task_spec.json"
+        with task_file.open("w", encoding="utf-8") as fh:
+            json.dump(task, fh)
+
+        nproc = int(training_config.get("nproc_per_node", n_gpus))
+        cmd = [
+            "torchrun",
+            "--nproc_per_node",
+            str(nproc),
+            "-m",
+            "worker.executors.dpo_dist_entry",
+            str(task_file),
+            str(out_dir),
+        ]
+        env = os.environ.copy()
+        env[launcher_flag] = "1"
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+            env["PYTHONPATH"] = f"{str(repo_root)}:" + env.get("PYTHONPATH", "")
+        except Exception:
+            pass
+        logger.info(
+            "Spawning torchrun for DPO: %s (CUDA_VISIBLE_DEVICES=%s)",
+            " ".join(cmd),
+            env.get("CUDA_VISIBLE_DEVICES"),
+        )
+        subprocess.check_call(cmd, env=env)
+
+    @staticmethod
+    def _detect_gpu_count(training_config: Dict[str, Any]) -> int:
+        vis = training_config.get("visible_devices") or os.environ.get("CUDA_VISIBLE_DEVICES")
+        if vis:
+            tokens = [dev.strip() for dev in str(vis).split(",") if dev.strip()]
+            if tokens:
+                return len(tokens)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return torch.cuda.device_count()
+        except Exception:
+            pass
+        return 0

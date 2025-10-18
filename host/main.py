@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ import redis
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 if __name__ == "__main__" and __package__ is None:
     import sys
@@ -37,9 +39,9 @@ from .utils import (
     parse_int_env,
     safe_get,
 )
+from .elastic import ElasticCoordinator
 from .worker_registry import (
     get_worker_from_redis,
-    idle_satisfying_pool,
     is_stale_by_redis,
     list_workers_from_redis,
     sort_workers,
@@ -102,6 +104,39 @@ async def require_auth(request: Request):
 RUNTIME = TaskRuntime(logger)
 dispatch_mode = os.getenv("ORCHESTRATOR_DISPATCH_MODE", DEFAULT_DISPATCH_MODE)
 worker_selection = os.getenv("ORCHESTRATOR_WORKER_SELECTION", DEFAULT_WORKER_SELECTION)
+ENABLE_CONTEXT_REUSE = parse_bool_env("ENABLE_CONTEXT_REUSE", True)
+ENABLE_TASK_MERGE = parse_bool_env("ENABLE_TASK_MERGE", True)
+TASK_MERGE_MAX_BATCH_SIZE = max(1, parse_int_env("TASK_MERGE_MAX_BATCH_SIZE", 4))
+ENABLE_ELASTIC_SCALING = parse_bool_env("ENABLE_ELASTIC_SCALING", True)
+AUTO_DISABLE_IDLE_SEC = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_IDLE_SEC", 60))
+AUTO_ENABLE_QUEUE_THRESHOLD = max(0, parse_int_env("ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD", 0))
+AUTO_DISABLE_QUEUE_MAX = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_QUEUE_MAX", 0))
+AUTO_POLL_INTERVAL_SEC = max(5, parse_int_env("ELASTIC_AUTO_POLL_INTERVAL_SEC", 30))
+AUTO_TOGGLE_COOLDOWN_SEC = max(
+    30,
+    parse_int_env("ELASTIC_AUTO_TOGGLE_COOLDOWN_SEC", max(60, AUTO_POLL_INTERVAL_SEC * 2)),
+)
+AUTO_MIN_ACTIVE_WORKERS = max(0, parse_int_env("ELASTIC_AUTO_MIN_ACTIVE_WORKERS", 1))
+
+PENDING_RESULT_CLONES: Dict[str, List[str]] = {}
+PENDING_RESULT_CLONES_LOCK = threading.RLock()
+
+METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
+ELASTIC_COORDINATOR = ElasticCoordinator(
+    RDS,
+    METRICS_RECORDER,
+    RUNTIME,
+    enabled=ENABLE_ELASTIC_SCALING,
+    auto_disable_idle_secs=AUTO_DISABLE_IDLE_SEC,
+    auto_enable_queue_threshold=AUTO_ENABLE_QUEUE_THRESHOLD,
+    auto_disable_queue_max=AUTO_DISABLE_QUEUE_MAX,
+    auto_poll_interval=AUTO_POLL_INTERVAL_SEC,
+    auto_toggle_cooldown=AUTO_TOGGLE_COOLDOWN_SEC,
+    min_active_workers=AUTO_MIN_ACTIVE_WORKERS,
+    logger=logger,
+)
+ELASTIC_COORDINATOR.start()
+
 DISPATCHER = create_dispatcher(
     dispatch_mode,
     RUNTIME,
@@ -109,8 +144,11 @@ DISPATCHER = create_dispatcher(
     RESULTS_DIR,
     logger=logger,
     worker_selection_strategy=worker_selection,
+    enable_context_reuse=ENABLE_CONTEXT_REUSE,
+    enable_task_merge=ENABLE_TASK_MERGE,
+    task_merge_max_batch_size=TASK_MERGE_MAX_BATCH_SIZE,
+    elastic_coordinator=ELASTIC_COORDINATOR,
 )
-METRICS_RECORDER = MetricsRecorder(METRICS_DIR, logger)
 STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []
 
@@ -184,7 +222,20 @@ def _handle_task_event(event: TaskEvent) -> None:
     if event_type == "TASK_STARTED":
         RUNTIME.mark_started(event.task_id, event.worker_id, payload, event.ts)
     elif event_type == "TASK_SUCCEEDED":
-        RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
+        ready_children, merged_children = RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
+        if merged_children:
+            for child_id in merged_children:
+                child_payload = dict(payload)
+                child_payload["parent_task_id"] = event.task_id
+                child_payload["is_child_task"] = True
+                child_event = TaskEvent(
+                    type="TASK_SUCCEEDED",
+                    task_id=child_id,
+                    worker_id=event.worker_id,
+                    payload=child_payload,
+                    ts=event.ts,
+                )
+                METRICS_RECORDER.record_task_event(child_event, is_child=True)
         if event.worker_id:
             try:
                 record = RUNTIME.get_record(event.task_id)
@@ -198,8 +249,10 @@ def _handle_task_event(event: TaskEvent) -> None:
                 update_worker_status(RDS, event.worker_id, "IDLE")
             except Exception:
                 pass
+        if merged_children:
+            _mirror_task_results(event.task_id, merged_children)
     elif event_type == "TASK_FAILED":
-        impacted = RUNTIME.mark_failed(
+        impacted, merged_children = RUNTIME.mark_failed(
             event.task_id,
             event.worker_id,
             payload,
@@ -216,8 +269,57 @@ def _handle_task_event(event: TaskEvent) -> None:
             )
             METRICS_RECORDER.record_task_event(derived)
             METRICS_RECORDER.finalize_task_failure(task_id)
+        for child_id in merged_children:
+            child_payload = dict(payload)
+            child_payload["parent_task_id"] = event.task_id
+            child_payload["dependency_failure"] = event.task_id
+            child_payload["is_child_task"] = True
+            child_event = TaskEvent(
+                type="TASK_FAILED",
+                task_id=child_id,
+                worker_id=event.worker_id,
+                error=event.error or "parent_failed",
+                payload=child_payload,
+            )
+            METRICS_RECORDER.record_task_event(child_event, is_child=True)
+            METRICS_RECORDER.finalize_task_failure(child_id)
     else:
         logger.debug("Ignoring task event type=%s payload=%s", event_type, payload)
+
+
+def _mirror_task_results(parent_task_id: str, child_ids: List[str]) -> None:
+    if not child_ids:
+        return
+    parent_dir = result_file_path(RESULTS_DIR, parent_task_id).parent
+    if not parent_dir.exists():
+        with PENDING_RESULT_CLONES_LOCK:
+            pending = PENDING_RESULT_CLONES.setdefault(parent_task_id, [])
+            for child in child_ids:
+                if child not in pending:
+                    pending.append(child)
+        logger.debug("Deferring result mirroring for %s (waiting for artifacts)", parent_task_id)
+        return
+
+    for child_id in child_ids:
+        if child_id == parent_task_id:
+            continue
+        dst_dir = result_file_path(RESULTS_DIR, child_id).parent
+        if dst_dir.exists() and (dst_dir / "responses.json").exists():
+            continue
+        try:
+            if dst_dir.exists():
+                shutil.rmtree(dst_dir, ignore_errors=True)
+            shutil.copytree(parent_dir, dst_dir)
+            record = RUNTIME.get_record(child_id)
+            expected_artifacts: List[str] = []
+            if record:
+                expected_artifacts = ((record.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
+            sync_manifest(dst_dir, child_id, expected_artifacts)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("Failed to mirror results from %s to %s: %s", parent_task_id, child_id, exc)
+
+    with PENDING_RESULT_CLONES_LOCK:
+        PENDING_RESULT_CLONES.pop(parent_task_id, None)
 
 
 def _workers_events_loop() -> None:
@@ -247,6 +349,7 @@ def _workers_events_loop() -> None:
                     continue
                 log_worker_event(logger, event)
                 METRICS_RECORDER.record_worker_event(event)
+                ELASTIC_COORDINATOR.record_worker_event(event)
                 if event.type == "UNREGISTER":
                     worker_id = (event.worker_id or "").strip()
                     if worker_id:
@@ -292,6 +395,7 @@ def _start_background_threads() -> None:
 def _stop_background_threads() -> None:
     STOP_EVENT.set()
     RUNTIME.shutdown()
+    ELASTIC_COORDINATOR.shutdown()
     for thread in BACKGROUND_THREADS:
         thread.join(timeout=2.0)
 
@@ -301,6 +405,10 @@ def _stop_background_threads() -> None:
 # --------------------------------------------------------------------------- #
 
 app = FastAPI(title="Host Orchestrator", version="0.1.0")
+
+
+class WorkerElasticUpdate(BaseModel):
+    enabled: bool
 
 
 @app.get("/healthz")
@@ -315,7 +423,8 @@ async def get_metrics(_: Any = Depends(require_auth)):
 
 @app.get("/workers")
 async def list_workers(_: Any = Depends(require_auth)):
-    return list_workers_from_redis(RDS)
+    disabled = ELASTIC_COORDINATOR.disabled_workers() if ELASTIC_COORDINATOR.enabled else None
+    return list_workers_from_redis(RDS, disabled_workers=disabled)
 
 
 @app.get("/workers/{worker_id}")
@@ -324,7 +433,27 @@ async def get_worker(worker_id: str, _: Any = Depends(require_auth)):
     if not worker:
         raise HTTPException(status_code=404, detail="worker not found")
     stale = is_stale_by_redis(RDS, worker.worker_id)
-    return {**worker.model_dump(), "stale": stale}
+    elastic_disabled = ELASTIC_COORDINATOR.is_disabled(worker.worker_id) if ELASTIC_COORDINATOR.enabled else False
+    return {**worker.model_dump(), "stale": stale, "elastic_disabled": elastic_disabled}
+
+
+@app.post("/workers/{worker_id}/elastic")
+async def update_worker_elastic_state(
+    worker_id: str,
+    body: WorkerElasticUpdate,
+    _: Any = Depends(require_auth),
+):
+    if not ELASTIC_COORDINATOR.enabled:
+        raise HTTPException(status_code=400, detail="Elastic scaling control is disabled")
+    worker = get_worker_from_redis(RDS, worker_id)
+    if not worker:
+        raise HTTPException(status_code=404, detail="worker not found")
+    try:
+        ELASTIC_COORDINATOR.set_worker_state(worker_id, enabled=body.enabled)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    state = {"worker_id": worker_id, "enabled": body.enabled, "elastic_disabled": not body.enabled}
+    return state
 
 
 def _parse_submission_body(raw_body: bytes, content_type: str) -> str:
@@ -428,6 +557,10 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
     if record:
         expected_artifacts = ((record.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
     sync_manifest(path.parent, task_id, expected_artifacts)
+    with PENDING_RESULT_CLONES_LOCK:
+        pending_children = PENDING_RESULT_CLONES.pop(task_id, [])
+    if pending_children:
+        _mirror_task_results(task_id, pending_children)
     return {"ok": True, "path": str(path)}
 
 

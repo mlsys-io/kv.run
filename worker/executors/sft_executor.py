@@ -57,7 +57,7 @@ class SFTExecutor(Executor):
 
         # Internal distributed launcher: spawn multi-GPU training as subprocesses
         try:
-            allow_multi = bool(training_cfg.get("allow_multi_gpu", False))
+            allow_multi_cfg = training_cfg.get("allow_multi_gpu")
             launcher_env_flag = "KV_SFT_DISTRIBUTED"
             already_spawned = os.environ.get(launcher_env_flag) == "1"
             # Determine requested GPU count
@@ -74,6 +74,10 @@ class SFTExecutor(Executor):
 
             # If a DeepSpeed config is supplied, assume multi-GPU intent
             deepspeed_intent = bool(deepspeed_cfg)
+            if allow_multi_cfg is None:
+                allow_multi = bool(n_gpus and n_gpus > 1)
+            else:
+                allow_multi = bool(allow_multi_cfg)
 
             logger.info(
                 "SFT spawn decision: allow_multi=%s deepspeed_intent=%s already_spawned=%s n_gpus=%s",
@@ -417,7 +421,16 @@ class SFTExecutor(Executor):
         if not torch.cuda.is_available():
             return
         requested = training_cfg.get("visible_devices")
-        allow_multi = bool(training_cfg.get("allow_multi_gpu", False))
+        allow_multi_cfg = training_cfg.get("allow_multi_gpu")
+        try:
+            n_devices = torch.cuda.device_count()
+        except Exception:
+            n_devices = 0
+        if allow_multi_cfg is None:
+            allow_multi = n_devices > 1
+        else:
+            allow_multi = bool(allow_multi_cfg)
+
         if requested:
             devices = ",".join(str(x) for x in requested) if isinstance(requested, (list, tuple)) else str(requested)
             os.environ["CUDA_VISIBLE_DEVICES"] = devices
@@ -427,14 +440,14 @@ class SFTExecutor(Executor):
             logger.info("Multi-GPU allowed; using all visible GPUs.")
             return
         # Default to a single GPU when multiple devices are visible but not explicitly allowed
-        try:
-            n = torch.cuda.device_count()
-        except Exception:
-            n = 0
-        if n > 1:
+        if n_devices > 1:
             preferred = training_cfg.get("primary_gpu", 0)
             os.environ["CUDA_VISIBLE_DEVICES"] = str(preferred)
-            logger.info("Multiple GPUs detected (%d); restrict to device %s (set allow_multi_gpu=true to opt-in).", n, preferred)
+            logger.info(
+                "Multiple GPUs detected (%d); restrict to device %s (set training.allow_multi_gpu=false to override).",
+                n_devices,
+                preferred,
+            )
 
     @staticmethod
     def _resolve_deepspeed_config(training_cfg: Dict[str, Any], log) -> Optional[Any]:

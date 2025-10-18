@@ -67,6 +67,7 @@ class MetricsRecorder:
         }
 
         self._worker_meta: Dict[str, Dict[str, Any]] = {}
+        self._elastic_disabled_workers: Set[str] = set()
 
         self._write_metrics()
 
@@ -146,6 +147,17 @@ class MetricsRecorder:
                 self._on_worker_status(worker_id, event)
 
             self._append_event(event)
+            self._write_metrics()
+
+    def set_worker_elastic_disabled(self, worker_id: str, disabled: bool) -> None:
+        normalized = (worker_id or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            if disabled:
+                self._elastic_disabled_workers.add(normalized)
+            else:
+                self._elastic_disabled_workers.discard(normalized)
             self._write_metrics()
 
     def finalize_task_failure(self, task_id: str) -> None:
@@ -498,12 +510,14 @@ class MetricsRecorder:
             for bucket, values in self._timings.items()
         }
         workers = self._summarize_workers()
+        active_workers = {wid for wid in self._active_workers if wid not in self._elastic_disabled_workers}
         return {
             "generated_at": _now_iso(),
             "counters": counters,
             "task_timings": timings,
             "workers": workers,
-            "active_workers_count": len(self._active_workers),
+            "active_workers_count": len(active_workers),
+            "elastic_disabled_workers": sorted(self._elastic_disabled_workers),
             "completed_tasks": sorted(self._completed_tasks),
         }
 
@@ -528,6 +542,8 @@ class MetricsRecorder:
         }
         detailed = {}
         for worker_id, meta in self._worker_meta.items():
+            if worker_id in self._elastic_disabled_workers:
+                continue
             info = dict(meta)
             cost = _safe_float(info.get("cost_per_hour"))
             uptime = _safe_float(info.get("uptime_sec"))

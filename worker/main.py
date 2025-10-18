@@ -91,11 +91,21 @@ def main():
         cost_per_hour=cfg.cost_per_hour,
         power_monitor=PowerMonitor(),
     )
-    lifecycle.start(env={}, hardware=collect_hw(), tags=cfg.tags)
+    hardware = collect_hw(bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec)
+    lifecycle.start(env={}, hardware=hardware, tags=cfg.tags)
 
     executors, default_executor = initialize_executors(logger)
 
-    runner = Runner(lifecycle, rds, cfg.topic, cfg.results_dir, executors, default_executor, logger)
+    runner = Runner(
+        lifecycle,
+        rds,
+        cfg.topic,
+        cfg.results_dir,
+        executors,
+        default_executor,
+        logger,
+        network_bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec,
+    )
     try:
         runner.start()
     except KeyboardInterrupt:

@@ -57,3 +57,4 @@ class TaskRecord(BaseModel):
     merged_children: Optional[List[Dict[str, Any]]] = None
     merged_parent_id: Optional[str] = None
     merge_slice: Optional[Dict[str, int]] = None
+    merge_key: Optional[str] = None

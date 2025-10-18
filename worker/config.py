@@ -26,6 +26,7 @@ class WorkerConfig:
     tags: List[str]
     log_level: str
     cost_per_hour: float
+    network_bandwidth_bytes_per_sec: float | None
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -52,6 +53,18 @@ class WorkerConfig:
         if cost_per_hour < 0:
             raise SystemExit("WORKER_COST_PER_HOUR must be non-negative")
 
+        bandwidth_raw = (os.getenv("WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC") or "").strip()
+        network_bandwidth_bytes_per_sec = None
+        if bandwidth_raw:
+            try:
+                network_bandwidth_bytes_per_sec = float(bandwidth_raw)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"Invalid WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC value: {bandwidth_raw}"
+                ) from exc
+            if network_bandwidth_bytes_per_sec <= 0:
+                raise SystemExit("WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC must be positive")
+
         return WorkerConfig(
             redis_url=redis_url,
             topic=topic,
@@ -62,4 +75,5 @@ class WorkerConfig:
             tags=tags,
             log_level=log_level,
             cost_per_hour=cost_per_hour,
+            network_bandwidth_bytes_per_sec=network_bandwidth_bytes_per_sec,
         )
