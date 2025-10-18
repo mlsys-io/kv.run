@@ -131,7 +131,7 @@ class FixedPipelineDispatcher(Dispatcher):
         if not pool:
             return None
 
-        worker = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
+        worker, _ = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
         if not worker:
             return None
         self._type_to_worker[task_type] = worker.worker_id

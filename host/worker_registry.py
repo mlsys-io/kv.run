@@ -29,6 +29,8 @@ class Worker(BaseModel):
     last_seen: Optional[str] = None
     cached_models: List[str] = Field(default_factory=list)
     cached_datasets: List[str] = Field(default_factory=list)
+    cache_updated_ts: Optional[str] = None
+    cost_per_hour: Optional[float] = None
 
 
 def is_stale_by_redis(rds, worker_id: str) -> bool:
@@ -65,12 +67,19 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
     tags = _loads(raw.get("tags_json"), [])
     cached_models = _ensure_str_list(_loads(raw.get("cache_models_json"), []))
     cached_datasets = _ensure_str_list(_loads(raw.get("cache_datasets_json"), []))
+    cache_updated_ts = raw.get("cache_updated_ts") or None
 
     pid_val = raw.get("pid")
     try:
         pid = int(pid_val) if pid_val is not None else None
     except (TypeError, ValueError):
         pid = None
+
+    cost_val = raw.get("cost_per_hour")
+    try:
+        cost_per_hour = float(cost_val) if cost_val is not None else None
+    except (TypeError, ValueError):
+        cost_per_hour = None
 
     return Worker(
         worker_id=raw.get("worker_id", worker_id),
@@ -83,6 +92,8 @@ def get_worker_from_redis(rds, worker_id: str) -> Optional[Worker]:
         last_seen=raw.get("last_seen") or None,
         cached_models=cached_models,
         cached_datasets=cached_datasets,
+        cache_updated_ts=cache_updated_ts,
+        cost_per_hour=cost_per_hour,
     )
 
 
@@ -200,6 +211,9 @@ def record_worker_cache(
         mapping["cache_models_json"] = json.dumps(updated_models, ensure_ascii=False)
     if updated_datasets != current_datasets:
         mapping["cache_datasets_json"] = json.dumps(updated_datasets, ensure_ascii=False)
+    if mapping:
+        from .utils import now_iso
+        mapping["cache_updated_ts"] = now_iso()
     if not mapping:
         return
 
@@ -254,7 +268,16 @@ def sort_workers(workers: List[Worker]) -> List[Worker]:
         cpu_cores = int(safe_get(worker.hardware, "cpu.logical_cores", 0) or 0)
         decorated.append((worker, gpu_count, total_vram, sys_ram, cpu_cores))
 
-    decorated.sort(key=lambda item: (item[1] > 0, item[2], item[3], item[4]), reverse=True)
+    decorated.sort(key=lambda item: item[0].worker_id)
+    decorated.sort(
+        key=lambda item: (
+            item[1] > 0,
+            item[2],
+            item[3],
+            item[4],
+        ),
+        reverse=True,
+    )
     return [item[0] for item in decorated]
 
 

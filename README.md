@@ -171,11 +171,16 @@ spec:
 | `ORCHESTRATOR_TOKEN` | – | Optional bearer token to protect APIs. |
 | `ORCHESTRATOR_DISPATCH_MODE` | `adaptive` | Scheduler flavour (`adaptive`, `fixed_pipeline`, `static_round_robin`). |
 | `ORCHESTRATOR_WORKER_SELECTION` | `best_fit` | Worker selection policy (`best_fit`, `first_fit`). |
-| `ENABLE_CONTEXT_REUSE` | `true` | Co-locate tasks on workers with cached artifacts when possible. |
+| `ENABLE_CONTEXT_REUSE` | `true` | Bias toward workers with fresh model/dataset caches (subject to TTL). |
+| `WORKER_CACHE_TTL_SEC` | `3600` | Cache metadata expiry before reuse priority is dropped. |
 | `ENABLE_TASK_MERGE` | `true` | Enables DAG-level coalescing of identical tasks. |
 | `TASK_MERGE_MAX_BATCH_SIZE` | `4` | Max number of siblings merged per dispatch. |
 | `ENABLE_ELASTIC_SCALING` | `true` | Global toggle for auto disable/enable logic. |
-| `ELASTIC_AUTO_DISABLE_IDLE_SEC` | `60` | Idle duration before auto-disabling an idle worker (when queue <= threshold). |
+| `SCHEDULER_LAMBDA_INFERENCE` | `0.4` | λ weight for inference tasks in the convex throughput/cost score. |
+| `SCHEDULER_LAMBDA_TRAINING` | `0.8` | λ weight for training-style tasks. |
+| `SCHEDULER_LAMBDA_OTHER` | `0.5` | λ weight for uncategorised tasks. |
+| `SCHEDULER_SELECTION_JITTER` | `1e-3` | Deterministic jitter magnitude for tie-breaking. |
+| `ELASTIC_AUTO_DISABLE_IDLE_SEC` | `60` | Idle duration before auto-disabling an idle worker (when queue ≤ threshold). |
 | `ELASTIC_AUTO_DISABLE_QUEUE_MAX` | `0` | Max ready-queue length that still allows idle auto-disable. |
 | `ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD` | `0` | Ready queue length that triggers auto re-enable of disabled workers. |
 | `ELASTIC_AUTO_POLL_INTERVAL_SEC` | `30` | Elastic manager poll interval. |

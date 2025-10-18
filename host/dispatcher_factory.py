@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Type
+from typing import Optional, Type
 
 from .dispatcher import Dispatcher
 from .dispatcher_fixed_pipeline import FixedPipelineDispatcher
@@ -28,6 +28,9 @@ def create_dispatcher(
     enable_task_merge: bool = True,
     task_merge_max_batch_size: int = 4,
     elastic_coordinator=None,
+    reuse_cache_ttl_sec: int = 3600,
+    lambda_config: Optional[dict] = None,
+    selection_jitter_epsilon: float = 1e-3,
 ):
     """
     Instantiate a dispatcher according to the selected baseline.
@@ -61,5 +64,8 @@ def create_dispatcher(
             enable_task_merge=enable_task_merge,
             task_merge_max_batch_size=task_merge_max_batch_size,
             elastic_coordinator=elastic_coordinator,
+            reuse_cache_ttl_sec=reuse_cache_ttl_sec,
+            lambda_config=lambda_config,
+            selection_jitter_epsilon=selection_jitter_epsilon,
         )
     return dispatcher_cls(**base_kwargs)

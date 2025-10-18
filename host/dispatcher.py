@@ -4,6 +4,7 @@ import copy
 import json
 import time
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -46,6 +47,9 @@ class Dispatcher:
         enable_task_merge: bool = True,
         task_merge_max_batch_size: int = 4,
         elastic_coordinator: Optional["ElasticCoordinator"] = None,
+        reuse_cache_ttl_sec: int = 3600,
+        lambda_config: Optional[Dict[str, float]] = None,
+        selection_jitter_epsilon: float = 1e-3,
     ) -> None:
         self._runtime = runtime
         self._redis = redis_client
@@ -56,6 +60,9 @@ class Dispatcher:
         self._task_merge_enabled = enable_task_merge
         self._task_merge_max_batch_size = max(1, task_merge_max_batch_size)
         self._elastic_coordinator = elastic_coordinator
+        self._cache_ttl_sec = max(0, int(reuse_cache_ttl_sec))
+        self._lambda_config = lambda_config or {}
+        self._selection_jitter = max(0.0, float(selection_jitter_epsilon))
 
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
@@ -75,6 +82,10 @@ class Dispatcher:
                 )
 
         model_names, dataset_names = extract_model_dataset_names(task_payload)
+        task_category = (record.category or "other").lower() if hasattr(record, "category") else "other"
+        task_age = None
+        if getattr(record, "last_queue_ts", None) is not None:
+            task_age = max(0.0, time.time() - record.last_queue_ts)
         disabled_workers = None
         if self._elastic_coordinator and self._elastic_coordinator.enabled:
             disabled_workers = self._elastic_coordinator.disabled_workers()
@@ -98,9 +109,27 @@ class Dispatcher:
                 dataset_names,
             )
 
-        worker = select_worker(candidate_pool, self._worker_selection_strategy, logger=self._logger)
+        worker, selection_info = select_worker(
+            candidate_pool,
+            self._worker_selection_strategy,
+            logger=self._logger,
+            task_category=task_category,
+            lambda_overrides=self._lambda_config,
+            task_id=task_id,
+            jitter_epsilon=self._selection_jitter,
+            task_age=task_age,
+        )
         if not worker and preferred_pool:
-            worker = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
+            worker, selection_info = select_worker(
+                pool,
+                self._worker_selection_strategy,
+                logger=self._logger,
+                task_category=task_category,
+                lambda_overrides=self._lambda_config,
+                task_id=task_id,
+                jitter_epsilon=self._selection_jitter,
+                task_age=task_age,
+            )
         if not worker:
             self._logger.debug("No suitable worker selected for %s; requeueing", task_id)
             self._runtime.release_merge(task_id)
@@ -155,6 +184,19 @@ class Dispatcher:
             update_worker_status(self._redis, worker.worker_id, "RUNNING")
         except Exception as exc:  # noqa: broad-except
             self._logger.debug("Failed to update worker %s status: %s", worker.worker_id, exc)
+        try:
+            self._logger.info(
+                "Dispatch %s -> %s (strategy=%s reuse=%d/%d score=%.4f age=%.2fs)",
+                task_id,
+                worker.worker_id,
+                selection_info.get("strategy"),
+                len(preferred_pool),
+                len(pool),
+                selection_info.get("chosen_metrics", {}).get("score"),
+                task_age if task_age is not None else -1.0,
+            )
+        except Exception:
+            pass
         return True
 
     def dispatch_loop(self, stop_event, poll_interval: float = 1.0) -> None:
@@ -194,7 +236,22 @@ class Dispatcher:
             return score
 
         scored: List[Tuple[Worker, int]] = []
+        ttl = self._cache_ttl_sec
+        now_ts = time.time()
         for worker in pool:
+            if ttl:
+                ts_raw = worker.cache_updated_ts
+                if not ts_raw:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(ts_raw.rstrip("Z").replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                age = now_ts - parsed.timestamp()
+                if age > ttl:
+                    continue
             value = _score(worker)
             if value > 0:
                 scored.append((worker, value))

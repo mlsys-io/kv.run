@@ -36,6 +36,7 @@ from .utils import (
     log_worker_event,
     now_iso,
     parse_bool_env,
+    parse_float_env,
     parse_int_env,
     safe_get,
 )
@@ -108,6 +109,11 @@ ENABLE_CONTEXT_REUSE = parse_bool_env("ENABLE_CONTEXT_REUSE", True)
 ENABLE_TASK_MERGE = parse_bool_env("ENABLE_TASK_MERGE", True)
 TASK_MERGE_MAX_BATCH_SIZE = max(1, parse_int_env("TASK_MERGE_MAX_BATCH_SIZE", 4))
 ENABLE_ELASTIC_SCALING = parse_bool_env("ENABLE_ELASTIC_SCALING", True)
+WORKER_CACHE_TTL_SEC = max(0, parse_int_env("WORKER_CACHE_TTL_SEC", 3600))
+SCHED_LAMBDA_INFERENCE = parse_float_env("SCHEDULER_LAMBDA_INFERENCE", 0.4)
+SCHED_LAMBDA_TRAINING = parse_float_env("SCHEDULER_LAMBDA_TRAINING", 0.8)
+SCHED_LAMBDA_OTHER = parse_float_env("SCHEDULER_LAMBDA_OTHER", 0.5)
+SCHED_SELECTION_JITTER = parse_float_env("SCHEDULER_SELECTION_JITTER", 1e-3)
 AUTO_DISABLE_IDLE_SEC = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_IDLE_SEC", 60))
 AUTO_ENABLE_QUEUE_THRESHOLD = max(0, parse_int_env("ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD", 0))
 AUTO_DISABLE_QUEUE_MAX = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_QUEUE_MAX", 0))
@@ -148,6 +154,13 @@ DISPATCHER = create_dispatcher(
     enable_task_merge=ENABLE_TASK_MERGE,
     task_merge_max_batch_size=TASK_MERGE_MAX_BATCH_SIZE,
     elastic_coordinator=ELASTIC_COORDINATOR,
+    reuse_cache_ttl_sec=WORKER_CACHE_TTL_SEC,
+    lambda_config={
+        "inference": SCHED_LAMBDA_INFERENCE,
+        "training": SCHED_LAMBDA_TRAINING,
+        "other": SCHED_LAMBDA_OTHER,
+    },
+    selection_jitter_epsilon=SCHED_SELECTION_JITTER,
 )
 STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []
