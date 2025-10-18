@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+import hashlib
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .worker_registry import Worker, sort_workers
 
@@ -12,7 +13,12 @@ def select_worker(
     strategy: str = DEFAULT_WORKER_SELECTION,
     *,
     logger=None,
-) -> Optional[Worker]:
+    task_category: Optional[str] = None,
+    lambda_overrides: Optional[Dict[str, float]] = None,
+    task_id: Optional[str] = None,
+    jitter_epsilon: float = 1e-3,
+    task_age: Optional[float] = None,
+) -> Tuple[Optional[Worker], Dict[str, object]]:
     """
     Select a worker from the candidate pool according to the scheduling strategy.
 
@@ -23,12 +29,19 @@ def select_worker(
 
     candidates: List[Worker] = list(pool or [])
     if not candidates:
-        return None
+        return None, {"strategy": strategy, "reason": "empty_pool"}
 
     normalized = (strategy or DEFAULT_WORKER_SELECTION).strip().lower()
 
     if normalized == "first_fit":
-        return candidates[0]
+        chosen = candidates[0]
+        info = {
+            "strategy": "first_fit",
+            "candidate_count": len(candidates),
+            "chosen": chosen.worker_id,
+            "task_age": task_age,
+        }
+        return chosen, info
 
     if normalized != "best_fit":
         if logger:
@@ -38,8 +51,125 @@ def select_worker(
             )
         normalized = DEFAULT_WORKER_SELECTION
 
-    ordered = sort_workers(candidates)
-    if not ordered:
-        return None
-    return ordered[0]
+    chosen, debug = _select_best_fit(
+        candidates,
+        task_category=task_category,
+        lambda_overrides=lambda_overrides,
+        task_id=task_id,
+        jitter_epsilon=jitter_epsilon,
+        task_age=task_age,
+    )
+    if chosen is None and logger:
+        logger.debug("Best-fit selection returned no worker; pool size=%d", len(candidates))
+    return chosen, debug
 
+
+def _select_best_fit(
+    candidates: List[Worker],
+    *,
+    task_category: Optional[str],
+    lambda_overrides: Optional[Dict[str, float]],
+    task_id: Optional[str],
+    jitter_epsilon: float,
+    task_age: Optional[float],
+) -> Tuple[Optional[Worker], Dict[str, object]]:
+    lambda_config = lambda_overrides or {}
+    category_key = (task_category or "other").lower()
+    lam = float(lambda_config.get(category_key, lambda_config.get("other", 0.5)))
+    lam = max(0.0, min(1.0, lam))
+    scores: List[Tuple[float, Worker, Dict[str, object]]] = []
+
+    for worker in candidates:
+        metrics = _collect_worker_metrics(worker)
+        throughput = metrics["throughput"]
+        cost = metrics["cost"]
+        score = lam * throughput - (1.0 - lam) * cost
+        if task_age is not None:
+            score += min(task_age, 300.0) * 1e-4
+        if task_id:
+            score += _stable_jitter(task_id, worker.worker_id, jitter_epsilon)
+        metrics["lambda"] = lam
+        metrics["score"] = score
+        scores.append((score, worker, metrics))
+
+    if not scores:
+        return None, {"strategy": "best_fit", "candidate_count": 0, "reason": "no_scores"}
+
+    scores.sort(key=lambda item: item[2]["worker_id"])  # stable by worker id
+    scores.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_worker, best_metrics = scores[0]
+    debug = {
+        "strategy": "best_fit",
+        "candidate_count": len(candidates),
+        "chosen": best_worker.worker_id,
+        "chosen_metrics": best_metrics,
+        "task_age": task_age,
+        "top_scores": [
+            {
+                "worker_id": metrics["worker_id"],
+                "score": metrics["score"],
+                "throughput": metrics["throughput"],
+                "cost": metrics["cost"],
+            }
+            for _, _, metrics in scores[:5]
+        ],
+    }
+    return best_worker, debug
+
+
+def _collect_worker_metrics(worker: Worker) -> Dict[str, float]:
+    hardware = worker.hardware or {}
+    gpus = hardware.get("gpu", {}).get("gpus") or hardware.get("gpus") or []
+    if not isinstance(gpus, list):
+        gpus = []
+    gpu_count = len(gpus)
+    total_vram = 0
+    for gpu in gpus:
+        mem = (
+            gpu.get("memory", {}).get("total_bytes")
+            if isinstance(gpu, dict)
+            else None
+        )
+        if mem is None and isinstance(gpu, dict):
+            mem = gpu.get("memory_bytes") or gpu.get("vram_bytes") or gpu.get("memory.total")
+        try:
+            total_vram += int(mem or 0)
+        except Exception:
+            pass
+    sys_ram = hardware.get("memory", {}).get("total_bytes")
+    try:
+        sys_ram = int(sys_ram or 0)
+    except Exception:
+        sys_ram = 0
+    cpu_cores = hardware.get("cpu", {}).get("logical_cores")
+    try:
+        cpu_cores = int(cpu_cores or 0)
+    except Exception:
+        cpu_cores = 0
+
+    throughput = (
+        gpu_count * 100.0
+        + (total_vram or 0) / (1 << 30)
+        + sys_ram / (1 << 31)
+        + cpu_cores * 0.5
+    )
+    cost = worker.cost_per_hour if worker.cost_per_hour is not None else 1.0
+
+    return {
+        "worker_id": worker.worker_id,
+        "throughput": throughput,
+        "cost": cost,
+        "gpu_count": float(gpu_count),
+        "vram_gb": float((total_vram or 0) / (1 << 30)),
+        "cpu_cores": float(cpu_cores),
+        "sys_ram_gb": float(sys_ram / (1 << 30)),
+    }
+
+
+def _stable_jitter(task_id: str, worker_id: str, magnitude: float) -> float:
+    if magnitude <= 0:
+        return 0.0
+    payload = f"{task_id}:{worker_id}".encode("utf-8", "ignore")
+    digest = hashlib.md5(payload).digest()
+    value = int.from_bytes(digest[:8], "big") / float(1 << 64)
+    return (value - 0.5) * magnitude * 2
