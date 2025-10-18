@@ -188,6 +188,7 @@ spec:
 | `ELASTIC_AUTO_MIN_ACTIVE_WORKERS` | `1` | Minimum enabled workers kept alive. |
 | `HOST_METRICS_DIR` / `ORCHESTRATOR_METRICS_DIR` | `./metrics` | Metrics snapshot & event log directory. |
 | `LOG_LEVEL` | `INFO` | Orchestrator log level. |
+| `LOG_FILE` | `host.log` | Rotating log file emitted by the orchestrator. |
 | `HOST_APP_PORT` / `PORT` | `8000` | HTTP bind ports. |
 | `HOST_APP_HOST` | `0.0.0.0` | HTTP bind address. |
 

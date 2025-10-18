@@ -55,7 +55,7 @@ from .worker_registry import (
 # Environment & globals
 # --------------------------------------------------------------------------- #
 
-LOG_FILE = os.getenv("LOG_FILE", "host_orchestrator.log")
+LOG_FILE = os.getenv("LOG_FILE", "host.log")
 LOG_MAX_BYTES = parse_int_env("LOG_MAX_BYTES", 5_242_880)
 LOG_BACKUP_COUNT = parse_int_env("LOG_BACKUP_COUNT", 5)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
