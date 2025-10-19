@@ -115,8 +115,8 @@ SCHED_LAMBDA_TRAINING = parse_float_env("SCHEDULER_LAMBDA_TRAINING", 0.8)
 SCHED_LAMBDA_OTHER = parse_float_env("SCHEDULER_LAMBDA_OTHER", 0.5)
 SCHED_SELECTION_JITTER = parse_float_env("SCHEDULER_SELECTION_JITTER", 1e-3)
 AUTO_DISABLE_IDLE_SEC = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_IDLE_SEC", 60))
-AUTO_ENABLE_QUEUE_THRESHOLD = max(0, parse_int_env("ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD", 0))
-AUTO_DISABLE_QUEUE_MAX = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_QUEUE_MAX", 0))
+AUTO_ENABLE_QUEUE_THRESHOLD = max(0, parse_int_env("ELASTIC_AUTO_ENABLE_QUEUE_THRESHOLD", 5))
+AUTO_DISABLE_QUEUE_MAX = max(0, parse_int_env("ELASTIC_AUTO_DISABLE_QUEUE_MAX", 2))
 AUTO_POLL_INTERVAL_SEC = max(5, parse_int_env("ELASTIC_AUTO_POLL_INTERVAL_SEC", 30))
 AUTO_TOGGLE_COOLDOWN_SEC = max(
     30,
@@ -236,6 +236,15 @@ def _handle_task_event(event: TaskEvent) -> None:
         RUNTIME.mark_started(event.task_id, event.worker_id, payload, event.ts)
     elif event_type == "TASK_SUCCEEDED":
         ready_children, merged_children = RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
+        try:
+            queueing, executing, completed, total = RUNTIME.task_status_counts()
+            summary = (
+                f"queueing {queueing}, executing {executing}, completed {completed}, "
+                f"total {total}"
+            )
+        except Exception:
+            summary = "queueing unknown, executing unknown, completed unknown, total unknown"
+        logger.info("Task %s completed; %s", event.task_id, summary)
         if merged_children:
             for child_id in merged_children:
                 child_payload = dict(payload)

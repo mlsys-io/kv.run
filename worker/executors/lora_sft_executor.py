@@ -321,7 +321,17 @@ class LoRASFTExecutor(Executor):
         if dataset_name:
             split = data_cfg.get("split", "train")
             config_name = data_cfg.get("config_name")
-            dataset = load_dataset(dataset_name, config_name, split=split)
+            trust_remote_code = data_cfg.get("trust_remote_code")
+            if trust_remote_code is None:
+                trust_remote_code = True
+            revision = data_cfg.get("revision")
+            dataset = load_dataset(
+                dataset_name,
+                config_name,
+                split=split,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+            )
 
             if prompt_col and response_col:
                 missing = [col for col in (prompt_col, response_col) if col not in dataset.column_names]

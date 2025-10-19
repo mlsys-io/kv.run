@@ -72,14 +72,6 @@ class Dispatcher:
 
         task_payload = copy.deepcopy(record.parsed)
         merged_children: List[str] = []
-        if self._task_merge_enabled and self._task_merge_max_batch_size > 1:
-            merged_children = self._runtime.plan_merge(task_id, self._task_merge_max_batch_size)
-            if merged_children:
-                self._logger.debug(
-                    "Coalesced task %s with siblings %s",
-                    task_id,
-                    ", ".join(merged_children),
-                )
 
         model_names, dataset_names = extract_model_dataset_names(task_payload)
         task_category = (record.category or "other").lower() if hasattr(record, "category") else "other"
@@ -137,6 +129,15 @@ class Dispatcher:
             self._runtime.requeue(task_id)
             return False
 
+        if self._task_merge_enabled and self._task_merge_max_batch_size > 1:
+            merged_children = self._runtime.plan_merge(task_id, self._task_merge_max_batch_size)
+            if merged_children:
+                self._logger.debug(
+                    "Coalesced task %s with siblings %s",
+                    task_id,
+                    ", ".join(merged_children),
+                )
+
         message = {
             "task_id": task_id,
             "task": task_payload,
@@ -180,6 +181,16 @@ class Dispatcher:
             return False
 
         self._runtime.mark_dispatched(task_id, worker.worker_id)
+        if merged_children:
+            try:
+                self._logger.info(
+                    "[TaskMerge] parent=%s merged_children=%d -> %s",
+                    task_id,
+                    len(merged_children),
+                    ", ".join(merged_children),
+                )
+            except Exception:
+                pass
         try:
             update_worker_status(self._redis, worker.worker_id, "RUNNING")
         except Exception as exc:  # noqa: broad-except

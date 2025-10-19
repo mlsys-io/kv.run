@@ -1,11 +1,11 @@
-# 顺序在 GSM8K、TruthfulQA 与 MathQA 上运行 llama 1B 推理，比较跨领域表现并产出分阶段结果。
+# 顺序在 GSM8K、TruthfulQA 与 MMLU 上运行 llama 1B 推理，比较跨领域表现并产出分阶段结果。
 apiVersion: mloc/v1
 kind: InferenceTask
 metadata:
   name: llama1b-linear-multi-eval
   owner: demo
   annotations:
-    description: "Sequential inference over math, factual QA, and multiple-choice reasoning datasets"
+    description: "Sequential inference over math, factual QA, and MMLU-style multiple-choice datasets"
 
 spec:
   taskType: "inference"
@@ -48,8 +48,9 @@ spec:
           top_p: 0.9
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/01_linear/gsm8k"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
@@ -73,31 +74,35 @@ spec:
           top_p: 0.85
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/01_linear/truthfulqa"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
 
-    - name: mathqa-pass
+    - name: mmlu-pass
       spec:
         taskType: "inference"
         data:
           type: "dataset"
-          url: "allenai/math_qa"
-          split: "train[:150]"
-          column: "Problem"
-          shuffle: false
+          url: "cais/mmlu"
+          name: "all"
+          split: "test[:150]"
+          column: "question"
+          shuffle: true
+          seed: 23
         inference:
           system_prompt: |
-            Solve the multiple-choice math question. Provide a short rationale and state the selected option letter.
-          max_tokens: 192
-          temperature: 0.2
-          top_p: 0.9
+            You are answering an MMLU multiple-choice question. Consider the standard options (A/B/C/D), reason briefly, and return the final letter choice.
+          max_tokens: 160
+          temperature: 0.1
+          top_p: 0.8
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/01_linear/mathqa"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"

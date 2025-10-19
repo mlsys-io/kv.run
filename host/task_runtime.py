@@ -276,6 +276,7 @@ class TaskRuntime:
                 sibling_record.merged_parent_id = task_id
                 sibling_record.assigned_worker = None
                 sibling_record.merge_slice = None
+
         return siblings
 
     def release_merge(self, task_id: str) -> None:
@@ -627,3 +628,17 @@ class TaskRuntime:
     def ready_queue_length(self) -> int:
         with self._cv:
             return len(self._ready_queue)
+
+    def task_status_counts(self) -> Tuple[int, int, int, int]:
+        with self._cv:
+            queueing = len(self._ready_queue)
+            executing = 0
+            done = 0
+            for record in self._tasks.values():
+                status = record.status
+                if status == TaskStatus.DISPATCHED:
+                    executing += 1
+                elif status == TaskStatus.DONE:
+                    done += 1
+            total = len(self._tasks)
+            return queueing, executing, done, total

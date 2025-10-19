@@ -69,7 +69,17 @@ class DPOExecutor(Executor):
             split = data_config.get("split", "train")
             config_name = data_config.get("config_name")
             
-            dataset = load_dataset(dataset_name, config_name, split=split)
+            trust_remote_code = data_config.get("trust_remote_code")
+            if trust_remote_code is None:
+                trust_remote_code = True
+            revision = data_config.get("revision")
+            dataset = load_dataset(
+                dataset_name,
+                config_name,
+                split=split,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+            )
             if data_config.get("max_samples"):
                 dataset = dataset.select(range(min(len(dataset), data_config["max_samples"])))
                 

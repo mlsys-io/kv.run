@@ -152,7 +152,17 @@ class AgentExecutor(Executor):
             split = data.get("split", DEFAULT_DATASET_SPLIT)
             shuffle = bool(data.get("shuffle", False))
 
-            dataset = load_dataset(data_url, name=name, split=split)
+            trust_remote_code = data.get("trust_remote_code")
+            if trust_remote_code is None:
+                trust_remote_code = True
+            revision = data.get("revision")
+            dataset = load_dataset(
+                data_url,
+                name=name,
+                split=split,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+            )
 
             if shuffle:
                 seed = int(data.get("seed", DEFAULT_SHUFFLE_SEED))

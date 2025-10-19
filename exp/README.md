@@ -24,7 +24,7 @@ Top-level templates under `exp/` use two-digit numeric prefixes that mirror the 
 - `exp/11_lora_sft_plus_inference.yaml` — Multi-document template: first train a LoRA adapter (100 samples) then run vLLM inference (200 samples) that merges the emitted adapter archive.
 
 ## Composite Llama-1B Pipelines
-- `exp/composite_llama1b/01_multi_dataset_linear_inference.yaml` — Sequential GSM8K → TruthfulQA → MathQA inference to compare cross-domain behavior.
+- `exp/composite_llama1b/01_multi_dataset_linear_inference.yaml` — Sequential GSM8K → TruthfulQA → MMLU inference to compare cross-domain behavior.
 - `exp/composite_llama1b/02_reasoning_chain_self_check.yaml` — Draft, critique, and rewrite flow that probes GSM8K self-consistency.
 - `exp/composite_llama1b/03_sft_then_inference.yaml` — Lightweight GSM8K SFT with automatic TruthfulQA evaluation using the exported checkpoint.
 - `exp/composite_llama1b/04_lora_then_inference.yaml` — MathQA LoRA adapter training followed by merged-weight GSM8K inference.

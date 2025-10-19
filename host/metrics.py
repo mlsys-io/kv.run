@@ -82,10 +82,7 @@ class MetricsRecorder:
             self.record_worker_event(event)
 
     def record_task_event(self, event: TaskEvent, *, is_child: bool = False) -> None:
-        if is_child or self._is_child_task(event):
-            self._append_event(event)
-            self._write_metrics()
-            return
+        treat_as_child = is_child or self._is_child_task(event)
         with self._lock:
             ev_type = event.type
             if ev_type == "TASK_SUCCEEDED":
@@ -109,6 +106,8 @@ class MetricsRecorder:
             elif ev_type == "TASK_REQUEUED":
                 self._on_task_requeued(meta, event)
 
+            if treat_as_child:
+                meta["is_child_task"] = True
             self._append_event(event)
         self._write_metrics()
 
