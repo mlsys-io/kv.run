@@ -67,6 +67,7 @@ spec:
         data:
           type: "dataset"
           url: "truthfulqa/truthful_qa"
+          name: "generation"
           split: "validation[:150]"
           column: "question"
           shuffle: true
