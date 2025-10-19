@@ -48,8 +48,9 @@ spec:
           top_p: 0.9
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/02_self_check/draft"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
@@ -82,8 +83,9 @@ spec:
           top_p: 0.8
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/02_self_check/review"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
@@ -114,8 +116,9 @@ spec:
           top_p: 0.85
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/02_self_check/final"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"

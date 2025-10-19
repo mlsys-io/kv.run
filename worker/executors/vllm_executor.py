@@ -39,6 +39,7 @@ from .graph_templates import build_prompts_from_graph_template
 from .checkpoint_utils import (
     download_and_unpack,
     detect_archive_format,
+    resolve_checkpoint_load,
     select_extracted_subdir,
 )
 
@@ -109,6 +110,8 @@ class VLLMExecutor(Executor):
 
         adapter_specs = self._extract_adapter_specs(spec)
         vllm_cfg = (spec.get("model") or {}).get("vllm", {}) or {}
+        checkpoint_cfg = ((spec.get("checkpoint") or {}).get("load") or {})
+        load_cfg = ((spec.get("checkpoint") or {}).get("load") or {})
 
         requested_tp = vllm_cfg.get("tensor_parallel_size")
         try:
@@ -117,9 +120,42 @@ class VLLMExecutor(Executor):
             tensor_parallel_size = 0
         if tensor_parallel_size <= 0:
             tensor_parallel_size = max(1, self._detect_available_gpus())
+        if adapter_specs and tensor_parallel_size > 1:
+            logger.info(
+                "LoRA adapters detected; forcing tensor_parallel_size=1 (was %s) to avoid multi-GPU merging.",
+                tensor_parallel_size,
+            )
+            tensor_parallel_size = 1
+
+        local_checkpoint_dir: Optional[Path] = None
+        if checkpoint_cfg:
+            load_cfg_local = dict(checkpoint_cfg)
+            load_cfg_local["_logger"] = logger
+            cfg_type = str(load_cfg_local.get("type", "http")).lower()
+            if cfg_type == "http" and not (
+                load_cfg_local.get("path") or load_cfg_local.get("taskId") or load_cfg_local.get("task_id")
+            ):
+                local_checkpoint_dir = None
+            else:
+                if cfg_type == "http":
+                    load_cfg_local["type"] = "local"
+                try:
+                    candidate = resolve_checkpoint_load(load_cfg_local, Path(tempfile.gettempdir()), logger=logger)
+                    candidate_path = Path(candidate) if candidate else None
+                    if candidate_path and candidate_path.exists() and candidate_path.is_dir():
+                        local_checkpoint_dir = candidate_path
+                        logger.info("Resolved model checkpoint locally: %s", local_checkpoint_dir)
+                except Exception as exc:
+                    logger.debug("Local checkpoint resolution failed: %s", exc)
+                    local_checkpoint_dir = None
+
+        if local_checkpoint_dir is not None:
+            logger.info("Initializing vLLM from local checkpoint directory %s", local_checkpoint_dir)
+        else:
+            logger.info("Initializing vLLM from identifier %s", ident)
 
         kwargs: Dict[str, Any] = dict(
-            model=ident,
+            model=str(local_checkpoint_dir or ident),
             tensor_parallel_size=tensor_parallel_size,
             gpu_memory_utilization=float(vllm_cfg.get("gpu_memory_utilization", 0.9)),
             trust_remote_code=bool(vllm_cfg.get("trust_remote_code", False)),
@@ -568,9 +604,22 @@ class VLLMExecutor(Executor):
 
         if path_value:
             path = Path(str(path_value)).expanduser()
-            if not path.exists():
-                raise ExecutionError(f"LoRA adapter path not found: {path}")
-            return self._ensure_or_extract(path, out_dir, name, archive_format)
+            if path.exists():
+                return self._ensure_or_extract(path, out_dir, name, archive_format)
+
+        task_hint = adapter.get("taskId") or adapter.get("task_id")
+        if task_hint:
+            task_str = str(task_hint).strip()
+            if task_str:
+                base_dir = Path(os.getenv("RESULTS_DIR", "./results_workers")).expanduser().resolve()
+                candidates = [
+                    base_dir / task_str / "final_lora",
+                    base_dir / task_str / "final_model",
+                    base_dir / task_str,
+                ]
+                for candidate in candidates:
+                    if candidate.exists():
+                        return self._ensure_or_extract(candidate, out_dir, name, archive_format)
         # Remote download
         assert url_value is not None
         download_root = out_dir / "_lora_cache" / name
@@ -692,3 +741,4 @@ class VLLMExecutor(Executor):
             raise ExecutionError(
                 f"Unsupported LoRARequest signature for adapter '{name}': {exc}"
             ) from exc
+import tempfile

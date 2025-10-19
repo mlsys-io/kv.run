@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, GenerationConfig
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 
 from .base_executor import Executor, ExecutionError
+from .checkpoint_utils import archive_model_dir, get_http_destination
 
 logger = logging.getLogger("worker.ppo")
 
@@ -55,6 +56,9 @@ class PPOExecutor(Executor):
             }
 
         start_time = time.time()
+
+        final_model_path: Optional[Path] = None
+        final_archive_path: Optional[Path] = None
 
         try:
             # Get model configuration
@@ -460,6 +464,14 @@ class PPOExecutor(Executor):
                     # Prefer save_model to avoid safetensors shared-tensor errors
                     ppo_trainer.save_model(model_save_path)
                     logger.info("Model saved to: %s", model_save_path)
+                    final_model_path = model_save_path
+                    destination = get_http_destination(task)
+                    if destination:
+                        try:
+                            final_archive_path = archive_model_dir(model_save_path)
+                            logger.info("Archived PPO model to %s for HTTP delivery", final_archive_path)
+                        except Exception as arch_exc:
+                            logger.warning("Failed to archive PPO model for upload: %s", arch_exc)
                 except Exception as exc:  # pragma: no cover - best effort save
                     logger.warning("Failed to save model: %s", exc)
 
@@ -489,6 +501,12 @@ class PPOExecutor(Executor):
             "dataset_size": len(dataset),
             "output_dir": str(out_dir),
         }
+        if final_model_path is not None:
+            results["final_model_path"] = str(final_model_path)
+        if final_archive_path is not None:
+            results["final_model_archive"] = final_archive_path.name
+            results["final_model_archive_path"] = str(final_archive_path)
+            self._upload_model_archive(task, final_archive_path, results)
         self.save_json(out_dir / "responses.json", results)
 
         logger.info("PPO training task completed in %.2f seconds", training_time)
@@ -554,6 +572,36 @@ class PPOExecutor(Executor):
             env.get("CUDA_VISIBLE_DEVICES"),
         )
         subprocess.check_call(cmd, env=env)
+
+    def _upload_model_archive(self, task: Dict[str, Any], archive_path: Path, payload: Dict[str, Any]) -> None:
+        destination = get_http_destination(task)
+        task_id = (task or {}).get("task_id")
+        if not destination or not task_id:
+            return
+        upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
+        try:
+            import requests
+
+            file_size = archive_path.stat().st_size if archive_path.exists() else 0
+            with archive_path.open("rb") as fh:
+                files = {"file": (archive_path.name, fh, "application/zip")}
+                headers = {
+                    k: v
+                    for k, v in (destination.get("headers") or {}).items()
+                    if str(k).lower() != "content-type"
+                }
+                response = requests.post(
+                    upload_url,
+                    files=files,
+                    headers=headers,
+                    timeout=destination["timeout"],
+                )
+                response.raise_for_status()
+            download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
+            payload["final_model_archive_url"] = download_url
+            logger.info("Uploaded PPO model archive to %s", upload_url)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("PPO model archive upload failed for %s: %s", task_id, exc)
 
     @staticmethod
     def _detect_gpu_count(training_config: Dict[str, Any]) -> int:

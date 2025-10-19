@@ -1,11 +1,11 @@
-# 使用 LoRA 对 llama 1B 在 MathQA 上做快速适配，并立刻加载合并权重在 GSM8K 上进行推理评估。
+# 使用 LoRA 对 llama 1B 在 GSM8K 上做快速适配，并立刻加载合并权重在 GSM8K 上进行推理评估。
 apiVersion: mloc/v1
 kind: LoRASFTTask
 metadata:
   name: llama1b-lora-transfer-eval
   owner: demo
   annotations:
-    description: "LoRA adaptation on MathQA followed by merged-weight inference on GSM8K"
+    description: "LoRA adaptation on GSM8K followed by merged-weight inference on GSM8K"
 
 spec:
   taskType: "lora_sft"
@@ -41,11 +41,12 @@ spec:
             - "o_proj"
           task_type: "CAUSAL_LM"
         data:
-          dataset_name: "allenai/math_qa"
+          dataset_name: "openai/gsm8k"
+          config_name: "main"
           split: "train[:1%]"
-          prompt_column: "Problem"
-          response_column: "Rationale"
-          separator: "\n\nDetailed rationale: "
+          prompt_column: "question"
+          response_column: "answer"
+          separator: "\n\nReference answer: "
           max_samples: 200
         training:
           num_train_epochs: 1
@@ -63,6 +64,7 @@ spec:
           destination:
             type: "http"
             url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "final_lora"
@@ -74,6 +76,8 @@ spec:
         model:
           adapters:
             - type: "lora"
+              path: "${lora-train.result.final_lora_path}"
+              taskId: "${lora-train.result.task_id}"
               url: "${lora-train.result.final_lora_archive_url}"
               apply: "merge"
         data:
@@ -92,8 +96,9 @@ spec:
           top_p: 0.9
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/04_lora_infer/gsm8k"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"

@@ -79,6 +79,8 @@ spec:
         model:
           adapters:
             - type: "lora"
+              path: "${lora-train.result.final_lora_path}"
+              taskId: "${lora-train.result.task_id}"
               url: "${lora-train.result.final_lora_archive_url}"
               apply: "merge"
           vllm:

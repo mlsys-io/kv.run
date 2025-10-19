@@ -629,16 +629,19 @@ class TaskRuntime:
         with self._cv:
             return len(self._ready_queue)
 
-    def task_status_counts(self) -> Tuple[int, int, int, int]:
+    def task_status_counts(self) -> Tuple[int, int, int, int, int]:
         with self._cv:
             queueing = len(self._ready_queue)
-            executing = 0
+            dispatched = 0
+            pending = 0
             done = 0
-            for record in self._tasks.values():
+            for task_id, record in self._tasks.items():
                 status = record.status
                 if status == TaskStatus.DISPATCHED:
-                    executing += 1
+                    dispatched += 1
                 elif status == TaskStatus.DONE:
                     done += 1
+                elif status == TaskStatus.PENDING and task_id not in self._ready_index:
+                    pending += 1
             total = len(self._tasks)
-            return queueing, executing, done, total
+            return queueing, dispatched, pending, done, total

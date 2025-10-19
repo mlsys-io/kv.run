@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import DPOTrainer, DPOConfig
 
 from .base_executor import Executor, ExecutionError
+from .checkpoint_utils import archive_model_dir, get_http_destination
 
 logger = logging.getLogger("worker.dpo")
 
@@ -132,6 +133,9 @@ class DPOExecutor(Executor):
         start_time = time.time()
         dataset: Optional[Dataset] = None
 
+        final_model_path: Optional[Path] = None
+        final_archive_path: Optional[Path] = None
+
         try:
             model_config = spec.get("model", {})
             model_source = model_config.get("source", {})
@@ -196,6 +200,14 @@ class DPOExecutor(Executor):
                     model_save_path = checkpoint_dir / "final_model"
                     dpo_trainer.save_model(model_save_path)
                     logger.info("Model saved to: %s", model_save_path)
+                    final_model_path = model_save_path
+                    destination = get_http_destination(task)
+                    if destination:
+                        try:
+                            final_archive_path = archive_model_dir(model_save_path)
+                            logger.info("Archived DPO model to %s for HTTP delivery", final_archive_path)
+                        except Exception as arch_exc:
+                            logger.warning("Failed to archive DPO model for upload: %s", arch_exc)
                 except Exception as exc:  # pragma: no cover - best effort save
                     logger.warning("Failed to save model: %s", exc)
 
@@ -208,6 +220,12 @@ class DPOExecutor(Executor):
                 "dataset_size": len(dataset),
                 "output_dir": str(out_dir),
             }
+            if final_model_path is not None:
+                results["final_model_path"] = str(final_model_path)
+            if final_archive_path is not None:
+                results["final_model_archive"] = final_archive_path.name
+                results["final_model_archive_path"] = str(final_archive_path)
+                self._upload_model_archive(task, final_archive_path, results)
             self.save_json(out_dir / "responses.json", results)
             return results
         except Exception as exc:
@@ -223,6 +241,36 @@ class DPOExecutor(Executor):
             self.save_json(out_dir / "responses.json", results)
             logger.exception("DPO training failed: %s", exc)
             raise ExecutionError(results["error_message"] or "DPO training failed") from exc
+
+    def _upload_model_archive(self, task: Dict[str, Any], archive_path: Path, payload: Dict[str, Any]) -> None:
+        destination = get_http_destination(task)
+        task_id = (task or {}).get("task_id")
+        if not destination or not task_id:
+            return
+        upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
+        try:
+            import requests
+
+            file_size = archive_path.stat().st_size if archive_path.exists() else 0
+            with archive_path.open("rb") as fh:
+                files = {"file": (archive_path.name, fh, "application/zip")}
+                headers = {
+                    k: v
+                    for k, v in (destination.get("headers") or {}).items()
+                    if str(k).lower() != "content-type"
+                }
+                response = requests.post(
+                    upload_url,
+                    files=files,
+                    headers=headers,
+                    timeout=destination["timeout"],
+                )
+                response.raise_for_status()
+            download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
+            payload["final_model_archive_url"] = download_url
+            logger.info("Uploaded DPO model archive to %s", upload_url)
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.warning("DPO model archive upload failed for %s: %s", task_id, exc)
 
     def _spawn_distributed(
         self,

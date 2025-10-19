@@ -17,7 +17,11 @@ from trl import SFTConfig
 from transformers import Trainer
 
 from .base_executor import Executor, ExecutionError
-from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
+from .checkpoint_utils import (
+    archive_model_dir,
+    determine_resume_path,
+    get_http_destination,
+)
 from .sft_executor import SFTExecutor
 
 try:
@@ -79,7 +83,7 @@ class LoRASFTExecutor(Executor):
             model.config.use_cache = False
             self._current_model = model
 
-            resume_path = determine_resume_path(spec, training_cfg, out_dir)
+            resume_path = determine_resume_path(spec, training_cfg, out_dir, logger=logger)
             resume_str = str(resume_path) if resume_path else None
 
             if bool(training_cfg.get("gradient_checkpointing", False)):
@@ -91,7 +95,7 @@ class LoRASFTExecutor(Executor):
             deepspeed_config = SFTExecutor._resolve_deepspeed_config(training_cfg, logger)
 
             if resume_path:
-                logger.info("Resuming LoRA training from %s", resume_path)
+                logger.info("Resuming LoRA training from local checkpoint %s", resume_path)
                 model = PeftModel.from_pretrained(
                     model,
                     str(resume_path),
@@ -99,6 +103,7 @@ class LoRASFTExecutor(Executor):
                 )
                 logger.info("Loaded existing LoRA adapters; continuing fine-tuning")
             else:
+                logger.info("No existing LoRA adapters detected; starting from base model")
                 lora_target_modules = lora_cfg.get("target_modules") or ["q_proj", "k_proj", "v_proj", "o_proj"]
                 if not isinstance(lora_target_modules, (list, tuple)):
                     raise ValueError("lora.target_modules must be a list of module names")
@@ -269,9 +274,27 @@ class LoRASFTExecutor(Executor):
         self._current_model = None
         try:
             import torch
+            dist = getattr(torch, "distributed", None)
+            if dist is not None:
+                try:
+                    if dist.is_available() and dist.is_initialized():
+                        dist.destroy_process_group()
+                        logger.debug("Destroyed torch distributed process group during cleanup")
+                except Exception:
+                    logger.debug("Failed to destroy torch distributed process group", exc_info=True)
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    logger.debug("torch.cuda.ipc_collect failed", exc_info=True)
+                if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                    try:
+                        for idx in range(torch.cuda.device_count()):
+                            torch.cuda.reset_peak_memory_stats(idx)
+                    except Exception:
+                        logger.debug("Failed to reset CUDA peak memory stats", exc_info=True)
         except Exception:
             pass
         gc.collect()
@@ -291,6 +314,7 @@ class LoRASFTExecutor(Executor):
         try:
             import requests
 
+            file_size = archive_path.stat().st_size if archive_path.exists() else 0
             with archive_path.open("rb") as fh:
                 files = {"file": (archive_path.name, fh, "application/zip")}
                 headers = {

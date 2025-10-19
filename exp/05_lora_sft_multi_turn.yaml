@@ -79,6 +79,8 @@ spec:
         checkpoint:
           load:
             type: "http"
+            path: "${tutor-first-turn.result.final_lora_path}"
+            taskId: "${tutor-first-turn.result.task_id}"
             url: "${tutor-first-turn.result.final_lora_archive_url}"
 
         data:

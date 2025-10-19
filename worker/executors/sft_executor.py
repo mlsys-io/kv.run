@@ -23,7 +23,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
 
 from .base_executor import Executor, ExecutionError
-from .checkpoint_utils import archive_model_dir, determine_resume_path, get_http_destination
+from .checkpoint_utils import (
+    archive_model_dir,
+    determine_resume_path,
+    get_http_destination,
+)
 
 logger = logging.getLogger("worker.sft")
 
@@ -32,6 +36,8 @@ class SFTExecutor(Executor):
         self._model_name: Optional[str] = None
         self._current_model: Optional[Any] = None
         self._current_trainer: Optional[Any] = None
+        self._current_tokenizer: Optional[Any] = None
+        self._final_model_dir: Optional[Path] = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         spec = (task or {}).get("spec") or {}
@@ -144,11 +150,15 @@ class SFTExecutor(Executor):
             model_source = model_cfg.get("source", {}) or {}
             self._model_name = model_source.get("identifier", "gpt2")
 
-            resume_path = determine_resume_path(spec, training_cfg, out_dir)
+            resume_path = determine_resume_path(spec, training_cfg, out_dir, logger=logger)
             resume_str = str(resume_path) if resume_path else None
 
-            logger.info("Loading tokenizer and model: %s (resume=%s)", self._model_name, bool(resume_path))
+            if resume_path:
+                logger.info("Loading tokenizer and model from local checkpoint: %s", resume_path)
+            else:
+                logger.info("Loading tokenizer and model from identifier: %s", self._model_name)
             tokenizer = AutoTokenizer.from_pretrained(resume_str or self._model_name, use_fast=True)
+            self._current_tokenizer = tokenizer
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
             if getattr(tokenizer, "padding_side", None) != "right":
@@ -307,11 +317,23 @@ class SFTExecutor(Executor):
             }
 
             if final_model_path is not None:
+                resolved_model_path = Path(final_model_path)
+                self._final_model_dir = resolved_model_path if resolved_model_path.exists() else None
                 result_payload["final_model_path"] = str(final_model_path)
                 if final_archive_path is not None:
                     result_payload["final_model_archive"] = final_archive_path.name
                     result_payload["final_model_archive_path"] = str(final_archive_path)
                     self._upload_model_archive(task, final_archive_path, result_payload)
+
+            # Drop heavy references before runner-level cleanup
+            trainer = None
+            model = None
+            tokenizer = None
+            train_dataset = None
+            self._current_trainer = None
+            self._current_model = None
+            self._current_tokenizer = None
+            self._final_model_dir = None
 
             return result_payload
 
@@ -320,6 +342,14 @@ class SFTExecutor(Executor):
             training_successful = False
             caught_exc = exc
             logger.exception("SFT training failed: %s", exc)
+            trainer = None
+            model = None
+            tokenizer = None
+            train_dataset = None
+            self._current_trainer = None
+            self._current_model = None
+            self._current_tokenizer = None
+            self._final_model_dir = None
 
         training_time = time.time() - start_time
         result = {
@@ -328,7 +358,7 @@ class SFTExecutor(Executor):
             "training_time_seconds": training_time,
             "error_message": error_msg,
             "model_name": self._model_name,
-            "dataset_size": len(train_dataset) if "train_dataset" in locals() else 0,
+            "dataset_size": len(train_dataset) if "train_dataset" in locals() and train_dataset is not None else 0,
             "output_dir": str(out_dir),
             "checkpoints_dir": str(checkpoint_dir),
             "resume_from_path": str(resume_path) if 'resume_path' in locals() and resume_path else None,
@@ -339,13 +369,39 @@ class SFTExecutor(Executor):
         raise ExecutionError(error_msg or "SFT training failed")
 
     def cleanup_after_run(self) -> None:
-        self._current_trainer = None
-        self._current_model = None
+        dropped_objects = []
+        for attr in ("_current_trainer", "_current_model", "_current_tokenizer", "_final_model_dir"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                dropped_objects.append(obj)
+            setattr(self, attr, None)
+        for obj in dropped_objects:
+            try:
+                del obj
+            except Exception:
+                pass
         try:
             import torch
-
+            dist = getattr(torch, "distributed", None)
+            if dist is not None:
+                try:
+                    if dist.is_available() and dist.is_initialized():
+                        dist.destroy_process_group()
+                        logger.debug("Destroyed torch distributed process group during cleanup")
+                except Exception:
+                    logger.debug("Failed to destroy torch distributed process group", exc_info=True)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    logger.debug("torch.cuda.ipc_collect failed", exc_info=True)
+                if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                    try:
+                        for idx in range(torch.cuda.device_count()):
+                            torch.cuda.reset_peak_memory_stats(idx)
+                    except Exception:
+                        logger.debug("Failed to reset CUDA peak memory stats", exc_info=True)
         except Exception:
             pass
         gc.collect()
@@ -358,6 +414,7 @@ class SFTExecutor(Executor):
         upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
         try:
             import requests
+            file_size = archive_path.stat().st_size if archive_path.exists() else 0
             with archive_path.open("rb") as fh:
                 files = {"file": (archive_path.name, fh, "application/zip")}
                 headers = {

@@ -6,7 +6,6 @@ import urllib.error
 import urllib.request
 import zipfile
 import os
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -17,12 +16,14 @@ def determine_resume_path(
     spec: Dict[str, Any],
     training_cfg: Dict[str, Any],
     out_dir: Path,
+    *,
+    logger=None,
 ) -> Optional[Path]:
     checkpoint_cfg = (spec or {}).get("checkpoint") or {}
     load_cfg = checkpoint_cfg.get("load") or {}
 
     if load_cfg:
-        return resolve_checkpoint_load(load_cfg, out_dir)
+        return resolve_checkpoint_load(load_cfg, out_dir, logger=logger)
 
     resume_from = training_cfg.get("resume_from_path")
     if resume_from:
@@ -33,8 +34,37 @@ def determine_resume_path(
     return None
 
 
-def resolve_checkpoint_load(load_cfg: Dict[str, Any], out_dir: Path) -> Path:
+def resolve_checkpoint_load(load_cfg: Dict[str, Any], out_dir: Path, *, logger=None) -> Path:
     source_type = str(load_cfg.get("type", "local")).lower()
+    # Local path hint (works for any source type)
+    hinted_path = load_cfg.get("path")
+    if hinted_path:
+        resolved = Path(str(hinted_path)).expanduser()
+        if resolved.exists():
+            log = logger or load_cfg.get("_logger")
+            if log:
+                log.info("Resolved checkpoint from local path: %s", resolved)
+            return resolved
+
+    task_hint = load_cfg.get("taskId") or load_cfg.get("task_id")
+    if task_hint:
+        task_str = str(task_hint).strip()
+        if task_str:
+            base_dir = Path(os.getenv("RESULTS_DIR", "./results_workers")).expanduser().resolve()
+            guesses = [
+                base_dir / task_str / "final_model",
+                base_dir / task_str / "final_model.bin",
+                base_dir / task_str / "final_model.safetensors",
+                base_dir / task_str / "final_model.pt",
+                base_dir / task_str,
+            ]
+            for candidate in guesses:
+                if candidate.exists():
+                    log = logger or load_cfg.get("_logger")
+                    if log:
+                        log.info("Resolved checkpoint from local task cache: %s", candidate)
+                    return candidate
+
     if source_type == "local":
         local_path = load_cfg.get("path") or load_cfg.get("uri")
         if not local_path:
@@ -42,6 +72,9 @@ def resolve_checkpoint_load(load_cfg: Dict[str, Any], out_dir: Path) -> Path:
         resolved = Path(str(local_path)).expanduser()
         if not resolved.exists():
             raise ExecutionError(f"Checkpoint path {resolved} not found")
+        log = logger or load_cfg.get("_logger")
+        if log:
+            log.info("Using local checkpoint path: %s", resolved)
         return resolved
 
     if source_type == "http":
@@ -62,6 +95,9 @@ def resolve_checkpoint_load(load_cfg: Dict[str, Any], out_dir: Path) -> Path:
                 raise ExecutionError(
                     "checkpoint.load.url is required for HTTP checkpoints (set base_url or ORCHESTRATOR_BASE_URL)"
                 )
+        log = logger or load_cfg.get("_logger")
+        if log:
+            log.info("Downloading checkpoint from %s", load_cfg.get("url"))
         return download_and_unpack(load_cfg, out_dir)
 
     raise ExecutionError(f"Unsupported checkpoint load type '{source_type}'")

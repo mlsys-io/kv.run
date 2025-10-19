@@ -237,13 +237,16 @@ def _handle_task_event(event: TaskEvent) -> None:
     elif event_type == "TASK_SUCCEEDED":
         ready_children, merged_children = RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
         try:
-            queueing, executing, completed, total = RUNTIME.task_status_counts()
+            queueing, dispatched, pending, done, total = RUNTIME.task_status_counts()
             summary = (
-                f"queueing {queueing}, executing {executing}, completed {completed}, "
-                f"total {total}"
+                f"QUEUEING {queueing}, DISPATCHED {dispatched}, PENDING {pending}, "
+                f"DONE {done}, TOTAL {total}"
             )
         except Exception:
-            summary = "queueing unknown, executing unknown, completed unknown, total unknown"
+            summary = (
+                "QUEUEING UNKNOWN, DISPATCHED UNKNOWN, PENDING UNKNOWN, "
+                "DONE UNKNOWN, TOTAL UNKNOWN"
+            )
         logger.info("Task %s completed; %s", event.task_id, summary)
         if merged_children:
             for child_id in merged_children:

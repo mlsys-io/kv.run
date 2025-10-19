@@ -60,8 +60,8 @@ spec:
           do_sample: true
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/06_ppo/ppo_train"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
           artifacts:
             - "responses.json"
             - "checkpoints"
@@ -92,8 +92,9 @@ spec:
           top_p: 0.85
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/06_ppo/eval_notes"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
@@ -116,8 +117,9 @@ spec:
           top_p: 0.9
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/06_ppo/mtbench"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"

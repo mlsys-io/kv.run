@@ -69,17 +69,24 @@ spec:
     - name: truthfulqa-inference
       spec:
         taskType: "inference"
+        model:
+          vllm:
+            gpu_memory_utilization: 0.45
+            release_after_run: true
         checkpoint:
           load:
             type: "http"
+            path: "${sft-train.result.final_model_path}"
+            taskId: "${sft-train.result.task_id}"
             url: "${sft-train.result.final_model_archive_url}"
         data:
           type: "dataset"
-          url: "truthfulqa/truthful_qa"
-          split: "validation[:150]"
+          url: "openai/gsm8k"
+          name: "main"
+          split: "train[:200]"
           column: "question"
           shuffle: true
-          seed: 97
+          seed: 11
         inference:
           system_prompt: |
             Use the fine-tuned tutor style to answer factually and explicitly mark uncertainty when unsure.
@@ -88,8 +95,9 @@ spec:
           top_p: 0.85
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/03_sft_infer/truthfulqa"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"

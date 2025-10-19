@@ -47,8 +47,8 @@ spec:
           save_freq: 200
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/05_dpo/dpo_align"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
           artifacts:
             - "responses.json"
             - "checkpoints"
@@ -80,8 +80,9 @@ spec:
           top_p: 0.85
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/05_dpo/eval_plan"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
@@ -104,8 +105,9 @@ spec:
           top_p: 0.85
         output:
           destination:
-            type: "local"
-            path: "./runs/composite_llama1b/05_dpo/truthfulqa"
+            type: "http"
+            url: "http://localhost:8000/api/v1/results"
+            timeoutSec: 30
           artifacts:
             - "responses.json"
             - "logs"
