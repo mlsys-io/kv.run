@@ -62,27 +62,75 @@ class DPOExecutor(Executor):
     def _load_dataset(self, spec: Dict[str, Any]) -> Dataset:
         """Load training dataset in DPO format"""
         data_config = spec.get("data", {})
-        
+
         if "dataset_name" in data_config:
             # Load from Hugging Face datasets (like ultrafeedback_binarized)
             from datasets import load_dataset
             dataset_name = data_config["dataset_name"]
             split = data_config.get("split", "train")
+
             config_name = data_config.get("config_name")
-            
-            trust_remote_code = data_config.get("trust_remote_code")
-            if trust_remote_code is None:
-                trust_remote_code = True
             revision = data_config.get("revision")
-            dataset = load_dataset(
-                dataset_name,
-                config_name,
-                split=split,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-            )
+            load_kwargs: Dict[str, Any] = {"split": split}
+            if config_name:
+                load_kwargs["name"] = config_name
+            if revision:
+                load_kwargs["revision"] = revision
+
+            try:
+                dataset = load_dataset(dataset_name, **load_kwargs)
+            except ValueError as exc:
+                if config_name and "BuilderConfig" in str(exc):
+                    logger.warning(
+                        "Dataset %s config %s not found (split=%s). Attempting fallback.",
+                        dataset_name,
+                        config_name,
+                        split,
+                    )
+                    # Fallback 1: remove config and retry
+                    load_kwargs.pop("name", None)
+                    fallback_split = split
+                    prefix = split.split("[", 1)[0]
+                    if dataset_name == "HuggingFaceH4/ultrafeedback_binarized" and config_name and prefix != config_name:
+                        fallback_split = split.replace(prefix, config_name, 1)
+                    load_kwargs["split"] = fallback_split
+                    dataset = load_dataset(dataset_name, **load_kwargs)
+                else:
+                    raise
+
             if data_config.get("max_samples"):
                 dataset = dataset.select(range(min(len(dataset), data_config["max_samples"])))
+
+            prompt_col = data_config.get("prompt_column", "prompt")
+            chosen_col = data_config.get("chosen_column", "chosen")
+            rejected_col = data_config.get("rejected_column", "rejected")
+
+            required_source_columns = {prompt_col, chosen_col, rejected_col}
+            missing_columns = required_source_columns - set(dataset.column_names)
+            if missing_columns:
+                raise ExecutionError(
+                    f"Dataset {dataset_name} missing required columns: {sorted(missing_columns)}"
+                )
+
+            rename_map = {}
+            if prompt_col != "prompt":
+                rename_map[prompt_col] = "prompt"
+            if chosen_col != "chosen":
+                rename_map[chosen_col] = "chosen"
+            if rejected_col != "rejected":
+                rename_map[rejected_col] = "rejected"
+
+            for old_name, new_name in rename_map.items():
+                dataset = dataset.rename_column(old_name, new_name)
+
+            extra_columns = set(dataset.column_names) - {"prompt", "chosen", "rejected"}
+            if extra_columns:
+                logger.info(
+                    "Removing unused columns from dataset %s: %s",
+                    dataset_name,
+                    ", ".join(sorted(extra_columns)),
+                )
+                dataset = dataset.remove_columns(sorted(extra_columns))
                 
         elif "preferences" in data_config:
             # Use provided preference data directly
