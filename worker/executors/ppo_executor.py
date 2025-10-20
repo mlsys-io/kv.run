@@ -10,17 +10,192 @@ import os
 import subprocess
 import time
 import logging
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import torch
 from datasets import Dataset
-from transformers import AutoTokenizer, GenerationConfig
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, GenerationConfig
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 
 from .base_executor import Executor, ExecutionError
 from .checkpoint_utils import archive_model_dir, get_http_destination
 
 logger = logging.getLogger("worker.ppo")
+
+
+class _ExternalRewardModel(torch.nn.Module):
+    """Wraps a sequence classification model to score decoded PPO responses."""
+
+    def __init__(self, reward_cfg: Dict[str, Any], policy_tokenizer: AutoTokenizer):
+        super().__init__()
+        identifier = reward_cfg.get("identifier")
+        if not identifier:
+            raise ValueError("reward_model.identifier is required for external reward models")
+
+        self.policy_tokenizer = policy_tokenizer
+        self.reward_tokenizer = AutoTokenizer.from_pretrained(identifier)
+        self.reward_model = AutoModelForSequenceClassification.from_pretrained(identifier)
+        for param in self.reward_model.parameters():
+            param.requires_grad_(False)
+        self.reward_model.eval()
+
+        self.reward_type = str(reward_cfg.get("type", "classification")).lower()
+        self.scale = float(reward_cfg.get("scale", 1.0))
+        self.max_length = int(
+            reward_cfg.get(
+                "max_length",
+                min(getattr(self.reward_tokenizer, "model_max_length", 512) or 512, 512),
+            )
+        )
+        self.positive_label = reward_cfg.get("positive_label")
+        self.negative_label = reward_cfg.get("negative_label")
+
+        id2label = getattr(self.reward_model.config, "id2label", {}) or {}
+        self._id2label = {int(k): str(v) for k, v in id2label.items()}
+        self._label2id = {v.lower(): k for k, v in self._id2label.items()}
+
+    def forward(self, *args, **kwargs):
+        raise RuntimeError("External reward model is only used via compute_reward_from_tokens.")
+
+    def compute_reward_from_tokens(
+        self,
+        query_responses: torch.Tensor,
+        pad_token_id: int,
+        context_length: int,
+    ):
+        device = query_responses.device
+        batch_size, seq_len = query_responses.shape
+
+        response_texts = []
+        for sample in query_responses:
+            response_tokens = sample[context_length:]
+            if pad_token_id is not None:
+                response_tokens = response_tokens[response_tokens != pad_token_id]
+            text = self.policy_tokenizer.decode(
+                response_tokens,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            ).strip()
+            response_texts.append(text)
+
+        reward_scores = self._score_texts(response_texts).to(device)
+
+        reward_logits = reward_scores.view(batch_size, 1, 1).expand(batch_size, seq_len, 1).contiguous()
+        non_pad = (query_responses != pad_token_id).int()
+        sequence_lengths = non_pad.sum(dim=1) - 1
+        sequence_lengths = torch.clamp(sequence_lengths, min=0)
+
+        return reward_logits, reward_scores, sequence_lengths
+
+    def _score_texts(self, texts):
+        model_device = next(self.reward_model.parameters()).device
+        if not texts:
+            return torch.zeros(0, dtype=torch.float32, device=model_device)
+
+        encoded = self.reward_tokenizer(
+            list(texts),
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        encoded = {key: value.to(model_device) for key, value in encoded.items()}
+        with torch.no_grad():
+            outputs = self.reward_model(**encoded)
+            logits = outputs.logits.float()
+
+        if logits.shape[-1] == 1:
+            rewards = logits.squeeze(-1)
+        else:
+            if self.reward_type == "sentiment":
+                pos_idx = self._resolve_label(self.positive_label, "positive")
+                neg_idx = self._resolve_label(self.negative_label, "negative")
+                pos_score = logits[:, pos_idx] if pos_idx is not None else logits.max(dim=-1).values
+                neg_score = logits[:, neg_idx] if neg_idx is not None else torch.zeros_like(pos_score)
+                rewards = pos_score - neg_score
+            else:
+                label_idx = self._resolve_label(self.positive_label, None)
+                rewards = logits[:, label_idx] if label_idx is not None else logits.max(dim=-1).values
+
+        return rewards.float().to(model_device) * self.scale
+
+    def _resolve_label(self, label, fallback_keyword: Optional[str]) -> Optional[int]:
+        if label is None and fallback_keyword:
+            return next((idx for idx, name in self._id2label.items() if fallback_keyword in name.lower()), None)
+
+        if label is None:
+            return None
+
+        if isinstance(label, int):
+            return label if label in self._id2label else None
+
+        key = str(label).lower()
+        if key in self._label2id:
+            return self._label2id[key]
+        return None
+
+
+@contextmanager
+def _patched_reward_dispatch():
+    from trl.trainer import utils as trl_utils
+
+    original_get_reward = trl_utils.get_reward
+
+    def _wrapped_get_reward(model, query_responses, pad_token_id, context_length):
+        if hasattr(model, "compute_reward_from_tokens"):
+            return model.compute_reward_from_tokens(query_responses, pad_token_id, context_length)
+        return original_get_reward(model, query_responses, pad_token_id, context_length)
+
+    trl_utils.get_reward = _wrapped_get_reward
+    try:
+        yield
+    finally:
+        trl_utils.get_reward = original_get_reward
+
+
+class _RewardAdapter(torch.nn.Module):
+    """Fallback reward adapter that reuses the policy value head."""
+
+    def __init__(self, value_head_model: torch.nn.Module):
+        super().__init__()
+        self._lm = value_head_model
+        head = getattr(value_head_model, "v_head", None) or getattr(value_head_model, "value_head", None)
+        if head is None:
+            hidden = None
+            try:
+                hidden = getattr(value_head_model.config, "hidden_size", None)
+            except Exception:
+                pass
+            if hidden is None:
+                try:
+                    if hasattr(value_head_model, "base_model_prefix") and hasattr(
+                        value_head_model, value_head_model.base_model_prefix
+                    ):
+                        backbone = getattr(value_head_model, value_head_model.base_model_prefix)
+                        hidden = getattr(getattr(backbone, "config", None), "hidden_size", None)
+                except Exception:
+                    pass
+            if hidden is None:
+                raise AttributeError("Cannot infer hidden_size for reward head")
+            head = torch.nn.Linear(int(hidden), 1, bias=False)
+        self.v_head = head
+        self.base_model_prefix = getattr(value_head_model, "base_model_prefix", "model")
+        if hasattr(value_head_model, self.base_model_prefix):
+            setattr(self, self.base_model_prefix, getattr(value_head_model, self.base_model_prefix))
+        for attr in ("config", "generation_config"):
+            if hasattr(value_head_model, attr):
+                setattr(self, attr, getattr(value_head_model, attr))
+
+    def score(self, hidden_states):
+        return self.v_head(hidden_states)
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.__dict__.get("_lm", object()), name)
 
 
 class PPOExecutor(Executor):
@@ -262,6 +437,15 @@ class PPOExecutor(Executor):
                 keys = f0.keys()
                 return {k: [f[k] for f in features] for k in keys}
 
+            reward_module, reward_is_external, reward_ctx = self._prepare_reward_model(
+                spec,
+                tokenizer,
+                model,
+                ref_model,
+            )
+            if hasattr(reward_module, "eval"):
+                reward_module.eval()
+
             logger.info("Creating PPOConfig...")
             # Optional args to control saving behavior and memory
             ppo_optional = {}
@@ -286,66 +470,6 @@ class PPOExecutor(Executor):
             # introspection to build arguments positionally/with kwargs to fit.
             import inspect
 
-            # Build a lightweight reward adapter expected by TRL 0.23 (needs .score)
-            import torch
-            class _RewardAdapter(torch.nn.Module):
-                def __init__(self, value_head_model):
-                    super().__init__()
-                    # Keep reference to underlying LM/value-head model for delegation
-                    self._lm = value_head_model
-                    head = getattr(value_head_model, "v_head", None)
-                    if head is None:
-                        # Try common alternatives or construct a linear head
-                        head = getattr(value_head_model, "value_head", None)
-                    if head is None:
-                        hidden = None
-                        try:
-                            hidden = getattr(value_head_model.config, "hidden_size", None)
-                        except Exception:
-                            pass
-                        if hidden is None:
-                            # Try backbone config
-                            try:
-                                if hasattr(value_head_model, "base_model_prefix") and hasattr(value_head_model, value_head_model.base_model_prefix):
-                                    backbone = getattr(value_head_model, value_head_model.base_model_prefix)
-                                    hidden = getattr(getattr(backbone, "config", None), "hidden_size", None)
-                            except Exception:
-                                pass
-                        if hidden is None:
-                            raise AttributeError("Cannot infer hidden_size for reward head")
-                        head = torch.nn.Linear(int(hidden), 1, bias=False)
-                    self.v_head = head
-                    # Mirror key attributes expected by TRL utils
-                    self.base_model_prefix = getattr(value_head_model, "base_model_prefix", "model")
-                    if hasattr(value_head_model, self.base_model_prefix):
-                        setattr(self, self.base_model_prefix, getattr(value_head_model, self.base_model_prefix))
-                    for attr in ("config", "generation_config"):
-                        if hasattr(value_head_model, attr):
-                            setattr(self, attr, getattr(value_head_model, attr))
-                def score(self, hidden_states):
-                    return self.v_head(hidden_states)
-                def __getattr__(self, name):
-                    try:
-                        return super().__getattr__(name)
-                    except AttributeError:
-                        return getattr(self.__dict__.get("_lm", object()), name)
-
-            reward_adapter = _RewardAdapter(model)
-            # Attach .score to underlying models too, in case TRL bypasses reward_model
-            try:
-                import types as _types_mod
-                def _score_impl(self, hidden_states):
-                    head = getattr(self, "v_head", None) or getattr(self, "value_head", None)
-                    if head is None:
-                        raise AttributeError("Model lacks v_head/value_head for reward scoring")
-                    return head(hidden_states)
-                if not hasattr(model, "score"):
-                    model.score = _types_mod.MethodType(_score_impl, model)
-                if not hasattr(ref_model, "score"):
-                    ref_model.score = _types_mod.MethodType(_score_impl, ref_model)
-            except Exception:
-                pass
-
             def build_trainer() -> PPOTrainer:
                 sig = inspect.signature(PPOTrainer.__init__)
                 params = list(sig.parameters.values())[1:]  # drop self
@@ -356,7 +480,7 @@ class PPOExecutor(Executor):
                     "ppo_config": ppo_config,
                     "processing_class": tokenizer,
                     "tokenizer": tokenizer,
-                    "reward_model": reward_adapter,
+                    "reward_model": reward_module,
                     "value_model": model,
                     "model": model,
                     "ref_model": ref_model,
@@ -427,30 +551,19 @@ class PPOExecutor(Executor):
                             pass
             except Exception:
                 pass
-            # Ensure TRL uses our reward adapter (with .score) even if constructor
-            # variant didn't bind it as expected.
             try:
                 if hasattr(ppo_trainer, "reward_model"):
-                    # Move adapter to same device as policy/value if possible
-                    try:
-                        import torch
-                        dev = None
-                        if hasattr(model, "device"):
-                            dev = model.device
-                        elif hasattr(model, "parameters"):
-                            dev = next(model.parameters()).device
-                        if dev is not None and isinstance(reward_adapter, torch.nn.Module):
-                            reward_adapter.to(dev)
-                    except Exception:
-                        pass
-                    ppo_trainer.reward_model = reward_adapter
+                    ppo_trainer.reward_model = reward_module
             except Exception:
                 pass
             logger.info("PPOTrainer created successfully")
 
-            # Simple training - just call train()
+            if reward_is_external:
+                logger.info("External reward model enabled for PPO training")
+
             logger.info("Starting PPO training...")
-            ppo_trainer.train()
+            with reward_ctx:
+                ppo_trainer.train()
             logger.info("PPO training completed")
 
             training_successful = True
@@ -534,6 +647,57 @@ class PPOExecutor(Executor):
             dataset = Dataset.from_dict(dataset_dict)
 
         return dataset
+
+    def _prepare_reward_model(
+        self,
+        spec: Dict[str, Any],
+        tokenizer: AutoTokenizer,
+        value_model: AutoModelForCausalLMWithValueHead,
+        ref_model: AutoModelForCausalLMWithValueHead,
+    ):
+        reward_cfg = (spec or {}).get("reward_model") or {}
+        if reward_cfg:
+            identifier = reward_cfg.get("identifier")
+            try:
+                external_model = _ExternalRewardModel(reward_cfg, tokenizer)
+                logger.info(
+                    "Using external reward model '%s' (type=%s)",
+                    identifier,
+                    external_model.reward_type,
+                )
+                return external_model, True, _patched_reward_dispatch()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to initialize reward model '%s' (type=%s); falling back to value-head rewards. Error: %s",
+                    identifier,
+                    reward_cfg.get("type"),
+                    exc,
+                )
+        reward_adapter = _RewardAdapter(value_model)
+        self._ensure_value_head_score(value_model, ref_model)
+        return reward_adapter, False, nullcontext()
+
+    @staticmethod
+    def _ensure_value_head_score(
+        value_model: AutoModelForCausalLMWithValueHead,
+        ref_model: Optional[AutoModelForCausalLMWithValueHead],
+    ) -> None:
+        import types
+
+        def _score_impl(self, hidden_states):
+            head = getattr(self, "v_head", None) or getattr(self, "value_head", None)
+            if head is None:
+                raise AttributeError("Model lacks v_head/value_head for reward scoring")
+            return head(hidden_states)
+
+        for target in (value_model, ref_model):
+            if target is None:
+                continue
+            if not hasattr(target, "score"):
+                try:
+                    target.score = types.MethodType(_score_impl, target)
+                except Exception:
+                    pass
 
     def _spawn_distributed(
         self,

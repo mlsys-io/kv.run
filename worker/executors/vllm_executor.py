@@ -92,6 +92,36 @@ class VLLMExecutor(Executor):
             pass
         return 1
 
+    @staticmethod
+    def _compute_safe_utilization(requested: float) -> Tuple[float, Optional[float]]:
+        if torch is None or not torch.cuda.is_available():
+            return requested, None
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        except Exception:
+            return requested, None
+        if total_bytes <= 0:
+            return requested, None
+        free_ratio = float(free_bytes) / float(total_bytes)
+        safety_margin = 0.05  # keep at least 5% headroom
+        min_util_floor = 0.30
+        max_util = free_ratio - safety_margin
+        max_util = min(0.98, max_util)
+        adjusted = requested
+        if max_util <= 0:
+            adjusted = max(min_util_floor, requested * 0.8)
+        else:
+            adjusted = min(requested, max_util)
+            if adjusted < min_util_floor and max_util >= min_util_floor:
+                adjusted = min_util_floor
+            elif adjusted <= 0:
+                adjusted = max(min_util_floor, max_util * 0.8)
+        return adjusted, free_ratio
+
     # --------------------------------------------------------------------- #
     # Lifecycle
     # --------------------------------------------------------------------- #
@@ -154,10 +184,29 @@ class VLLMExecutor(Executor):
         else:
             logger.info("Initializing vLLM from identifier %s", ident)
 
+        requested_util = float(vllm_cfg.get("gpu_memory_utilization", 0.9))
+        safe_util, free_ratio = self._compute_safe_utilization(requested_util)
+        if safe_util < requested_util - 1e-3:
+            if free_ratio is not None:
+                logger.warning(
+                    "Requested gpu_memory_utilization=%.3f but only %.2f%% of GPU memory is free; "
+                    "reducing utilization to %.3f",
+                    requested_util,
+                    free_ratio * 100.0,
+                    safe_util,
+                )
+            else:
+                logger.warning(
+                    "Requested gpu_memory_utilization=%.3f but available GPU memory is constrained; "
+                    "reducing utilization to %.3f",
+                    requested_util,
+                    safe_util,
+                )
+
         kwargs: Dict[str, Any] = dict(
             model=str(local_checkpoint_dir or ident),
             tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=float(vllm_cfg.get("gpu_memory_utilization", 0.9)),
+            gpu_memory_utilization=safe_util,
             trust_remote_code=bool(vllm_cfg.get("trust_remote_code", False)),
         )
         # Per vLLM docs: enable LoRA at init time when using per-request adapters
@@ -172,16 +221,65 @@ class VLLMExecutor(Executor):
         self._release_llm_after_run = bool(vllm_cfg.get("release_after_run", True))
 
         self._llm_kwargs = dict(kwargs)
-        try:
-            self._llm = LLM(**kwargs)  # type: ignore[call-arg]
-        except TypeError as exc:
-            # Some older builds don't accept enable_lora
-            if "enable_lora" in kwargs:
-                kwargs.pop("enable_lora", None)
-                self._llm_kwargs = dict(kwargs)
+        tried_utils = set()
+        util_candidates = [safe_util]
+        for delta in (0.05, 0.1):
+            candidate = max(0.5, safe_util - delta)
+            if candidate < util_candidates[-1] - 1e-3:
+                util_candidates.append(candidate)
+
+        last_exc: Optional[Exception] = None
+        for util in util_candidates:
+            if util in tried_utils:
+                continue
+            tried_utils.add(util)
+            kwargs["gpu_memory_utilization"] = util
+            self._llm_kwargs = dict(kwargs)
+            logger.info(
+                "Initializing vLLM (attempt %d/%d) with gpu_memory_utilization=%.3f",
+                len(tried_utils),
+                len(util_candidates),
+                util,
+            )
+            try:
                 self._llm = LLM(**kwargs)  # type: ignore[call-arg]
-            else:
-                raise
+                break
+            except TypeError as exc:
+                if "enable_lora" in kwargs:
+                    kwargs.pop("enable_lora", None)
+                    self._llm_kwargs = dict(kwargs)
+                    try:
+                        self._llm = LLM(**kwargs)  # type: ignore[call-arg]
+                        break
+                    except Exception as inner_exc:
+                        last_exc = inner_exc
+                        continue
+                last_exc = exc
+            except ValueError as exc:
+                last_exc = exc
+                if "gpu memory utilization" not in str(exc).lower():
+                    break
+                logger.warning(
+                    "vLLM initialization failed with gpu_memory_utilization=%.3f: %s",
+                    util,
+                    exc,
+                )
+                continue
+            except RuntimeError as exc:
+                last_exc = exc
+                if "gpu" not in str(exc).lower():
+                    break
+                logger.warning(
+                    "vLLM initialization encountered runtime error with gpu_memory_utilization=%.3f: %s",
+                    util,
+                    exc,
+                )
+                continue
+        else:
+            if last_exc is not None:
+                raise last_exc
+            raise ExecutionError("Failed to initialize vLLM; GPU memory constraints unresolved.")
+
         self._model_name = ident
 
     # --------------------------------------------------------------------- #
