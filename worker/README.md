@@ -35,14 +35,14 @@ On startup the worker:
 3. Listens for tasks, selects the correct executor, and writes results to
    `RESULTS_DIR/<task_id>/`.
 4. When an HTTP destination is configured, archives `final_model/` or
-   `final_lora/` into a zip file and uploads it to the orchestrator, recording
+   `final_lora/` into a `.tar.gz` file and uploads it to the orchestrator, recording
    the publicly retrievable URL in the task result.
 
 ## Output directories
 - Each task receives a dedicated directory inside `RESULTS_DIR`.
 - Executors write their JSON summary to `<task_id>/responses.json`.
 - Training executors place checkpoints and, when enabled, automatically
-  generate `final_model.zip` or `final_lora.zip` next to the directory.
+  generate `final_model.tar.gz` or `final_lora.tar.gz` next to the directory.
 
 ## HTTP artifact workflow
 1. Stage 1 runs with `spec.output.destination.type: http` and uploads the archive.
@@ -64,7 +64,7 @@ local artifacts, and templates can reference them via absolute paths instead of
   `worker:<worker_id>:hb` TTLs.
 - When pipelines stall, ensure the Stage 1 task produced the expected
   `final_*_archive_url` and the orchestrator's results directory contains the
-  uploaded zip file.
+  uploaded `.tar.gz` file.
 
 
 ## Elastic Scaling & Task Merge

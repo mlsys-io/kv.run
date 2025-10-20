@@ -134,9 +134,7 @@ def download_and_unpack(load_cfg: Dict[str, Any], out_dir: Path) -> Path:
 
     archive_format = str(load_cfg.get("archive_format", "auto")).lower()
     if archive_format == "auto":
-        if zipfile.is_zipfile(temp_path):
-            fmt = "zip"
-        elif tarfile.is_tarfile(temp_path):
+        if tarfile.is_tarfile(temp_path):
             fmt = "tar"
         else:
             fmt = "none"
@@ -193,13 +191,11 @@ def select_extracted_subdir(extracted_dir: Path, subdir: Optional[str]) -> Path:
 
 
 def archive_model_dir(model_dir: Path) -> Path:
-    archive_path = model_dir.with_suffix(".zip")
+    archive_path = model_dir.parent / f"{model_dir.name}.tar.gz"
     if archive_path.exists():
         archive_path.unlink()
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file in model_dir.rglob("*"):
-            if file.is_file():
-                zf.write(file, file.relative_to(model_dir))
+    with tarfile.open(archive_path, "w:gz") as tf:
+        tf.add(model_dir, arcname=model_dir.name)
     return archive_path
 
 

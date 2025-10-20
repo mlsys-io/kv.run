@@ -22,7 +22,7 @@ spec:
   model:
     source:
       type: "huggingface"
-      identifier: "meta-llama/Llama-3.2-1B-Instruct"
+      identifier: "meta-llama/Llama-3.2-3B-Instruct"
       revision: "main"
 
   output:
@@ -48,15 +48,16 @@ spec:
           max_samples: 200
         training:
           num_train_epochs: 1
-          batch_size: 4
+          batch_size: 1
           gradient_accumulation_steps: 4
           learning_rate: 5.0e-5
-          max_seq_length: 512
+          max_seq_length: 256
           logging_steps: 10
-          save_steps: 50
+          save_steps: 500
           save_model: true
-          gradient_checkpointing: false
+          gradient_checkpointing: true
           packing: false
+          auto_deepspeed_stage: 2
         output:
           destination:
             type: "http"

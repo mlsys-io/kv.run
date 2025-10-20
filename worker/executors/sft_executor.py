@@ -14,6 +14,7 @@ import time
 import json
 import subprocess
 import gc
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -41,13 +42,14 @@ class SFTExecutor(Executor):
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         spec = (task or {}).get("spec") or {}
+        requested_gpu_count = self._requested_gpu_count(task)
         start_time = time.time()
         training_successful = False
         error_msg: Optional[str] = None
         caught_exc: Optional[Exception] = None
 
         training_cfg = spec.get("training", {}) or {}
-        self._configure_devices(training_cfg)  # only constrain visible devices; no placement here
+        self._configure_devices(training_cfg)  # only constrain visible devices when explicit
         deepspeed_cfg = self._resolve_deepspeed_config(training_cfg, logger)
         # Under torchrun/accelerate, set CUDA device from LOCAL_RANK to avoid NCCL warnings
         try:
@@ -68,22 +70,41 @@ class SFTExecutor(Executor):
             already_spawned = os.environ.get(launcher_env_flag) == "1"
             # Determine requested GPU count
             vis = os.environ.get("CUDA_VISIBLE_DEVICES") or training_cfg.get("visible_devices")
-            n_gpus = None
+            available_gpus = None
             if vis:
-                n_gpus = len(str(vis).split(","))
-            else:
+                available_gpus = len([dev for dev in str(vis).split(",") if dev.strip()])
+            if available_gpus is None:
                 try:
                     if torch.cuda.is_available():
-                        n_gpus = torch.cuda.device_count()
+                        available_gpus = torch.cuda.device_count()
                 except Exception:
-                    n_gpus = None
+                    available_gpus = None
+            if available_gpus is None:
+                available_gpus = 0
+
+            if requested_gpu_count and requested_gpu_count > 1:
+                n_gpus = min(requested_gpu_count, available_gpus)
+            else:
+                n_gpus = available_gpus
 
             # If a DeepSpeed config is supplied, assume multi-GPU intent
             deepspeed_intent = bool(deepspeed_cfg)
             if allow_multi_cfg is None:
-                allow_multi = bool(n_gpus and n_gpus > 1)
+                allow_multi = n_gpus > 1
             else:
                 allow_multi = bool(allow_multi_cfg)
+
+            if allow_multi and not deepspeed_intent and n_gpus > 1:
+                auto_ds = self._build_auto_deepspeed_config(training_cfg, n_gpus)
+                if auto_ds:
+                    training_cfg["deepspeed"] = auto_ds
+                    deepspeed_cfg = auto_ds
+                    deepspeed_intent = True
+                    logger.info(
+                        "Auto-generated DeepSpeed config for multi-GPU SFT (world size=%d, stage=%s).",
+                        n_gpus,
+                        auto_ds["zero_optimization"]["stage"],
+                    )
 
             logger.info(
                 "SFT spawn decision: allow_multi=%s deepspeed_intent=%s already_spawned=%s n_gpus=%s",
@@ -98,19 +119,28 @@ class SFTExecutor(Executor):
                     json.dump(task, fh)
 
                 nproc = int(training_cfg.get("nproc_per_node", n_gpus))
-                if deepspeed_intent:
+                use_deepspeed_cli = deepspeed_intent and shutil.which("deepspeed")
+                if deepspeed_intent and not use_deepspeed_cli:
+                    logger.warning(
+                        "DeepSpeed configuration provided but `deepspeed` CLI not found; falling back to torchrun."
+                    )
+                if use_deepspeed_cli:
                     cmd = [
                         "deepspeed",
-                        "--num_gpus", str(nproc),
-                        "--module", "worker.executors.sft_dist_entry",
+                        "--num_gpus",
+                        str(nproc),
+                        "--module",
+                        "worker.executors.sft_dist_entry",
                         str(task_file),
                         str(out_dir),
                     ]
                 else:
                     cmd = [
                         "torchrun",
-                        "--nproc_per_node", str(nproc),
-                        "-m", "worker.executors.sft_dist_entry",
+                        "--nproc_per_node",
+                        str(nproc),
+                        "-m",
+                        "worker.executors.sft_dist_entry",
                         str(task_file),
                         str(out_dir),
                     ]
@@ -122,7 +152,7 @@ class SFTExecutor(Executor):
                     env["PYTHONPATH"] = f"{str(repo_root)}:" + env.get("PYTHONPATH", "")
                 except Exception:
                     pass
-                launcher_name = "DeepSpeed" if deepspeed_intent else "torchrun"
+                launcher_name = "DeepSpeed" if use_deepspeed_cli else "torchrun"
                 logger.info(
                     "Spawning %s for SFT: %s (CUDA_VISIBLE_DEVICES=%s)",
                     launcher_name,
@@ -130,11 +160,9 @@ class SFTExecutor(Executor):
                     env.get("CUDA_VISIBLE_DEVICES"),
                 )
                 subprocess.check_call(cmd, env=env)
-                # Read back results written by distributed run (child ensures this exists)
                 resp_path = out_dir / "responses.json"
                 if resp_path.exists():
                     return self.load_json(resp_path)
-                # If not present for any reason, return a minimal success envelope
                 return {
                     "training_successful": True,
                     "spawned_torchrun": True,
@@ -142,7 +170,8 @@ class SFTExecutor(Executor):
                     "output_dir": str(out_dir),
                 }
         except Exception as spawn_exc:
-            logger.exception("Failed to launch distributed SFT via torchrun: %s", spawn_exc)
+            logger.exception("Failed to launch distributed SFT: %s", spawn_exc)
+            raise ExecutionError("Failed to launch distributed SFT subprocess") from spawn_exc
 
         try:
             # Proceed with in-process training (single GPU or inside torchrun)
@@ -183,17 +212,18 @@ class SFTExecutor(Executor):
             train_dataset, text_field = self._prepare_dataset(spec)
             logger.info("Loaded training dataset with %d rows", len(train_dataset))
 
-            # Determine if distributed is actually initialized
-            is_dist = False
+            # Determine distributed context
+            world_size_env = int(os.environ.get("WORLD_SIZE", "1"))
             try:
                 import torch.distributed as dist
-                is_dist = dist.is_available() and dist.is_initialized()
+                dist_initialized = dist.is_available() and dist.is_initialized()
             except Exception:
-                is_dist = False
+                dist_initialized = False
+            expected_distributed = dist_initialized or bool(deepspeed_cfg) or world_size_env > 1
 
             # If DeepSpeed is requested but we are not in a distributed context, keep going.
             # Hugging Face will still initialize DeepSpeed on the current rank (often rank 0 only).
-            if deepspeed_cfg and not is_dist:
+            if deepspeed_cfg and not dist_initialized:
                 if os.environ.get("KV_SFT_DISTRIBUTED") == "1":
                     logger.info(
                         "DeepSpeed runtime will initialize torch.distributed (local_rank=%s)",
@@ -234,14 +264,14 @@ class SFTExecutor(Executor):
             )
 
             # Let the distributed backend handle placement when running under torchrun/deepspeed
-            if is_dist:
+            if expected_distributed:
                 logger.info("Distributed mode detected - device placement handled by DeepSpeed/DDP backend.")
-            if torch.cuda.is_available() and not is_dist:
+            if torch.cuda.is_available() and not expected_distributed:
                 target_device = torch.device("cuda:0")
                 model = model.to(target_device)
                 if any(p.device != target_device for _, p in model.named_parameters()):
                     logger.warning("Some parameters not moved to %s; check environment.", target_device)
-            elif is_dist:
+            elif expected_distributed:
                 # placement handled by backend
                 pass
 
@@ -483,6 +513,24 @@ class SFTExecutor(Executor):
         raise ValueError("spec.data must define dataset_name or prompts for SFT tasks")
 
     @staticmethod
+    def _requested_gpu_count(task: Dict[str, Any]) -> Optional[int]:
+        task = task or {}
+        spec = task.get("spec") or {}
+        resources = task.get("resources") or spec.get("resources") or {}
+        hardware = resources.get("hardware") or {}
+        gpu_cfg = hardware.get("gpu")
+        if isinstance(gpu_cfg, dict):
+            count = gpu_cfg.get("count")
+            if count is not None:
+                try:
+                    value = int(count)
+                    if value > 0:
+                        return value
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
     def _configure_devices(training_cfg: Dict[str, Any]) -> None:
         """Control CUDA_VISIBLE_DEVICES only; no model.to() here."""
         if not torch.cuda.is_available():
@@ -532,3 +580,43 @@ class SFTExecutor(Executor):
             log.info("Using DeepSpeed literal configuration '%s'", cfg)
             return str(cfg)
         raise ValueError("training.deepspeed must be a dict, path string, or falsy")
+
+    @staticmethod
+    def _build_auto_deepspeed_config(training_cfg: Dict[str, Any], world_size: int) -> Optional[Dict[str, Any]]:
+        if world_size <= 1:
+            return None
+        if not bool(training_cfg.get("auto_deepspeed", True)):
+            return None
+        try:
+            per_device = max(1, int(training_cfg.get("batch_size", training_cfg.get("per_device_batch_size", 2))))
+        except Exception:
+            per_device = 2
+        try:
+            grad_accum = max(1, int(training_cfg.get("gradient_accumulation_steps", 1)))
+        except Exception:
+            grad_accum = 1
+        total_batch = per_device * grad_accum * max(1, world_size)
+        try:
+            stage = int(training_cfg.get("auto_deepspeed_stage", training_cfg.get("zero_stage", 2)))
+        except Exception:
+            stage = 2
+        stage = max(1, min(stage, 3))
+        fp16_enabled = bool(training_cfg.get("fp16", False))
+        bf16_enabled = bool(training_cfg.get("bf16", False))
+        return {
+            "train_batch_size": total_batch,
+            "train_micro_batch_size_per_gpu": per_device,
+            "train_micro_batch_size": per_device,
+            "gradient_accumulation_steps": grad_accum,
+            "zero_optimization": {
+                "stage": stage,
+                "overlap_comm": True,
+                "contiguous_gradients": True,
+                "reduce_bucket_size": 5e7,
+                "stage3_prefetch_bucket_size": 5e7,
+                "stage3_param_persistence_threshold": 1e5,
+            },
+            "bf16": {"enabled": bf16_enabled},
+            "fp16": {"enabled": fp16_enabled and not bf16_enabled},
+            "steps_per_print": 2000,
+        }

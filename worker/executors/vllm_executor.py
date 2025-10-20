@@ -23,7 +23,7 @@ import time
 import gc
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from datasets import load_dataset
 
@@ -122,6 +122,22 @@ class VLLMExecutor(Executor):
                 adjusted = max(min_util_floor, max_util * 0.8)
         return adjusted, free_ratio
 
+    @staticmethod
+    def _requested_gpu_count(spec: Dict[str, Any]) -> Optional[int]:
+        resources = spec.get("resources") or {}
+        hardware = resources.get("hardware") or {}
+        gpu_cfg = hardware.get("gpu")
+        if isinstance(gpu_cfg, dict):
+            count = gpu_cfg.get("count")
+            if count is not None:
+                try:
+                    value = int(count)
+                    if value > 0:
+                        return value
+                except (TypeError, ValueError):
+                    return None
+        return None
+
     # --------------------------------------------------------------------- #
     # Lifecycle
     # --------------------------------------------------------------------- #
@@ -144,12 +160,20 @@ class VLLMExecutor(Executor):
         load_cfg = ((spec.get("checkpoint") or {}).get("load") or {})
 
         requested_tp = vllm_cfg.get("tensor_parallel_size")
+        requested_gpu_count = self._requested_gpu_count(spec)
         try:
             tensor_parallel_size = int(requested_tp) if requested_tp is not None else 0
         except Exception:
             tensor_parallel_size = 0
         if tensor_parallel_size <= 0:
-            tensor_parallel_size = max(1, self._detect_available_gpus())
+            available_gpus = self._detect_available_gpus()
+            if requested_gpu_count is not None:
+                tensor_parallel_size = max(1, min(available_gpus, requested_gpu_count))
+            else:
+                tensor_parallel_size = max(1, available_gpus)
+        else:
+            if requested_gpu_count is not None:
+                tensor_parallel_size = max(1, min(tensor_parallel_size, requested_gpu_count))
         if adapter_specs and tensor_parallel_size > 1:
             logger.info(
                 "LoRA adapters detected; forcing tensor_parallel_size=1 (was %s) to avoid multi-GPU merging.",
@@ -185,49 +209,149 @@ class VLLMExecutor(Executor):
             logger.info("Initializing vLLM from identifier %s", ident)
 
         requested_util = float(vllm_cfg.get("gpu_memory_utilization", 0.9))
-        safe_util, free_ratio = self._compute_safe_utilization(requested_util)
-        if safe_util < requested_util - 1e-3:
-            if free_ratio is not None:
-                logger.warning(
-                    "Requested gpu_memory_utilization=%.3f but only %.2f%% of GPU memory is free; "
-                    "reducing utilization to %.3f",
-                    requested_util,
-                    free_ratio * 100.0,
-                    safe_util,
-                )
-            else:
-                logger.warning(
-                    "Requested gpu_memory_utilization=%.3f but available GPU memory is constrained; "
-                    "reducing utilization to %.3f",
-                    requested_util,
-                    safe_util,
-                )
 
-        kwargs: Dict[str, Any] = dict(
+        kwargs_base: Dict[str, Any] = dict(
             model=str(local_checkpoint_dir or ident),
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=safe_util,
             trust_remote_code=bool(vllm_cfg.get("trust_remote_code", False)),
         )
         # Per vLLM docs: enable LoRA at init time when using per-request adapters
         if adapter_specs:
-            kwargs["enable_lora"] = True
+            kwargs_base["enable_lora"] = True
         if "max_model_len" in vllm_cfg:
-            kwargs["max_model_len"] = int(vllm_cfg["max_model_len"])
+            kwargs_base["max_model_len"] = int(vllm_cfg["max_model_len"])
         if "dtype" in vllm_cfg:
-            kwargs["dtype"] = str(vllm_cfg["dtype"])
+            kwargs_base["dtype"] = str(vllm_cfg["dtype"])
         if "download_dir" in vllm_cfg:
-            kwargs["download_dir"] = str(vllm_cfg["download_dir"])
+            kwargs_base["download_dir"] = str(vllm_cfg["download_dir"])
         self._release_llm_after_run = bool(vllm_cfg.get("release_after_run", True))
 
-        self._llm_kwargs = dict(kwargs)
-        tried_utils = set()
-        util_candidates = [safe_util]
-        for delta in (0.05, 0.1):
-            candidate = max(0.5, safe_util - delta)
-            if candidate < util_candidates[-1] - 1e-3:
-                util_candidates.append(candidate)
+        tp_candidates: List[int] = []
+        seen_tp: Set[int] = set()
+        initial_tp = max(1, tensor_parallel_size)
+        if initial_tp not in seen_tp:
+            tp_candidates.append(initial_tp)
+            seen_tp.add(initial_tp)
+        if initial_tp != 1 and 1 not in seen_tp:
+            tp_candidates.append(1)
+            seen_tp.add(1)
 
+        last_exc: Optional[Exception] = None
+        success = False
+        chosen_kwargs: Dict[str, Any] = {}
+
+        for tp_idx, tp_value in enumerate(tp_candidates, start=1):
+            kwargs = dict(kwargs_base)
+            kwargs["tensor_parallel_size"] = tp_value
+
+            safe_util, free_ratio = self._compute_safe_utilization(requested_util)
+            if safe_util < requested_util - 1e-3:
+                if free_ratio is not None:
+                    logger.warning(
+                        "Requested gpu_memory_utilization=%.3f but only %.2f%% of GPU memory is free; "
+                        "reducing utilization to %.3f",
+                        requested_util,
+                        free_ratio * 100.0,
+                        safe_util,
+                    )
+                else:
+                    logger.warning(
+                        "Requested gpu_memory_utilization=%.3f but available GPU memory is constrained; "
+                        "reducing utilization to %.3f",
+                        requested_util,
+                        safe_util,
+                    )
+
+            util_candidates: List[float] = []
+            tried_utils: Set[float] = set()
+            util_candidates.append(safe_util)
+            for delta in (0.05, 0.1, 0.15):
+                candidate = max(0.3, safe_util - delta)
+                if candidate < util_candidates[0] - 1e-3 and candidate not in util_candidates:
+                    util_candidates.append(candidate)
+
+            for util_idx, util in enumerate(util_candidates, start=1):
+                if util in tried_utils:
+                    continue
+                tried_utils.add(util)
+
+                attempt_kwargs = dict(kwargs)
+                attempt_kwargs["gpu_memory_utilization"] = util
+                self._llm_kwargs = dict(attempt_kwargs)
+                logger.info(
+                    "Initializing vLLM (TP candidate %d/%d, attempt %d/%d) "
+                    "with tensor_parallel_size=%d, gpu_memory_utilization=%.3f",
+                    tp_idx,
+                    len(tp_candidates),
+                    util_idx,
+                    len(util_candidates),
+                    tp_value,
+                    util,
+                )
+                try:
+                    self._llm = LLM(**attempt_kwargs)  # type: ignore[call-arg]
+                    chosen_kwargs = dict(attempt_kwargs)
+                    success = True
+                    break
+                except TypeError as exc:
+                    last_exc = exc
+                    if "enable_lora" in attempt_kwargs:
+                        attempt_kwargs.pop("enable_lora", None)
+                        self._llm_kwargs = dict(attempt_kwargs)
+                        try:
+                            self._llm = LLM(**attempt_kwargs)  # type: ignore[call-arg]
+                            chosen_kwargs = dict(attempt_kwargs)
+                            success = True
+                            break
+                        except Exception as inner_exc:
+                            last_exc = inner_exc
+                            msg_inner = str(inner_exc).lower()
+                            if "memory profiling" in msg_inner and tp_value != 1:
+                                logger.warning(
+                                    "vLLM initialization failed due to memory profiling "
+                                    "under tensor_parallel_size=%d; retrying with smaller parallelism.",
+                                    tp_value,
+                                )
+                                break
+                            continue
+                    msg = str(exc).lower()
+                    if "memory profiling" in msg and tp_value != 1:
+                        logger.warning(
+                            "vLLM initialization failed due to memory profiling under tensor_parallel_size=%d; "
+                            "retrying with smaller parallelism.",
+                            tp_value,
+                        )
+                        break
+                    continue
+                except (ValueError, RuntimeError) as exc:
+                    last_exc = exc
+                    msg = str(exc).lower()
+                    if "memory profiling" in msg and tp_value != 1:
+                        logger.warning(
+                            "vLLM initialization encountered memory profiling race under tensor_parallel_size=%d; "
+                            "retrying with smaller parallelism.",
+                            tp_value,
+                        )
+                        break
+                    logger.warning(
+                        "vLLM initialization attempt failed (tp=%d, util=%.3f): %s",
+                        tp_value,
+                        util,
+                        exc,
+                    )
+                    continue
+
+            if success:
+                break
+
+        if not success or self._llm is None:
+            message = (
+                f"Failed to initialize vLLM after trying tensor_parallel_size candidates {tp_candidates} "
+                f"and gpu_memory_utilization adjustments (last error: {last_exc})"
+            )
+            raise ExecutionError(message)
+
+        self._llm_kwargs = chosen_kwargs
+        self._model_name = ident
         last_exc: Optional[Exception] = None
         for util in util_candidates:
             if util in tried_utils:
@@ -736,16 +860,12 @@ class VLLMExecutor(Executor):
                 (child.unlink() if child.is_file() else shutil.rmtree(child, ignore_errors=True))
         target_root.mkdir(parents=True, exist_ok=True)
         fmt = detect_archive_format(archive_format, p.name)
-        if fmt == "zip":
-            import zipfile
-            with zipfile.ZipFile(p, "r") as zf:
-                zf.extractall(target_root)
-        elif fmt == "tar":
+        if fmt == "tar":
             import tarfile
             with tarfile.open(p, "r:*") as tf:
                 tf.extractall(target_root)
         else:
-            raise ExecutionError(f"Unsupported LoRA archive format for {p}; expected .zip/.tar or a directory")
+            raise ExecutionError(f"Unsupported LoRA archive format for {p}; expected .tar(.gz) or a directory")
         return self._ensure_adapter_root(select_extracted_subdir(target_root, None))
 
     def _ensure_adapter_root(self, path: Path) -> Path:

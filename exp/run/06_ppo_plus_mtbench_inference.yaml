@@ -45,17 +45,17 @@ spec:
             - "Offer a motivating reminder to keep learning every day."
         training:
           learning_rate: 1.41e-5
-          batch_size: 4
+          batch_size: 1
           mini_batch_size: 1
-          gradient_accumulation_steps: 4
-          steps: 64
-          ppo_epochs: 4
+          gradient_accumulation_steps: 1
+          steps: 4
+          ppo_epochs: 1
           target_kl: 0.1
           seed: 42
           save_model: true
           save_freq: 32
         generation:
-          max_new_tokens: 256
+          max_new_tokens: 64
           temperature: 0.7
           do_sample: true
         output:
