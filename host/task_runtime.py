@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
-import json
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .task_models import TaskRecord, TaskStatus, categorize_task_type
@@ -71,6 +72,7 @@ class TaskRuntime:
         specs = parse_task_yaml(yaml_text)
         results: List[Dict[str, object]] = []
         new_ready = False
+        submission_id = str(uuid.uuid4())
 
         with self._cv:
             for entry in specs:
@@ -87,6 +89,7 @@ class TaskRuntime:
                     task_id=task_id,
                     raw_yaml=yaml_text,
                     parsed=parsed,
+                    submission_id=submission_id,
                     graph_node_name=entry.get("graph_node_name"),
                     load=int(entry.get("load", 0) or 0),
                     task_type=task_type,

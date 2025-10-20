@@ -30,3 +30,23 @@ Top-level templates under `exp/` use two-digit numeric prefixes that mirror the 
 - `exp/composite_llama1b/04_lora_then_inference.yaml` — MathQA LoRA adapter training followed by merged-weight GSM8K inference.
 - `exp/composite_llama1b/05_dpo_plus_inference_report.yaml` — DPO alignment, evaluation briefing, and TruthfulQA follow-up pass.
 - `exp/composite_llama1b/06_ppo_plus_mtbench_inference.yaml` — PPO reward shaping with subsequent MT-Bench style inference guidance.
+
+## Batch submission helpers
+
+Use `exp/run/submit_tasks.sh` to post _N_ YAML templates to the host orchestrator.
+Files are sampled uniformly at random without replacement on each invocation:
+
+```bash
+cd exp/run
+./submit_tasks.sh 3  # submits 3 distinct tasks (per run) in random order
+```
+
+For rate-limited randomized workloads, `exp/run/submit_random_tasks.sh` submits at a
+configurable rate (requests per second) while sampling with replacement:
+
+```bash
+cd exp/run
+./submit_random_tasks.sh 10 0.5  # 10 requests at 0.5 req/s
+```
+
+Override `HOST_URL`, `TASK_ENDPOINT`, or `TOKEN` to target different hosts or credentials.

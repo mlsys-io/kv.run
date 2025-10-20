@@ -33,6 +33,7 @@ class TaskRecord(BaseModel):
     raw_yaml: str
     parsed: Dict[str, Any]
     status: str = TaskStatus.PENDING
+    submission_id: Optional[str] = None
     task_type: Optional[str] = None
     category: Optional[str] = None
     assigned_worker: Optional[str] = None

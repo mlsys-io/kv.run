@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .worker_registry import Worker, sort_workers
+from .worker_registry import Worker
 
 DEFAULT_WORKER_SELECTION = "best_fit"
 
@@ -25,6 +25,7 @@ def select_worker(
     Strategies:
     - best_fit (default): delegate to sort_workers for capacity-aware ordering.
     - first_fit: accept the first worker in the given iterable without reordering.
+    - min_satisfying: pick the smallest-capacity worker that still satisfies the task.
     """
 
     candidates: List[Worker] = list(pool or [])
@@ -41,6 +42,17 @@ def select_worker(
             "chosen": chosen.worker_id,
             "task_age": task_age,
         }
+        return chosen, info
+
+    if normalized == "min_satisfying":
+        chosen, info = _select_min_capacity(
+            candidates,
+            task_id=task_id,
+            jitter_epsilon=jitter_epsilon,
+            task_age=task_age,
+        )
+        if chosen is None and logger:
+            logger.debug("Min-capacity selection returned no worker; pool size=%d", len(candidates))
         return chosen, info
 
     if normalized != "best_fit":
@@ -115,6 +127,55 @@ def _select_best_fit(
         ],
     }
     return best_worker, debug
+
+
+def _select_min_capacity(
+    candidates: List[Worker],
+    *,
+    task_id: Optional[str],
+    jitter_epsilon: float,
+    task_age: Optional[float],
+) -> Tuple[Optional[Worker], Dict[str, object]]:
+    scored: List[Tuple[float, float, str, Worker, Dict[str, object]]] = []
+    for worker in candidates:
+        metrics = _collect_worker_metrics(worker)
+        adjusted_throughput = metrics["throughput"]
+        if task_id:
+            adjusted_throughput += _stable_jitter(task_id, worker.worker_id, jitter_epsilon)
+        scored.append(
+            (
+                adjusted_throughput,
+                metrics["cost"],
+                worker.worker_id,
+                worker,
+                metrics,
+            )
+        )
+
+    if not scored:
+        return None, {"strategy": "min_satisfying", "candidate_count": 0, "reason": "no_scores"}
+
+    scored.sort(key=lambda item: (item[0], item[1], item[2]))
+    adjusted, _, _, chosen_worker, chosen_metrics = scored[0]
+    chosen_metrics = dict(chosen_metrics)
+    chosen_metrics["adjusted_throughput"] = adjusted
+    debug = {
+        "strategy": "min_satisfying",
+        "candidate_count": len(candidates),
+        "chosen": chosen_worker.worker_id,
+        "chosen_metrics": chosen_metrics,
+        "task_age": task_age,
+        "top_candidates": [
+            {
+                "worker_id": entry[4]["worker_id"],
+                "throughput": entry[4]["throughput"],
+                "adjusted_throughput": entry[0],
+                "cost": entry[4]["cost"],
+            }
+            for entry in scored[:5]
+        ],
+    }
+    return chosen_worker, debug
 
 
 def _collect_worker_metrics(worker: Worker) -> Dict[str, float]:

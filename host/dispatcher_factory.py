@@ -4,6 +4,7 @@ from typing import Optional, Type
 
 from .dispatcher import Dispatcher
 from .dispatcher_fixed_pipeline import FixedPipelineDispatcher
+from .dispatcher_static_worker import StaticWorkerDispatcher
 from .dispatcher_static_round_robin import StaticRoundRobinDispatcher
 from .worker_selector import DEFAULT_WORKER_SELECTION
 
@@ -13,6 +14,7 @@ _DISPATCHER_REGISTRY = {
     "adaptive": Dispatcher,
     "fixed_pipeline": FixedPipelineDispatcher,
     "static_round_robin": StaticRoundRobinDispatcher,
+    "static_worker": StaticWorkerDispatcher,
 }
 
 
@@ -37,6 +39,7 @@ def create_dispatcher(
 
     Supported modes:
     - adaptive (default): original capability-aware dispatcher
+    - static_worker: assigns an entire submission to a single worker
     - fixed_pipeline: locks onto the first observed task type
     - static_round_robin: simple round-robin scheduler ignoring capabilities
     """

@@ -35,13 +35,32 @@ revision.
    reuse hits, lambda, and the final score of the chosen worker. Metrics exports
    (`/metrics`) include elastic disabled workers so tuning is auditable.
 
-The fallback strategies remain available:
-- `ORCHESTRATOR_DISPATCH_MODE=fixed_pipeline` pins each task type to a single
-  worker.
-- `ORCHESTRATOR_DISPATCH_MODE=static_round_robin` performs FIFO assignment over
-  idle workers.
-- `ORCHESTRATOR_WORKER_SELECTION=first_fit` honours the Redis order without any
-  re-sorting.
+## Dispatcher modes
+
+The host exposes several mutually exclusive dispatchers so we can compare
+baselines against the adaptive scheduler:
+
+- `adaptive` (default) – capability-aware scoring with context reuse, task
+  merging, and elastic worker filters as detailed above.
+- `static_worker` – Static worker assignment baseline. Every YAML submission
+  is bound to a single worker for its entire lifetime. Once any task from that
+  workflow is running, the worker is removed from the general pool until all of
+  its sibling tasks finish or fail, mimicking traditional serverless isolation.
+- `fixed_pipeline` – Fixed pipeline assignment. Each task type observed is
+  permanently assigned to the first compatible worker that picked it up. Tasks
+  wait in the queue whenever their dedicated worker is busy or unavailable.
+- `static_round_robin` – Round-robin scheduler. The dispatcher cycles across
+  idle workers in Redis snapshot order without checking task requirements,
+  providing a simple load-balancing baseline.
+
+`ORCHESTRATOR_DISPATCH_MODE` selects the mode. In addition, you can combine
+the dispatchers with the worker selection strategies:
+
+- `ORCHESTRATOR_WORKER_SELECTION=first_fit` disables reordering and always picks
+  the first compatible worker from Redis.
+- `ORCHESTRATOR_WORKER_SELECTION=min_satisfying` favours the smallest-capacity
+  worker that meets the task requirements, helping preserve high-end nodes for
+  heavier jobs.
 
 ## Elastic coordinator
 
