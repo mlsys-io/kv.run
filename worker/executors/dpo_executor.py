@@ -80,21 +80,29 @@ class DPOExecutor(Executor):
             try:
                 dataset = load_dataset(dataset_name, **load_kwargs)
             except ValueError as exc:
+                should_retry = False
+                if config_name and "config" in str(exc):
+                    should_retry = True
                 if config_name and "BuilderConfig" in str(exc):
+                    should_retry = True
+                if should_retry:
                     logger.warning(
-                        "Dataset %s config %s not found (split=%s). Attempting fallback.",
+                        "Failed to load %s with config %s (split=%s). Retrying with default config.",
                         dataset_name,
                         config_name,
                         split,
                     )
-                    # Fallback 1: remove config and retry
-                    load_kwargs.pop("name", None)
+                    fallback_kwargs = {k: v for k, v in load_kwargs.items() if k != "name"}
                     fallback_split = split
                     prefix = split.split("[", 1)[0]
-                    if dataset_name == "HuggingFaceH4/ultrafeedback_binarized" and config_name and prefix != config_name:
+                    if prefix != config_name and config_name:
                         fallback_split = split.replace(prefix, config_name, 1)
-                    load_kwargs["split"] = fallback_split
-                    dataset = load_dataset(dataset_name, **load_kwargs)
+                    fallback_kwargs["split"] = fallback_split
+                    try:
+                        dataset = load_dataset(dataset_name, **fallback_kwargs)
+                    except ValueError:
+                        fallback_kwargs["split"] = split
+                        dataset = load_dataset(dataset_name, **fallback_kwargs)
                 else:
                     raise
 

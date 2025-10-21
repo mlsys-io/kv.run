@@ -670,7 +670,7 @@ class VLLMExecutor(Executor):
 
     def cleanup_after_run(self) -> None:
         if self._release_llm_after_run:
-            self._llm = None
+            self._shutdown_llm()
         self._llm_kwargs = {}
         self._batched_prompts = []
         self._prompt_owners = []
@@ -685,9 +685,35 @@ class VLLMExecutor(Executor):
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+                try:
+                    for idx in range(torch.cuda.device_count()):
+                        torch.cuda.reset_peak_memory_stats(idx)
+                except Exception:
+                    pass
         except Exception:
             pass
         gc.collect()
+
+    def _shutdown_llm(self) -> None:
+        llm = getattr(self, "_llm", None)
+        if llm is None:
+            return
+        try:
+            shutdown = getattr(llm, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+            else:
+                close_fn = getattr(llm, "close", None)
+                if callable(close_fn):
+                    close_fn()
+        except Exception:
+            logger.debug("Failed to shutdown vLLM instance cleanly", exc_info=True)
+        finally:
+            self._llm = None
 
     # ------------------------------------------------------------------ #
     # Adapter utilities (per vLLM LoRA docs)

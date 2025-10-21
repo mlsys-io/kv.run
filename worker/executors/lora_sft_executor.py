@@ -61,8 +61,7 @@ class LoRASFTExecutor(Executor):
             logger.warning("LoRA SFT currently runs on a single GPU; ignoring allow_multi_gpu request")
             training_cfg["allow_multi_gpu"] = False
 
-        requested_gpu_count = SFTExecutor._requested_gpu_count(task)
-        SFTExecutor._configure_devices(training_cfg, requested_gpu_count)
+        SFTExecutor._configure_devices(training_cfg)
         if training_cfg.get("deepspeed"):
             logger.info("DeepSpeed configuration detected for LoRA run; forwarding to trainer")
         lora_cfg = spec.get("lora", {}) or {}

@@ -93,6 +93,7 @@ spec:
         data:
           type: "dataset"
           url: "truthfulqa/truthful_qa"
+          config: "generation"
           split: "validation[:200]"
           column: "question"
           shuffle: true
@@ -103,6 +104,10 @@ spec:
           max_tokens: 192
           temperature: 0.15
           top_p: 0.85
+        model:
+          vllm:
+            gpu_memory_utilization: 0.50
+      trust_remote_code: true
         output:
           destination:
             type: "http"
