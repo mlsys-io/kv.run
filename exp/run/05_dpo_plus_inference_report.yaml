@@ -107,7 +107,7 @@ spec:
         model:
           vllm:
             gpu_memory_utilization: 0.50
-      trust_remote_code: true
+            trust_remote_code: true
         output:
           destination:
             type: "http"
