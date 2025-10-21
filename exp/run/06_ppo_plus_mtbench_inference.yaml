@@ -46,16 +46,17 @@ spec:
         training:
           learning_rate: 1.41e-5
           batch_size: 1
+          per_device_train_batch_size: 1
           mini_batch_size: 1
           gradient_accumulation_steps: 1
-          steps: 4
+          steps: 2
           ppo_epochs: 1
           target_kl: 0.1
           seed: 42
           save_model: true
           save_freq: 32
         generation:
-          max_new_tokens: 64
+          max_new_tokens: 16
           temperature: 0.7
           do_sample: true
         output:
@@ -105,7 +106,7 @@ spec:
         data:
           type: "dataset"
           url: "lmsys/mt-bench"
-          split: "train[:80]"
+          split: "train[:60]"
           column: "turns"
           shuffle: true
           seed: 7

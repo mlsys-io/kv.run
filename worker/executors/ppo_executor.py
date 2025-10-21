@@ -37,6 +37,9 @@ class _ExternalRewardModel(torch.nn.Module):
         self.policy_tokenizer = policy_tokenizer
         self.reward_tokenizer = AutoTokenizer.from_pretrained(identifier)
         self.reward_model = AutoModelForSequenceClassification.from_pretrained(identifier)
+        self.reward_model.to("cpu")
+        self.base_model_prefix = "reward_model"
+        self._patch_reward_forward()
         for param in self.reward_model.parameters():
             param.requires_grad_(False)
         self.reward_model.eval()
@@ -58,6 +61,40 @@ class _ExternalRewardModel(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         raise RuntimeError("External reward model is only used via compute_reward_from_tokens.")
+
+    def to(self, *args, **kwargs):  # type: ignore[override]
+        # Keep the reward model on CPU to avoid GPU-side driver asserts with classification heads.
+        self.reward_model.to("cpu")
+        return self
+
+    def _patch_reward_forward(self) -> None:
+        try:
+            original_forward = self.reward_model.forward
+        except AttributeError:
+            return
+
+        def wrapped_forward(*args, **kwargs):
+            kwargs.pop("use_cache", None)
+            kwargs.pop("output_hidden_states", None)
+            return original_forward(*args, **kwargs)
+
+        try:
+            self.reward_model.forward = wrapped_forward  # type: ignore[assignment]
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.reward_model.config, "use_cache"):
+                self.reward_model.config.use_cache = False
+        except Exception:
+            pass
+
+        try:
+            backbone = getattr(self.reward_model, "base_model", None)
+            if backbone is not None and hasattr(backbone, "config") and hasattr(backbone.config, "use_cache"):
+                backbone.config.use_cache = False
+        except Exception:
+            pass
 
     def compute_reward_from_tokens(
         self,
@@ -140,8 +177,10 @@ class _ExternalRewardModel(torch.nn.Module):
 @contextmanager
 def _patched_reward_dispatch():
     from trl.trainer import utils as trl_utils
+    from trl.trainer import ppo_trainer as trl_ppo
 
     original_get_reward = trl_utils.get_reward
+    original_get_reward_ppo = getattr(trl_ppo, "get_reward", None)
 
     def _wrapped_get_reward(model, query_responses, pad_token_id, context_length):
         if hasattr(model, "compute_reward_from_tokens"):
@@ -149,10 +188,14 @@ def _patched_reward_dispatch():
         return original_get_reward(model, query_responses, pad_token_id, context_length)
 
     trl_utils.get_reward = _wrapped_get_reward
+    if original_get_reward_ppo is not None:
+        trl_ppo.get_reward = _wrapped_get_reward
     try:
         yield
     finally:
         trl_utils.get_reward = original_get_reward
+        if original_get_reward_ppo is not None:
+            trl_ppo.get_reward = original_get_reward_ppo
 
 
 class _RewardAdapter(torch.nn.Module):
@@ -388,10 +431,49 @@ class PPOExecutor(Executor):
 
             logger.info("Models loaded: %s", self._model_name)
 
+            # Ensure value head exposes score() for TRL reward helpers
+            self._ensure_value_head_score(model, ref_model)
+
             # Load dataset
             logger.info("Loading dataset...")
             dataset = self._load_dataset(spec)
-            logger.info("Dataset loaded with %d samples", len(dataset))
+            dataset_size = len(dataset)
+            logger.info("Dataset loaded with %d samples", dataset_size)
+
+            def _safe_int(value: Any, *, default: Optional[int] = None, minimum: Optional[int] = None) -> Optional[int]:
+                if value is None:
+                    return default
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    return default
+                if minimum is not None:
+                    parsed = max(parsed, minimum)
+                return parsed
+
+            per_device_batch = _safe_int(
+                training_config.get("per_device_train_batch_size"),
+                default=_safe_int(training_config.get("batch_size"), default=1, minimum=1),
+                minimum=1,
+            )
+            if dataset_size and per_device_batch and per_device_batch > dataset_size:
+                logger.info(
+                    "Clipping per_device_train_batch_size from %d to dataset size %d to avoid empty PPO batches",
+                    per_device_batch,
+                    dataset_size,
+                )
+                per_device_batch = dataset_size
+
+            grad_acc_steps = _safe_int(training_config.get("gradient_accumulation_steps"), default=1, minimum=1)
+            num_mini_batches = _safe_int(training_config.get("num_mini_batches"), default=1, minimum=1)
+
+            def _safe_float(value: Any, *, default: Optional[float] = None) -> Optional[float]:
+                if value is None:
+                    return default
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
 
             # Some TRL versions expect tokenized inputs in the dataset and will
             # route through a padding collator. Ensure input_ids/attention_mask exist.
@@ -454,14 +536,80 @@ class PPOExecutor(Executor):
             else:
                 # Default off to avoid shared-tensor safetensors error when embeddings are tied
                 ppo_optional["save_safetensors"] = False
+            ppo_optional["remove_unused_columns"] = False
 
             ppo_config = PPOConfig(
                 learning_rate=float(training_config.get("learning_rate", 1.41e-5)),
-                batch_size=int(training_config.get("batch_size", 4)),
-                mini_batch_size=int(training_config.get("mini_batch_size", 1)),
+                batch_size=int(training_config.get("batch_size", per_device_batch or 1)),
+                mini_batch_size=int(training_config.get("mini_batch_size", num_mini_batches or 1)),
                 output_dir=str(checkpoint_dir),
+                seed=int(training_config.get("seed", 42)),
                 **ppo_optional,
             )
+
+            if per_device_batch is not None:
+                ppo_config.per_device_train_batch_size = per_device_batch
+            if grad_acc_steps is not None:
+                ppo_config.gradient_accumulation_steps = grad_acc_steps
+            if num_mini_batches is not None:
+                ppo_config.num_mini_batches = num_mini_batches
+
+            ppo_epochs = _safe_int(training_config.get("ppo_epochs"), minimum=1)
+            if ppo_epochs is not None:
+                ppo_config.num_ppo_epochs = ppo_epochs
+
+            train_epochs = _safe_float(training_config.get("num_train_epochs"), default=None)
+            if train_epochs is not None:
+                ppo_config.num_train_epochs = max(train_epochs, 1.0)
+            else:
+                # Default to 1 pass over the data unless overridden
+                ppo_config.num_train_epochs = 1.0
+
+            kl_coef = _safe_float(training_config.get("kl_coef"), default=None)
+            if kl_coef is not None and kl_coef > 0:
+                ppo_config.kl_coef = kl_coef
+
+            response_cfg = spec.get("generation", {}) or {}
+            response_length = _safe_int(response_cfg.get("max_new_tokens"), default=None, minimum=1)
+            if response_length is not None:
+                ppo_config.response_length = response_length
+            else:
+                ppo_config.response_length = int(training_config.get("max_seq_length", 64))
+
+            temperature = _safe_float(response_cfg.get("temperature"), default=None)
+            if temperature is None:
+                temperature = _safe_float(training_config.get("temperature"), default=None)
+            if temperature is not None and temperature > 0:
+                ppo_config.temperature = temperature
+
+            stop_token = response_cfg.get("stop")
+            if isinstance(stop_token, str):
+                ppo_config.stop_token = stop_token
+
+            logger.info(
+                "Final PPO batch parameters: per_device=%s, grad_acc=%s, num_mini_batches=%s",
+                per_device_batch,
+                grad_acc_steps,
+                num_mini_batches,
+            )
+
+            steps_requested = _safe_int(training_config.get("steps"), default=None, minimum=1)
+            if steps_requested is not None and per_device_batch:
+                total_episodes = steps_requested * max(1, per_device_batch)
+                ppo_config.total_episodes = total_episodes
+                logger.info(
+                    "Configuring PPO to run %d update steps (~%d episodes)",
+                    steps_requested,
+                    total_episodes,
+                )
+            else:
+                logger.info(
+                    "Using num_train_epochs=%.2f over %d samples (per_device_batch=%s, grad_acc=%s)",
+                    float(getattr(ppo_config, "num_train_epochs", 1.0)),
+                    dataset_size,
+                    per_device_batch,
+                    grad_acc_steps,
+                )
             logger.info("PPOConfig created successfully")
 
             # Initialize PPO trainer with correct API
@@ -660,6 +808,7 @@ class PPOExecutor(Executor):
             identifier = reward_cfg.get("identifier")
             try:
                 external_model = _ExternalRewardModel(reward_cfg, tokenizer)
+                external_model.base_model_prefix = "reward_model"
                 logger.info(
                     "Using external reward model '%s' (type=%s)",
                     identifier,
