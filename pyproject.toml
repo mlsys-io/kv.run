@@ -12,6 +12,9 @@ dependencies = [
     "pyyaml>=6.0.2",
     "redis>=6.4.0",
     "requests>=2.32.5",
+    "torch>=2.7.1",
+    "transformers>=4.56.1",
+    "trl>=0.23.0",
     "uvicorn>=0.35.0",
 ]
 
