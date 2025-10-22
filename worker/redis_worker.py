@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from event_schema import WorkerEvent, TaskEvent, serialize_event
+from .event_schema import WorkerEvent, TaskEvent, serialize_event
 
 
 class RedisWorker:
