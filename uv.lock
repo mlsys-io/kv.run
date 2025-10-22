@@ -1817,6 +1817,7 @@ dependencies = [
     { name = "transformers" },
     { name = "trl" },
     { name = "uvicorn" },
+    { name = "vllm" },
 ]
 
 [package.optional-dependencies]
@@ -1926,6 +1927,7 @@ requires-dist = [
     { name = "trl", specifier = ">=0.23.0" },
     { name = "trl", marker = "extra == 'training'", specifier = "==0.23.0" },
     { name = "uvicorn", specifier = ">=0.35.0" },
+    { name = "vllm", specifier = ">=0.10.1.1" },
     { name = "vllm", marker = "extra == 'inference'", specifier = ">=0.10.1.1" },
     { name = "wikipedia-api", marker = "extra == 'agent'", specifier = ">=0.8.1" },
 ]
