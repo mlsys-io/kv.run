@@ -71,6 +71,10 @@ spec:
     - name: evaluation-notes
       spec:
         taskType: "inference"
+        model:
+          vllm:
+            gpu_memory_utilization: 0.50
+            trust_remote_code: true
         data:
           type: "graph_template"
           template:
@@ -106,6 +110,7 @@ spec:
         data:
           type: "dataset"
           url: "lmsys/mt-bench"
+          trust_remote_code: false
           split: "train[:60]"
           column: "turns"
           shuffle: true

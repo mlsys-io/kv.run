@@ -5,6 +5,7 @@ DPO (Direct Preference Optimization) Executor using TRL's simple approach
 Simple implementation using TRL's DPOTrainer with built-in train() method.
 """
 
+import gc
 import json
 import os
 import subprocess
@@ -29,6 +30,10 @@ class DPOExecutor(Executor):
     def __init__(self):
         super().__init__()
         self._model_name = None
+        self._current_model = None
+        self._current_ref_model = None
+        self._current_tokenizer = None
+        self._current_trainer = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         logger.info("Starting DPO training task")
@@ -198,11 +203,14 @@ class DPOExecutor(Executor):
             self._model_name = model_source.get("identifier", "microsoft/DialoGPT-small")
 
             tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+            self._current_tokenizer = tokenizer
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
             model = AutoModelForCausalLM.from_pretrained(self._model_name)
             ref_model = AutoModelForCausalLM.from_pretrained(self._model_name)
+            self._current_model = model
+            self._current_ref_model = ref_model
 
             logger.info("Models loaded: %s", self._model_name)
 
@@ -227,6 +235,7 @@ class DPOExecutor(Executor):
                     train_dataset=dataset,
                     tokenizer=tokenizer,
                 )
+                self._current_trainer = dpo_trainer
             except TypeError as exc:
                 if "unexpected keyword argument 'tokenizer'" in str(exc):
                     try:
@@ -237,6 +246,7 @@ class DPOExecutor(Executor):
                             train_dataset=dataset,
                             processing_class=tokenizer,
                         )
+                        self._current_trainer = dpo_trainer
                     except TypeError:
                         dpo_trainer = DPOTrainer(
                             model=model,
@@ -244,6 +254,7 @@ class DPOExecutor(Executor):
                             args=dpo_config,
                             train_dataset=dataset,
                         )
+                        self._current_trainer = dpo_trainer
                 else:
                     raise
 
@@ -381,3 +392,51 @@ class DPOExecutor(Executor):
         except Exception:
             pass
         return 0
+
+    def cleanup_after_run(self) -> None:
+        dropped_objects = []
+        for attr in (
+            "_current_trainer",
+            "_current_model",
+            "_current_ref_model",
+            "_current_tokenizer",
+        ):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                dropped_objects.append(obj)
+            setattr(self, attr, None)
+
+        for obj in dropped_objects:
+            try:
+                del obj
+            except Exception:
+                pass
+
+        try:
+            import torch
+
+            dist = getattr(torch, "distributed", None)
+            if dist is not None:
+                try:
+                    if dist.is_available() and dist.is_initialized():
+                        dist.destroy_process_group()
+                        logger.debug("Destroyed torch distributed process group during cleanup")
+                except Exception:
+                    logger.debug("Failed to destroy torch distributed process group", exc_info=True)
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    logger.debug("torch.cuda.ipc_collect failed", exc_info=True)
+                if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                    try:
+                        for idx in range(torch.cuda.device_count()):
+                            torch.cuda.reset_peak_memory_stats(idx)
+                    except Exception:
+                        logger.debug("Failed to reset CUDA peak memory stats", exc_info=True)
+        except Exception:
+            pass
+
+        gc.collect()

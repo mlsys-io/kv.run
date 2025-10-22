@@ -169,7 +169,7 @@ spec:
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string (fallback when env unset). |
 | `RESULTS_DIR` | `./results_host` | Directory where orchestrator writes ingested results. |
 | `ORCHESTRATOR_TOKEN` | – | Optional bearer token to protect APIs. |
-| `ORCHESTRATOR_DISPATCH_MODE` | `adaptive` | Scheduler flavour (`adaptive`, `fixed_pipeline`, `static_round_robin`). |
+| `ORCHESTRATOR_DISPATCH_MODE` | `adaptive` | Scheduler flavour (`adaptive`, `fixed_pipeline`, `static_round_robin`, `static_worker`). |
 | `ORCHESTRATOR_WORKER_SELECTION` | `best_fit` | Worker selection policy (`best_fit`, `first_fit`). |
 | `ENABLE_CONTEXT_REUSE` | `true` | Bias toward workers with fresh model/dataset caches (subject to TTL). |
 | `WORKER_CACHE_TTL_SEC` | `3600` | Cache metadata expiry before reuse priority is dropped. |

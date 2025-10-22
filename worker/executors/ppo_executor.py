@@ -5,6 +5,7 @@ PPO (Proximal Policy Optimization) Executor using TRL's simple approach
 Simplified implementation using TRL's built-in training methods.
 """
 
+import gc
 import json
 import os
 import subprocess
@@ -247,6 +248,11 @@ class PPOExecutor(Executor):
     def __init__(self):
         super().__init__()
         self._model_name = None
+        self._policy_model = None
+        self._ref_model = None
+        self._tokenizer = None
+        self._ppo_trainer = None
+        self._reward_module = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         logger.info("Starting PPO training task")
@@ -288,12 +294,15 @@ class PPOExecutor(Executor):
 
             # Load tokenizer
             tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+            self._tokenizer = tokenizer
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
             # Load models - PPO requires policy model and reference model
             model = AutoModelForCausalLMWithValueHead.from_pretrained(self._model_name)
             ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(self._model_name)
+            self._policy_model = model
+            self._ref_model = ref_model
 
             # Some TRL versions expect `generation_config` on the policy/ref models.
             # AutoModelForCausalLMWithValueHead may not set it; ensure presence.
@@ -525,6 +534,7 @@ class PPOExecutor(Executor):
                 model,
                 ref_model,
             )
+            self._reward_module = reward_module
             if hasattr(reward_module, "eval"):
                 reward_module.eval()
 
@@ -683,6 +693,7 @@ class PPOExecutor(Executor):
                 return PPOTrainer(*positional, **kwargs)
 
             ppo_trainer = build_trainer()
+            self._ppo_trainer = ppo_trainer
             # Ensure eval dataset/dataloader exist for TRL 0.23 `generate_completions`.
             try:
                 if getattr(ppo_trainer, "eval_dataset", None) is None:
@@ -931,3 +942,52 @@ class PPOExecutor(Executor):
         except Exception:
             pass
         return 0
+
+    def cleanup_after_run(self) -> None:
+        dropped_objects = []
+        for attr in (
+            "_ppo_trainer",
+            "_policy_model",
+            "_ref_model",
+            "_tokenizer",
+            "_reward_module",
+        ):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                dropped_objects.append(obj)
+            setattr(self, attr, None)
+
+        for obj in dropped_objects:
+            try:
+                del obj
+            except Exception:
+                pass
+
+        try:
+            import torch
+
+            dist = getattr(torch, "distributed", None)
+            if dist is not None:
+                try:
+                    if dist.is_available() and dist.is_initialized():
+                        dist.destroy_process_group()
+                        logger.debug("Destroyed torch distributed process group during cleanup")
+                except Exception:
+                    logger.debug("Failed to destroy torch distributed process group", exc_info=True)
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    logger.debug("torch.cuda.ipc_collect failed", exc_info=True)
+                if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                    try:
+                        for idx in range(torch.cuda.device_count()):
+                            torch.cuda.reset_peak_memory_stats(idx)
+                    except Exception:
+                        logger.debug("Failed to reset CUDA peak memory stats", exc_info=True)
+        except Exception:
+            pass
+
+        gc.collect()

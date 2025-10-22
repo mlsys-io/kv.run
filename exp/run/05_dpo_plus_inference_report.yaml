@@ -57,6 +57,10 @@ spec:
     - name: evaluation-brief
       spec:
         taskType: "inference"
+        model:
+          vllm:
+            gpu_memory_utilization: 0.50
+            trust_remote_code: true
         data:
           type: "graph_template"
           template:
