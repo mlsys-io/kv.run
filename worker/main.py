@@ -1,14 +1,14 @@
 # worker/main.py
 import redis
-from utils import get_logger
-from config import WorkerConfig
-from hw import collect_hw
-from lifecycle import Lifecycle
-from redis_worker import RedisWorker
-from runner import Runner
-from power import PowerMonitor
 
-from executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, EXECUTOR_CLASS_NAMES
+from .config import WorkerConfig
+from .executors import EXECUTOR_REGISTRY, EXECUTOR_CLASS_NAMES, IMPORT_ERRORS
+from .hw import collect_hw
+from .lifecycle import Lifecycle
+from .power import PowerMonitor
+from .redis_worker import RedisWorker
+from .runner import Runner
+from .utils import get_logger
 
 
 def initialize_executors(

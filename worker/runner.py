@@ -10,7 +10,8 @@ import time
 from datetime import datetime, timezone
 
 import requests
-from manifest_utils import prepare_output_dir, sync_manifest
+
+from .manifest_utils import prepare_output_dir, sync_manifest
 
 
 class Runner:
