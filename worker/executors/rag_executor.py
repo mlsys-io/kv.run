@@ -56,15 +56,17 @@ class RAGExecutor(Executor):
             column = data_cfg.get("column", "text")
 
             trust_remote_code = data_cfg.get("trust_remote_code")
-            if trust_remote_code is None:
-                trust_remote_code = True
             revision = data_cfg.get("revision")
+            dataset_kwargs = {
+                "name": name,
+                "split": split,
+                "revision": revision,
+            }
+            if trust_remote_code is not None:
+                dataset_kwargs["trust_remote_code"] = bool(trust_remote_code)
             dataset = load_dataset(
                 data_url,
-                name=name,
-                split=split,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
+                **{k: v for k, v in dataset_kwargs.items() if v is not None},
             )
             if shuffle:
                 seed = int(data_cfg.get("seed", 42))
@@ -162,4 +164,3 @@ class RAGExecutor(Executor):
         self.save_json(out_dir / "responses.json", out)
         logger.info("RAG query completed queries=%d total_results=%d", len(queries), total_items)
         return out
-

@@ -73,7 +73,6 @@ spec:
         model:
           vllm:
             gpu_memory_utilization: 0.45
-            release_after_run: true
         checkpoint:
           load:
             type: "http"

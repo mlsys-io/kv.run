@@ -10,7 +10,7 @@ This rewrite follows vLLM's **LoRA Adapters** guidance:
 - Per-request LoRA with `LoRARequest(name, adapter_id, adapter_path)` and `enable_lora=True`.
 - Supports multiple runtime LoRA adapters in one call when the local vLLM build allows passing a list of `LoRARequest`.
 - Still supports `apply=merge` via native merge APIs if present, otherwise offline-merge with PEFT.
-- Optional `spec.model.vllm.release_after_run` to keep/release the LLM instance.
+- vLLM instances are always released after each run to free GPU memory.
 - Defensive compatibility for older vLLM builds (graceful fallbacks and clear errors).
 """
 
@@ -73,7 +73,6 @@ class VLLMExecutor(Executor):
         self._adapter_specs: List[Dict[str, Any]] = []
         self._merged_adapters: List[str] = []
         self._runtime_specs: List[Dict[str, Any]] = []
-        self._release_llm_after_run = True
         self._llm_kwargs: Dict[str, Any] = {}
         self._offline_model_dir: Optional[Path] = None
         self._base_inference: Dict[str, Any] = {}
@@ -107,19 +106,23 @@ class VLLMExecutor(Executor):
         if total_bytes <= 0:
             return requested, None
         free_ratio = float(free_bytes) / float(total_bytes)
-        safety_margin = 0.05  # keep at least 5% headroom
-        min_util_floor = 0.30
-        max_util = free_ratio - safety_margin
-        max_util = min(0.98, max_util)
-        adjusted = requested
-        if max_util <= 0:
-            adjusted = max(min_util_floor, requested * 0.8)
+        safety_margin = 0.05  # keep at least 5% headroom when possible
+        min_util_floor = 0.02
+        max_ceiling = min(0.98, max(min_util_floor, free_ratio))
+
+        headroom = free_ratio - safety_margin
+        if headroom <= 0:
+            adjusted = free_ratio * 0.8
         else:
-            adjusted = min(requested, max_util)
-            if adjusted < min_util_floor and max_util >= min_util_floor:
-                adjusted = min_util_floor
-            elif adjusted <= 0:
-                adjusted = max(min_util_floor, max_util * 0.8)
+            adjusted = min(requested, headroom)
+
+        if adjusted <= 0:
+            adjusted = max(min_util_floor, free_ratio * 0.8)
+
+        if adjusted < min_util_floor:
+            adjusted = min_util_floor
+
+        adjusted = min(adjusted, max_ceiling)
         return adjusted, free_ratio
 
     @staticmethod
@@ -223,7 +226,8 @@ class VLLMExecutor(Executor):
             kwargs_base["dtype"] = str(vllm_cfg["dtype"])
         if "download_dir" in vllm_cfg:
             kwargs_base["download_dir"] = str(vllm_cfg["download_dir"])
-        self._release_llm_after_run = bool(vllm_cfg.get("release_after_run", True))
+        if "release_after_run" in vllm_cfg:
+            logger.debug("Ignoring deprecated model.vllm.release_after_run setting; vLLM is always released.")
 
         tp_candidates: List[int] = []
         seen_tp: Set[int] = set()
@@ -431,15 +435,17 @@ class VLLMExecutor(Executor):
             split = data.get("split", "train")
             shuffle = bool(data.get("shuffle", False))
             trust_remote_code = data.get("trust_remote_code")
-            if trust_remote_code is None:
-                trust_remote_code = True
             revision = data.get("revision")
+            dataset_kwargs = {
+                "name": name,
+                "split": split,
+                "revision": revision,
+            }
+            if trust_remote_code is not None:
+                dataset_kwargs["trust_remote_code"] = bool(trust_remote_code)
             dataset = load_dataset(
                 data_url,
-                name=name,
-                split=split,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
+                **{k: v for k, v in dataset_kwargs.items() if v is not None},
             )
             if shuffle:
                 seed = int(data.get("seed", 42))
@@ -669,8 +675,7 @@ class VLLMExecutor(Executor):
             raise ExecutionError(f"Failed to shard dataset ({index}/{total}): {exc}")
 
     def cleanup_after_run(self) -> None:
-        if self._release_llm_after_run:
-            self._shutdown_llm()
+        self._shutdown_llm()
         self._llm_kwargs = {}
         self._batched_prompts = []
         self._prompt_owners = []
@@ -702,7 +707,24 @@ class VLLMExecutor(Executor):
         llm = getattr(self, "_llm", None)
         if llm is None:
             return
+        engine = None
         try:
+            engine = getattr(llm, "llm_engine", None)
+            if engine is not None:
+                try:
+                    stop_loop = getattr(engine, "stop_remote_worker_execution_loop", None)
+                    if callable(stop_loop):
+                        stop_loop()
+                except Exception:
+                    logger.debug("Failed to stop vLLM engine loop cleanly", exc_info=True)
+                try:
+                    model_executor = getattr(engine, "model_executor", None)
+                    if model_executor is not None:
+                        shutdown_executor = getattr(model_executor, "shutdown", None)
+                        if callable(shutdown_executor):
+                            shutdown_executor()
+                except Exception:
+                    logger.debug("Failed to shutdown vLLM model executor cleanly", exc_info=True)
             shutdown = getattr(llm, "shutdown", None)
             if callable(shutdown):
                 shutdown()
@@ -713,6 +735,11 @@ class VLLMExecutor(Executor):
         except Exception:
             logger.debug("Failed to shutdown vLLM instance cleanly", exc_info=True)
         finally:
+            try:
+                if engine is not None and hasattr(engine, "model_executor"):
+                    setattr(engine, "model_executor", None)
+            except Exception:
+                pass
             self._llm = None
 
     # ------------------------------------------------------------------ #
