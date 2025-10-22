@@ -97,7 +97,7 @@ spec:
         data:
           type: "dataset"
           url: "truthfulqa/truthful_qa"
-          config: "generation"
+          name: "generation"
           split: "validation[:200]"
           column: "question"
           shuffle: true
