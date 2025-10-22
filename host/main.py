@@ -719,8 +719,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     log_level_env = args.log_level or os.getenv("HOST_APP_LOG_LEVEL") or os.getenv("LOG_LEVEL", "info")
     log_level = str(log_level_env).lower()
 
+    uvicorn_app = app if not reload_enabled else "host.main:app"
+
     uvicorn.run(
-        "host.main:app",
+        uvicorn_app,
         host=host_value,
         port=port_value,
         reload=reload_enabled,

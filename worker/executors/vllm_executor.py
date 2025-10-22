@@ -111,6 +111,12 @@ class VLLMExecutor(Executor):
         max_ceiling = min(0.98, max(min_util_floor, free_ratio))
 
         headroom = free_ratio - safety_margin
+        # If there is already enough free memory (plus margin), keep the requested
+        # utilization instead of pessimistically lowering it.
+        if headroom >= requested:
+            adjusted = min(max_ceiling, max(min_util_floor, requested))
+            return adjusted, free_ratio
+
         if headroom <= 0:
             adjusted = free_ratio * 0.8
         else:
@@ -355,59 +361,6 @@ class VLLMExecutor(Executor):
             raise ExecutionError(message)
 
         self._llm_kwargs = chosen_kwargs
-        self._model_name = ident
-        last_exc: Optional[Exception] = None
-        for util in util_candidates:
-            if util in tried_utils:
-                continue
-            tried_utils.add(util)
-            kwargs["gpu_memory_utilization"] = util
-            self._llm_kwargs = dict(kwargs)
-            logger.info(
-                "Initializing vLLM (attempt %d/%d) with gpu_memory_utilization=%.3f",
-                len(tried_utils),
-                len(util_candidates),
-                util,
-            )
-            try:
-                self._llm = LLM(**kwargs)  # type: ignore[call-arg]
-                break
-            except TypeError as exc:
-                if "enable_lora" in kwargs:
-                    kwargs.pop("enable_lora", None)
-                    self._llm_kwargs = dict(kwargs)
-                    try:
-                        self._llm = LLM(**kwargs)  # type: ignore[call-arg]
-                        break
-                    except Exception as inner_exc:
-                        last_exc = inner_exc
-                        continue
-                last_exc = exc
-            except ValueError as exc:
-                last_exc = exc
-                if "gpu memory utilization" not in str(exc).lower():
-                    break
-                logger.warning(
-                    "vLLM initialization failed with gpu_memory_utilization=%.3f: %s",
-                    util,
-                    exc,
-                )
-                continue
-            except RuntimeError as exc:
-                last_exc = exc
-                if "gpu" not in str(exc).lower():
-                    break
-                logger.warning(
-                    "vLLM initialization encountered runtime error with gpu_memory_utilization=%.3f: %s",
-                    util,
-                    exc,
-                )
-                continue
-        else:
-            if last_exc is not None:
-                raise last_exc
-            raise ExecutionError("Failed to initialize vLLM; GPU memory constraints unresolved.")
-
         self._model_name = ident
 
     # --------------------------------------------------------------------- #
@@ -741,6 +694,36 @@ class VLLMExecutor(Executor):
             except Exception:
                 pass
             self._llm = None
+        self._destroy_torch_process_group()
+
+    def _destroy_torch_process_group(self) -> None:
+        if torch is None:
+            return
+        cleanup_fn = None
+        try:
+            from vllm.distributed.parallel_state import cleanup_dist_env_and_memory  # type: ignore
+            cleanup_fn = cleanup_dist_env_and_memory
+        except Exception:
+            cleanup_fn = None
+
+        try:
+            if cleanup_fn is not None:
+                cleanup_fn()
+                return
+        except Exception:
+            logger.debug("vLLM distributed cleanup failed", exc_info=True)
+
+        try:
+            import torch.distributed as dist  # type: ignore
+        except Exception:
+            return
+        if not dist.is_available():
+            return
+        try:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        except Exception:
+            logger.debug("Failed to destroy torch process group cleanly", exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Adapter utilities (per vLLM LoRA docs)
