@@ -1806,6 +1806,7 @@ name = "mloc"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "datasets" },
     { name = "fastapi" },
     { name = "pytest" },
     { name = "python-multipart" },
@@ -1880,6 +1881,7 @@ requires-dist = [
     { name = "arxiv", marker = "extra == 'agent'", specifier = ">=2.2.0" },
     { name = "chunkr-ai", marker = "extra == 'agent'", specifier = ">=0.1.0" },
     { name = "colorlog", marker = "extra == 'agent'", specifier = ">=6.9.0" },
+    { name = "datasets", specifier = ">=4.0.0" },
     { name = "datasets", marker = "extra == 'inference'", specifier = ">=4.0.0" },
     { name = "deepspeed", marker = "extra == 'training'", specifier = ">=0.17.6" },
     { name = "docker", marker = "extra == 'agent'", specifier = ">=7.1.0" },
