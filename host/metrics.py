@@ -442,6 +442,7 @@ class MetricsRecorder:
     def _on_worker_register(self, worker_id: str, event: WorkerEvent) -> None:
         meta = self._worker_meta.setdefault(worker_id, {})
         meta["registered_at"] = event.ts
+        meta["last_heartbeat_ts"] = event.ts
         payload = event.payload or {}
         meta["cost_per_hour"] = _safe_float(payload.get("cost_per_hour"))
         power = payload.get("power_metrics") or {}
@@ -451,6 +452,7 @@ class MetricsRecorder:
     def _on_worker_unregister(self, worker_id: str, event: WorkerEvent) -> None:
         meta = self._worker_meta.setdefault(worker_id, {})
         meta["unregistered_at"] = event.ts
+        meta["last_heartbeat_ts"] = event.ts
         payload = event.payload or {}
         meta["cost_per_hour"] = meta.get("cost_per_hour") or _safe_float(payload.get("cost_per_hour"))
         meta["uptime_sec"] = _safe_float(payload.get("uptime_sec"))
@@ -461,6 +463,7 @@ class MetricsRecorder:
 
     def _on_worker_heartbeat(self, worker_id: str, event: WorkerEvent) -> None:
         meta = self._worker_meta.setdefault(worker_id, {})
+        meta["last_heartbeat_ts"] = event.ts
         metrics = event.metrics or {}
         uptime = _safe_float(metrics.get("uptime_sec"))
         if uptime is not None:
@@ -543,7 +546,7 @@ class MetricsRecorder:
         for worker_id, meta in self._worker_meta.items():
             if worker_id in self._elastic_disabled_workers:
                 continue
-            info = dict(meta)
+            info = self._prepare_worker_summary(worker_id, meta)
             cost = _safe_float(info.get("cost_per_hour"))
             uptime = _safe_float(info.get("uptime_sec"))
             accrued_cost = _safe_float(info.get("accrued_cost_usd"))
@@ -568,7 +571,7 @@ class MetricsRecorder:
                         totals["cpu_energy_kwh"] += cpu_energy
                     if gpu_energy is not None:
                         totals["gpu_energy_kwh"] += gpu_energy
-                    info["estimated_energy_breakdown"] = breakdown
+            info["estimated_energy_breakdown"] = breakdown
             detailed[worker_id] = info
         if totals["workers_with_energy"] == 0:
             totals["estimated_energy_kwh"] = None
@@ -578,3 +581,43 @@ class MetricsRecorder:
             "totals": totals,
             "workers": detailed,
         }
+
+    def _prepare_worker_summary(self, worker_id: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+        info = dict(meta)
+        if worker_id in self._elastic_disabled_workers:
+            return info
+
+        registered_at = info.get("registered_at")
+        start_ts: Optional[float] = None
+        if registered_at:
+            start_ts = parse_iso_ts(registered_at)
+
+        end_ts = None
+        unregistered_at = info.get("unregistered_at")
+        if unregistered_at:
+            end_ts = parse_iso_ts(unregistered_at)
+        if end_ts is None:
+            last_hb = info.get("last_heartbeat_ts")
+            if last_hb:
+                end_ts = parse_iso_ts(last_hb)
+        if end_ts is None:
+            end_ts = time.time()
+
+        if start_ts is not None:
+            inferred_uptime = max(0.0, end_ts - start_ts)
+            current_uptime = _safe_float(info.get("uptime_sec"))
+            if current_uptime is None or inferred_uptime > current_uptime:
+                info["uptime_sec"] = inferred_uptime
+                meta["uptime_sec"] = inferred_uptime
+
+        uptime = _safe_float(info.get("uptime_sec"))
+        cost_per_hour = _safe_float(info.get("cost_per_hour"))
+        inferred_cost = None
+        if uptime is not None and cost_per_hour is not None:
+            inferred_cost = (cost_per_hour / 3600.0) * uptime
+        current_cost = _safe_float(info.get("accrued_cost_usd"))
+        if inferred_cost is not None and (current_cost is None or inferred_cost > current_cost):
+            info["accrued_cost_usd"] = inferred_cost
+            meta["accrued_cost_usd"] = inferred_cost
+
+        return info
