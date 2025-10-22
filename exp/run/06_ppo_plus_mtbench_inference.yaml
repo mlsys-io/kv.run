@@ -109,7 +109,7 @@ spec:
         taskType: "inference"
         data:
           type: "dataset"
-          url: "lmsys/mt-bench"
+          url: "dim/mt_bench_en"
           trust_remote_code: false
           split: "train[:60]"
           column: "turns"
