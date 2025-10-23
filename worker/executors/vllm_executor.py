@@ -463,6 +463,12 @@ class VLLMExecutor(Executor):
                     raise ExecutionError("spec.data.metadata must be a list when type == 'list'.")
                 metadata_raw = list(raw_meta)
         elif dtype == "graph_template":
+            upstream_keys = sorted((spec.get("_upstreamResults") or {}).keys())
+            logger.debug(
+                "Task %s graph_template upstream keys: %s",
+                task_id,
+                upstream_keys,
+            )
             prompts = build_prompts_from_graph_template(data, spec)
             template_cfg = data.get("template") or {}
             append_system_prompt = bool(template_cfg.get("append_system_prompt", False))
@@ -962,7 +968,12 @@ class VLLMExecutor(Executor):
             return
         try:
             if dist.is_initialized():
-                dist.destroy_process_group()
+                shutdown_fn = getattr(dist, "shutdown", None)
+                if callable(shutdown_fn):
+                    shutdown_fn()
+                    logger.debug("torch.distributed.shutdown() invoked for vLLM cleanup")
+                else:
+                    dist.destroy_process_group()
         except Exception:
             logger.debug("Failed to destroy torch process group cleanly", exc_info=True)
 

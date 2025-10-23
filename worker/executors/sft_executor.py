@@ -416,8 +416,13 @@ class SFTExecutor(Executor):
             if dist is not None:
                 try:
                     if dist.is_available() and dist.is_initialized():
-                        dist.destroy_process_group()
-                        logger.debug("Destroyed torch distributed process group during cleanup")
+                        shutdown_fn = getattr(dist, "shutdown", None)
+                        if callable(shutdown_fn):
+                            shutdown_fn()
+                            logger.debug("torch.distributed.shutdown() invoked during cleanup")
+                        else:
+                            dist.destroy_process_group()
+                            logger.debug("Destroyed torch distributed process group during cleanup")
                 except Exception:
                     logger.debug("Failed to destroy torch distributed process group", exc_info=True)
             if torch.cuda.is_available():

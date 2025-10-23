@@ -62,7 +62,12 @@ class StaticWorkerDispatcher(Dispatcher):
         worker_id = self._resolve_worker(workflow_id, record.parsed)
         if not worker_id:
             self._logger.debug("Static worker dispatcher delaying %s: no worker available", task_id)
-            self._requeue_task(task_id, reason="static_worker_unavailable", release_merge=False)
+            self._requeue_task(
+                task_id,
+                reason="static_worker_unavailable",
+                release_merge=False,
+                count_retry=False,
+            )
             return False
 
         task_payload = copy.deepcopy(record.parsed)

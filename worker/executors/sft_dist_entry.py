@@ -27,12 +27,18 @@ def main(argv: list[str]) -> int:
     with task_path.open("r") as fh:
         task = json.load(fh)
     ex = SFTExecutor()
-    result = ex.run(task, out_dir)
-    # Ensure a responses.json is present for the parent to consume
     try:
-        (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
-    except Exception:
-        pass
+        result = ex.run(task, out_dir)
+        # Ensure a responses.json is present for the parent to consume
+        try:
+            (out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+    finally:
+        try:
+            ex.cleanup_after_run()
+        except Exception:
+            pass
     return 0
 
 

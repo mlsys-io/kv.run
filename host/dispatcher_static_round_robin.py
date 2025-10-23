@@ -49,7 +49,12 @@ class StaticRoundRobinDispatcher(Dispatcher):
         worker_id = self._next_worker()
         if not worker_id:
             self._logger.debug("Static RR: no idle worker available for %s; requeueing", task_id)
-            self._requeue_task(task_id, reason="no_idle_worker", release_merge=False)
+            self._requeue_task(
+                task_id,
+                reason="no_idle_worker",
+                release_merge=False,
+                count_retry=False,
+            )
             return False
 
         task_payload = copy.deepcopy(record.parsed)

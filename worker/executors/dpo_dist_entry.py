@@ -21,10 +21,16 @@ def main(argv: list[str]) -> int:
     with args.task_json.open("r", encoding="utf-8") as fh:
         task = json.load(fh)
     executor = DPOExecutor()
-    result = executor.run(task, args.out_dir)
-    if args.local_rank in (None, 0):
+    try:
+        result = executor.run(task, args.out_dir)
+        if args.local_rank in (None, 0):
+            try:
+                (args.out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+    finally:
         try:
-            (args.out_dir / "responses.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            executor.cleanup_after_run()
         except Exception:
             pass
     return 0

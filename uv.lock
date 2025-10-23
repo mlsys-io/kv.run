@@ -1808,6 +1808,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "datasets" },
     { name = "fastapi" },
+    { name = "nvidia-ml-py" },
     { name = "pytest" },
     { name = "python-multipart" },
     { name = "pyyaml" },
@@ -1898,6 +1899,7 @@ requires-dist = [
     { name = "jinja2", marker = "extra == 'agent'", specifier = ">=3.1.6" },
     { name = "matplotlib", marker = "extra == 'agent'", specifier = ">=3.10.3" },
     { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.12.3" },
+    { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "nvidia-ml-py", marker = "extra == 'training'", specifier = ">=13.580.82" },
     { name = "openai", marker = "extra == 'agent'", specifier = "==1.99.6" },
     { name = "openai-agents", marker = "extra == 'agent'", specifier = "==0.2.8" },

@@ -103,7 +103,7 @@ class Dispatcher:
         pool = idle_satisfying_pool(self._redis, task_payload, disabled_workers=disabled_workers)
         if not pool:
             self._logger.debug("No idle worker available for %s; requeueing", task_id)
-            self._requeue_task(task_id, reason="no_idle_worker")
+            self._requeue_task(task_id, reason="no_idle_worker", count_retry=False)
             return False
 
         sticky_worker_id: Optional[str] = None
@@ -209,8 +209,55 @@ class Dispatcher:
             self._fail_task(task_id, str(exc), payload={"error": str(exc)})
             return True
 
-        message["task"] = rendered_task
+        rendered_children: Optional[List[Dict[str, Any]]] = None
         if record.merged_children:
+            rendered_children = []
+            for child_entry in record.merged_children:
+                child_id = str(child_entry.get("task_id") or "").strip()
+                if not child_id:
+                    rendered_children.append(copy.deepcopy(child_entry))
+                    continue
+                child_record = self._runtime.get_record(child_id)
+                if not child_record:
+                    rendered_children.append(copy.deepcopy(child_entry))
+                    continue
+                child_payload = copy.deepcopy(child_entry)
+                child_payload.pop("task_id", None)
+                if not child_payload.get("spec"):
+                    rendered_children.append(copy.deepcopy(child_entry))
+                    continue
+                try:
+                    resolved_child = self._resolve_stage_references(child_id, child_payload, child_record)
+                except StageReferenceNotReady as exc:
+                    self._logger.debug(
+                        "Merged child %s waiting on stage artifacts: %s",
+                        child_id,
+                        exc,
+                    )
+                    self._runtime.release_merge(task_id)
+                    self._requeue_task(task_id, reason="stage_reference_pending", count_retry=False)
+                    return False
+                except Exception as exc:
+                    self._logger.error(
+                        "Failed to resolve stage references for merged child %s: %s",
+                        child_id,
+                        exc,
+                    )
+                    self._runtime.release_merge(task_id)
+                    self._fail_task(
+                        task_id,
+                        f"Failed to resolve merged child {child_id}: {exc}",
+                        payload={"error": str(exc)},
+                    )
+                    return True
+                rendered_entry: Dict[str, Any] = {"task_id": child_id}
+                rendered_entry.update(resolved_child)
+                rendered_children.append(rendered_entry)
+
+        message["task"] = rendered_task
+        if rendered_children is not None:
+            message["merged_children"] = rendered_children
+        elif record.merged_children:
             message["merged_children"] = copy.deepcopy(record.merged_children)
 
         try:
@@ -572,9 +619,12 @@ class Dispatcher:
             return {}
 
         base_yaml = record.raw_yaml
+        submission_id = getattr(record, "submission_id", None)
         context: Dict[str, Any] = {}
         for other in self._runtime.tasks.values():
             if other.raw_yaml != base_yaml:
+                continue
+            if submission_id and getattr(other, "submission_id", None) != submission_id:
                 continue
             if not other.graph_node_name:
                 continue

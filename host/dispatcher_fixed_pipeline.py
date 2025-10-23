@@ -60,7 +60,12 @@ class FixedPipelineDispatcher(Dispatcher):
         worker_id = self._resolve_worker(task_type, record.parsed)
         if not worker_id:
             self._logger.debug("Fixed pipeline dispatcher delaying %s: no worker ready", task_id)
-            self._requeue_task(task_id, reason="no_worker_ready", release_merge=False)
+            self._requeue_task(
+                task_id,
+                reason="no_worker_ready",
+                release_merge=False,
+                count_retry=False,
+            )
             return False
 
         task_payload = copy.deepcopy(record.parsed)
