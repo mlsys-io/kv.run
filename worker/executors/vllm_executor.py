@@ -17,6 +17,7 @@ This rewrite follows vLLM's **LoRA Adapters** guidance:
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import time
@@ -70,6 +71,7 @@ class VLLMExecutor(Executor):
         self._model_name: Optional[str] = None
         self._batched_prompts: List[str] = []
         self._prompt_owners: List[str] = []
+        self._batched_metadata: List[Dict[str, Any]] = []
         self._adapter_specs: List[Dict[str, Any]] = []
         self._merged_adapters: List[str] = []
         self._runtime_specs: List[Dict[str, Any]] = []
@@ -370,6 +372,11 @@ class VLLMExecutor(Executor):
         entry = self._collect_prompts_for_spec(spec, task_id="__standalone__")
         self._batched_prompts = list(entry["prompts"])
         self._prompt_owners = [entry["task_id"]] * len(entry["prompts"])
+        metadata_entries = entry.get("metadata") or []
+        if metadata_entries:
+            self._batched_metadata = [copy.deepcopy(m) for m in metadata_entries]
+        else:
+            self._batched_metadata = [{"prompt": prompt, "rendered_prompt": prompt} for prompt in self._batched_prompts]
         self._base_inference = entry["inference"]
 
     def _collect_prompts_for_spec(self, spec: Dict[str, Any], *, task_id: str) -> Dict[str, Any]:
@@ -380,6 +387,8 @@ class VLLMExecutor(Executor):
         dtype = data.get("type")
         append_system_prompt = True
         prompts: List[str] = []
+        original_prompts: List[str] = []
+        metadata_raw: List[Any] = []
         if dtype == "dataset":
             data_url = data.get("url")
             if not data_url:
@@ -411,15 +420,53 @@ class VLLMExecutor(Executor):
                     f"Column '{column}' not found in dataset. Available: {dataset.column_names}"
                 )
             prompts = [str(x) for x in dataset[column]]
+            original_prompts = list(prompts)
+
+            metadata_spec = data.get("metadata_columns")
+            include_all = bool(data.get("metadata_include_all", False))
+            rename_map: Dict[str, str] = {}
+            metadata_keys: List[str] = []
+            if isinstance(metadata_spec, dict):
+                rename_map = {str(k): str(v) for k, v in metadata_spec.items()}
+                metadata_keys = list(rename_map.keys())
+            elif isinstance(metadata_spec, list):
+                metadata_keys = [str(x) for x in metadata_spec]
+            elif metadata_spec is None:
+                metadata_keys = []
+            else:
+                raise ExecutionError("spec.data.metadata_columns must be a list or mapping")
+
+            for idx in range(len(dataset)):
+                row = dataset[idx]
+                entry_meta: Dict[str, Any] = {"prompt": row.get(column)}
+                if metadata_keys:
+                    for key in metadata_keys:
+                        if key not in row:
+                            continue
+                        alias = rename_map.get(key, key)
+                        entry_meta[alias] = row[key]
+                elif include_all:
+                    for key, value in row.items():
+                        if key == column:
+                            continue
+                        entry_meta[key] = value
+                metadata_raw.append(entry_meta)
         elif dtype == "list":
             items = data.get("items", [])
             if not isinstance(items, list) or any(not isinstance(x, str) for x in items):
                 raise ExecutionError("spec.data.items must be a list of strings for type == 'list'.")
             prompts = [str(x) for x in items]
+            original_prompts = list(prompts)
+            raw_meta = data.get("metadata") or data.get("items_metadata") or []
+            if raw_meta:
+                if not isinstance(raw_meta, list):
+                    raise ExecutionError("spec.data.metadata must be a list when type == 'list'.")
+                metadata_raw = list(raw_meta)
         elif dtype == "graph_template":
             prompts = build_prompts_from_graph_template(data, spec)
             template_cfg = data.get("template") or {}
             append_system_prompt = bool(template_cfg.get("append_system_prompt", False))
+            original_prompts = list(prompts)
         else:
             raise ExecutionError(f"Unsupported spec.data.type: {dtype!r}")
 
@@ -428,11 +475,29 @@ class VLLMExecutor(Executor):
         if system_prompt and append_system_prompt:
             prompts = [f"{system_prompt}\n{p}" for p in prompts]
 
+        rendered_prompts = prompts
+        if not original_prompts:
+            original_prompts = list(rendered_prompts)
+
+        metadata_rows: List[Dict[str, Any]] = []
+        if metadata_raw:
+            if len(metadata_raw) != len(rendered_prompts):
+                raise ExecutionError("spec.data.metadata length must match number of prompts")
+            for idx, meta in enumerate(metadata_raw):
+                base_prompt = original_prompts[idx] if idx < len(original_prompts) else rendered_prompts[idx]
+                final_prompt = rendered_prompts[idx]
+                metadata_rows.append(self._normalize_metadata_entry(meta, base_prompt, final_prompt))
+        else:
+            for idx, prompt_text in enumerate(rendered_prompts):
+                base_prompt = original_prompts[idx] if idx < len(original_prompts) else prompt_text
+                metadata_rows.append(self._normalize_metadata_entry({}, base_prompt, prompt_text))
+
         return {
             "task_id": task_id,
             "prompts": prompts,
             "inference": inference_cfg,
             "data": copy.deepcopy(data),
+            "metadata": metadata_rows,
         }
 
     def _normalize_inference_for_sampling(self, inference: Dict[str, Any]) -> Dict[str, Any]:
@@ -442,6 +507,147 @@ class VLLMExecutor(Executor):
                 continue
             normalized[key] = copy.deepcopy(value)
         return normalized
+
+    def _normalize_metadata_entry(self, meta: Any, base_prompt: str, rendered_prompt: str) -> Dict[str, Any]:
+        if base_prompt is None:
+            base_prompt = ""
+        if rendered_prompt is None:
+            rendered_prompt = base_prompt
+        normalized: Dict[str, Any] = {
+            "prompt": str(base_prompt),
+            "rendered_prompt": str(rendered_prompt),
+        }
+        if meta is None:
+            return normalized
+        if not isinstance(meta, dict):
+            raise ExecutionError("spec.data.metadata entries must be dictionaries")
+        for key, value in meta.items():
+            try:
+                normalized[str(key)] = value
+            except Exception:
+                normalized[str(key)] = value
+        return normalized
+
+    @staticmethod
+    def _field_has_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip() != ""
+        if isinstance(value, (list, dict, tuple, set)):
+            return len(value) > 0
+        return True
+
+    def _resolve_export_field(self, cfg: Any, *, item: Dict[str, Any], prompt: str, metadata: Dict[str, Any]) -> Any:
+        if isinstance(cfg, str):
+            if cfg == "prompt":
+                return prompt
+            if cfg == "output":
+                return item.get("output")
+            if cfg.startswith("metadata."):
+                key = cfg.split(".", 1)[1]
+                return metadata.get(key)
+            if cfg.startswith("item."):
+                key = cfg.split(".", 1)[1]
+                return item.get(key)
+            return cfg
+
+        if not isinstance(cfg, dict):
+            return cfg
+
+        source = cfg.get("from") or cfg.get("source")
+        if source in {None, "literal"}:
+            value = cfg.get("value", cfg.get("literal"))
+        elif source == "prompt":
+            value = prompt
+        elif source == "output":
+            value = item.get("output")
+        elif source == "metadata":
+            key = cfg.get("key")
+            if key:
+                value = metadata.get(key)
+            else:
+                value = metadata
+        elif source == "item":
+            key = cfg.get("key")
+            if key:
+                value = item.get(key)
+            else:
+                value = item
+        else:
+            value = None
+
+        if (value is None or (isinstance(value, str) and value.strip() == "")) and "fallback" in cfg:
+            value = cfg.get("fallback")
+        if value is None and "default" in cfg:
+            value = cfg.get("default")
+        return value
+
+    def _maybe_export_jsonl(self, spec: Dict[str, Any], task_id: str, result: Dict[str, Any], out_dir: Path) -> None:
+        post_cfg = (spec.get("postprocess") or {}).get("jsonl_export")
+        if not post_cfg:
+            return
+
+        path = post_cfg.get("path")
+        if not path:
+            raise ExecutionError("postprocess.jsonl_export.path is required when enabled")
+        fields_cfg = post_cfg.get("fields") or {}
+        if not fields_cfg:
+            raise ExecutionError("postprocess.jsonl_export.fields must define at least one field")
+
+        target_path = Path(path)
+        if not target_path.is_absolute():
+            target_path = out_dir / target_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        items = result.get("items") or []
+        required_fields = post_cfg.get("required_fields") or []
+        records: List[Dict[str, Any]] = []
+
+        for idx, item in enumerate(items):
+            prompt_text = item.get("prompt") or ""
+            metadata = item.get("metadata") or {}
+            record: Dict[str, Any] = {}
+            for field_name, field_cfg in fields_cfg.items():
+                value = self._resolve_export_field(field_cfg, item=item, prompt=prompt_text, metadata=metadata)
+                if value is None:
+                    record[field_name] = ""
+                else:
+                    record[field_name] = str(value)
+            missing = [name for name in required_fields if not self._field_has_value(record.get(name))]
+            if missing:
+                raise ExecutionError(
+                    f"postprocess.jsonl_export missing required fields {missing} for item {idx} (task {task_id})"
+                )
+            records.append(record)
+
+        with target_path.open("w", encoding="utf-8") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec, ensure_ascii=False))
+                fh.write("\n")
+
+        resolved = target_path.resolve()
+        relative_path = None
+        try:
+            relative_path = str(resolved.relative_to(out_dir.resolve()))
+        except Exception:
+            relative_path = None
+
+        export_payload = {
+            "path": str(resolved),
+            "record_count": len(records),
+            "fields": list(fields_cfg.keys()),
+        }
+        if relative_path:
+            export_payload["relative_path"] = relative_path
+
+        result["jsonl_export"] = export_payload
+        logger.info(
+            "Task %s exported %d records to %s",
+            task_id,
+            len(records),
+            export_payload["path"],
+        )
 
     def _build_sampling_params(self, inference: Dict[str, Any]) -> SamplingParams:
         cfg = copy.deepcopy(inference)
@@ -487,11 +693,24 @@ class VLLMExecutor(Executor):
 
         self._batched_prompts = []
         self._prompt_owners = []
+        self._batched_metadata = []
         for entry in entries:
             owner = entry["task_id"]
-            for prompt in entry["prompts"]:
+            prompts_for_owner = entry["prompts"]
+            metadata_for_owner = entry.get("metadata") or []
+            if metadata_for_owner and len(metadata_for_owner) != len(prompts_for_owner):
+                raise ExecutionError(
+                    f"spec.data.metadata length mismatch for task {owner}: "
+                    f"{len(metadata_for_owner)} (metadata) vs {len(prompts_for_owner)} (prompts)"
+                )
+            for idx, prompt in enumerate(prompts_for_owner):
                 self._batched_prompts.append(prompt)
                 self._prompt_owners.append(owner)
+                if metadata_for_owner:
+                    meta_entry = copy.deepcopy(metadata_for_owner[idx])
+                else:
+                    meta_entry = {"prompt": prompt}
+                self._batched_metadata.append(meta_entry)
 
         if not self._batched_prompts:
             raise ExecutionError("No prompts prepared. Check spec.data configuration.")
@@ -545,9 +764,20 @@ class VLLMExecutor(Executor):
             owner = self._prompt_owners[idx] if idx < len(self._prompt_owners) else task_id
             owner_items = per_task_items.setdefault(owner, [])
             local_index = len(owner_items)
+            prompt_text = self._batched_prompts[idx] if idx < len(self._batched_prompts) else ""
+            metadata_entry = copy.deepcopy(self._batched_metadata[idx]) if idx < len(self._batched_metadata) else {"prompt": prompt_text}
+
             out_outputs = getattr(out, "outputs", None)
             if not out_outputs:
-                owner_items.append({"index": local_index, "output": "", "finish_reason": None})
+                payload = {
+                    "index": local_index,
+                    "prompt": prompt_text,
+                    "output": "",
+                    "finish_reason": None,
+                }
+                if metadata_entry:
+                    payload["metadata"] = metadata_entry
+                owner_items.append(payload)
                 usage_by_task.setdefault(owner, {"prompt_tokens": 0, "completion_tokens": 0})
                 counts_by_task[owner] = counts_by_task.get(owner, 0) + 1
                 continue
@@ -555,7 +785,15 @@ class VLLMExecutor(Executor):
             best = out_outputs[0]
             text = getattr(best, "text", "") or ""
             finish_reason = getattr(best, "finish_reason", None)
-            owner_items.append({"index": local_index, "output": text, "finish_reason": finish_reason})
+            payload = {
+                "index": local_index,
+                "prompt": prompt_text,
+                "output": text,
+                "finish_reason": finish_reason,
+            }
+            if metadata_entry:
+                payload["metadata"] = metadata_entry
+            owner_items.append(payload)
 
             prompt_token_ids = getattr(out, "prompt_token_ids", None) or []
             best_token_ids = getattr(best, "token_ids", None) or []
@@ -608,6 +846,8 @@ class VLLMExecutor(Executor):
         if child_results:
             result["children"] = child_results
 
+        self._maybe_export_jsonl(spec, task_id, result, out_dir)
+
         return result
 
     def _maybe_apply_dataset_shard(self, dataset, spec: Dict[str, Any]):
@@ -632,6 +872,7 @@ class VLLMExecutor(Executor):
         self._llm_kwargs = {}
         self._batched_prompts = []
         self._prompt_owners = []
+        self._batched_metadata = []
         self._adapter_specs = []
         self._runtime_specs = []
         self._merged_adapters = []

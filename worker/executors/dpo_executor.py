@@ -12,7 +12,7 @@ import subprocess
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -68,7 +68,75 @@ class DPOExecutor(Executor):
         """Load training dataset in DPO format"""
         data_config = spec.get("data", {})
 
-        if "dataset_name" in data_config:
+        jsonl_cfg = data_config.get("jsonl")
+        jsonl_path = data_config.get("jsonl_path")
+        if jsonl_cfg or jsonl_path:
+            if jsonl_cfg is None:
+                jsonl_cfg = {}
+            else:
+                jsonl_cfg = dict(jsonl_cfg)
+            if jsonl_path:
+                jsonl_cfg.setdefault("path", jsonl_path)
+
+            path_value = jsonl_cfg.get("path")
+            if not path_value:
+                raise ExecutionError("data.jsonl.path is required when using JSONL input")
+            jsonl_file = Path(path_value).expanduser().resolve()
+            if not jsonl_file.exists():
+                raise ExecutionError(f"JSONL dataset not found: {jsonl_file}")
+
+            prompt_field = (
+                jsonl_cfg.get("prompt_field")
+                or data_config.get("prompt_field")
+                or "prompt"
+            )
+            chosen_field = (
+                jsonl_cfg.get("chosen_field")
+                or data_config.get("chosen_field")
+                or "chosen"
+            )
+            rejected_field = (
+                jsonl_cfg.get("rejected_field")
+                or data_config.get("rejected_field")
+                or "rejected"
+            )
+
+            prompts: List[str] = []
+            chosen: List[str] = []
+            rejected: List[str] = []
+
+            with jsonl_file.open("r", encoding="utf-8") as fh:
+                for line_number, raw in enumerate(fh, start=1):
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError as exc:
+                        raise ExecutionError(
+                            f"Invalid JSON on line {line_number} of {jsonl_file}: {exc}"
+                        ) from exc
+
+                    if prompt_field not in record or chosen_field not in record or rejected_field not in record:
+                        raise ExecutionError(
+                            "JSONL record missing required fields. "
+                            f"Expected keys: '{prompt_field}', '{chosen_field}', '{rejected_field}'"
+                        )
+
+                    prompts.append(str(record[prompt_field]))
+                    chosen.append(str(record[chosen_field]))
+                    rejected.append(str(record[rejected_field]))
+
+            if not prompts:
+                raise ExecutionError(f"JSONL dataset at {jsonl_file} is empty")
+
+            dataset = Dataset.from_dict({
+                "prompt": prompts,
+                "chosen": chosen,
+                "rejected": rejected,
+            })
+
+        elif "dataset_name" in data_config:
             # Load from Hugging Face datasets (like ultrafeedback_binarized)
             from datasets import load_dataset
             dataset_name = data_config["dataset_name"]

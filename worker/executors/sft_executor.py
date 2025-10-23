@@ -16,7 +16,7 @@ import subprocess
 import gc
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 from datasets import Dataset, load_dataset
 import torch
@@ -466,6 +466,97 @@ class SFTExecutor(Executor):
         dataset_name = data_cfg.get("dataset_name")
         prompt_col = data_cfg.get("prompt_column")
         response_col = data_cfg.get("response_column")
+
+        jsonl_cfg = data_cfg.get("jsonl")
+        jsonl_path = data_cfg.get("jsonl_path")
+        if jsonl_cfg or jsonl_path:
+            if jsonl_cfg is None:
+                jsonl_cfg = {}
+            else:
+                jsonl_cfg = dict(jsonl_cfg)
+            if jsonl_path:
+                jsonl_cfg.setdefault("path", jsonl_path)
+
+            path_value = jsonl_cfg.get("path")
+            if not path_value:
+                raise ValueError("data.jsonl.path is required when using JSONL inputs for SFT")
+            jsonl_file = Path(path_value).expanduser().resolve()
+            if not jsonl_file.exists():
+                raise ValueError(f"JSONL dataset not found: {jsonl_file}")
+
+            text_field = (
+                jsonl_cfg.get("text_field")
+                or data_cfg.get("text_field")
+            )
+            prompt_field = (
+                jsonl_cfg.get("prompt_field")
+                or data_cfg.get("prompt_field")
+            )
+            response_field = (
+                jsonl_cfg.get("response_field")
+                or data_cfg.get("response_field")
+            )
+            separator = (
+                jsonl_cfg.get("separator")
+                or data_cfg.get("separator")
+                or "\n\n"
+            )
+
+            texts: List[str] = []
+
+            with jsonl_file.open("r", encoding="utf-8") as fh:
+                for line_number, raw in enumerate(fh, start=1):
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            f"Invalid JSON on line {line_number} of {jsonl_file}: {exc}"
+                        ) from exc
+
+                    if text_field and text_field in record:
+                        value = record[text_field]
+                    elif prompt_field and response_field:
+                        if prompt_field not in record:
+                            raise ValueError(
+                                f"JSONL record missing prompt field '{prompt_field}' on line {line_number}"
+                            )
+                        if response_field not in record:
+                            raise ValueError(
+                                f"JSONL record missing response field '{response_field}' on line {line_number}"
+                            )
+                        value = f"{record[prompt_field]}{separator}{record[response_field]}"
+                    elif prompt_field:
+                        if prompt_field not in record:
+                            raise ValueError(
+                                f"JSONL record missing field '{prompt_field}' on line {line_number}"
+                            )
+                        value = record[prompt_field]
+                    elif response_field:
+                        if response_field not in record:
+                            raise ValueError(
+                                f"JSONL record missing field '{response_field}' on line {line_number}"
+                            )
+                        value = record[response_field]
+                    else:
+                        raise ValueError(
+                            "data.jsonl must specify text_field or prompt_field/response_field"
+                        )
+
+                    texts.append(str(value))
+
+            if not texts:
+                raise ValueError(f"JSONL dataset at {jsonl_file} is empty")
+
+            dataset = Dataset.from_dict({"text": texts})
+            max_samples = data_cfg.get("max_samples")
+            if max_samples is not None:
+                max_samples = int(max_samples)
+                dataset = dataset.select(range(min(len(dataset), max_samples)))
+
+            return dataset, "text"
 
         if dataset_name:
             split = data_cfg.get("split", "train")

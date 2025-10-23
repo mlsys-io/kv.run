@@ -13,7 +13,7 @@ import time
 import logging
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import torch
 from datasets import Dataset
@@ -788,7 +788,65 @@ class PPOExecutor(Executor):
         """Load training dataset"""
         data_config = spec.get("data", {})
         
-        if "prompts" in data_config:
+        jsonl_cfg = data_config.get("jsonl")
+        jsonl_path = data_config.get("jsonl_path")
+        if jsonl_cfg or jsonl_path:
+            if jsonl_cfg is None:
+                jsonl_cfg = {}
+            else:
+                jsonl_cfg = dict(jsonl_cfg)
+            if jsonl_path:
+                jsonl_cfg.setdefault("path", jsonl_path)
+
+            path_value = jsonl_cfg.get("path")
+            if not path_value:
+                raise ExecutionError("data.jsonl.path is required when using JSONL input")
+            jsonl_file = Path(path_value).expanduser().resolve()
+            if not jsonl_file.exists():
+                raise ExecutionError(f"JSONL dataset not found: {jsonl_file}")
+
+            query_field = (
+                jsonl_cfg.get("query_field")
+                or data_config.get("query_field")
+                or "query"
+            )
+            response_field = (
+                jsonl_cfg.get("response_field")
+                or data_config.get("response_field")
+            )
+
+            prompts: List[str] = []
+            references: Optional[List[str]] = [] if response_field else None
+
+            with jsonl_file.open("r", encoding="utf-8") as fh:
+                for line_number, raw in enumerate(fh, start=1):
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError as exc:
+                        raise ExecutionError(
+                            f"Invalid JSON on line {line_number} of {jsonl_file}: {exc}"
+                        ) from exc
+
+                    if query_field not in record:
+                        raise ExecutionError(
+                            f"JSONL record missing required field '{query_field}' on line {line_number}"
+                        )
+                    prompts.append(str(record[query_field]))
+                    if references is not None:
+                        references.append(str(record.get(response_field, "")))
+
+            if not prompts:
+                raise ExecutionError(f"JSONL dataset at {jsonl_file} is empty")
+
+            dataset_dict: Dict[str, Any] = {"query": prompts}
+            if references is not None:
+                dataset_dict["reference_response"] = references
+            dataset = Dataset.from_dict(dataset_dict)
+
+        elif "prompts" in data_config:
             # Use provided prompts directly
             prompts = data_config["prompts"]
             # Convert to the format expected by TRL PPO
