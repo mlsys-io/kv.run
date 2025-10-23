@@ -241,29 +241,15 @@ def idle_satisfying_pool(
             continue
         if _hw_satisfies(worker, task):
             available.append(worker)
-    return available
+    return sort_workers(available)
 
 
 def sort_workers(workers: List[Worker]) -> List[Worker]:
     decorated = []
     for worker in workers:
-        gpus = safe_get(worker.hardware, "gpu.gpus", []) or safe_get(worker.hardware, "gpus", []) or []
-        gpu_count = len(gpus) if isinstance(gpus, list) else 0
-        total_vram = 0
-        if gpu_count > 0:
-            for gpu in gpus:
-                mem = (
-                    safe_get(gpu, "memory.total_bytes")
-                    or safe_get(gpu, "memory_bytes")
-                    or safe_get(gpu, "vram_bytes")
-                    or safe_get(gpu, "memory.total")
-                    or safe_get(gpu, "vram")
-                )
-                bytes_val = parse_mem_to_bytes(mem) if isinstance(mem, str) else mem
-                try:
-                    total_vram += int(bytes_val or 0)
-                except Exception:
-                    total_vram += 0
+        gpu_entries = _gpu_entries(worker.hardware)
+        gpu_count = len(gpu_entries)
+        total_vram = sum(_gpu_memory_bytes(entry) for entry in gpu_entries)
         sys_ram = int(safe_get(worker.hardware, "memory.total_bytes", 0) or 0)
         cpu_cores = int(safe_get(worker.hardware, "cpu.logical_cores", 0) or 0)
         decorated.append((worker, gpu_count, total_vram, sys_ram, cpu_cores))
@@ -318,38 +304,89 @@ def _hw_satisfies(worker: Worker, task: Dict[str, Any]) -> bool:
             return False
 
     if isinstance(gpu_req, dict) and gpu_req:
-        required_count = gpu_req.get("count")
-        if required_count is not None:
-            try:
-                required_count = int(required_count)
-            except Exception:
-                required_count = None
-        required_type = str(gpu_req.get("type") or "").strip().lower()
-        if required_type in {"", "any", "auto", "*"}:
-            required_type = ""
-        gpu_info = safe_get(hw, "gpu.gpus", []) or safe_get(hw, "gpus", [])
-        if isinstance(gpu_info, list) and gpu_info:
-            if required_count is not None and len(gpu_info) < required_count:
+        if not _gpu_meets_requirements(hw, gpu_req):
+            return False
+
+    return True
+
+
+def _gpu_entries(hw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = safe_get(hw, "gpu.gpus", []) or safe_get(hw, "gpus", [])
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _gpu_memory_bytes(entry: Dict[str, Any]) -> int:
+    value = (
+        entry.get("memory_total_bytes")
+        or safe_get(entry, "memory.total_bytes")
+        or safe_get(entry, "memory_bytes")
+        or safe_get(entry, "vram_bytes")
+        or safe_get(entry, "memory.total")
+        or safe_get(entry, "vram")
+    )
+    if isinstance(value, str):
+        return int(parse_mem_to_bytes(value) or 0)
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _gpu_meets_requirements(hw: Dict[str, Any], gpu_req: Dict[str, Any]) -> bool:
+    required_count = gpu_req.get("count")
+    if required_count is not None:
+        try:
+            required_count = int(required_count)
+        except Exception:
+            required_count = None
+    required_type = str(gpu_req.get("type") or "").strip().lower()
+    if required_type in {"", "any", "auto", "*"}:
+        required_type = ""
+    required_memory = gpu_req.get("memory")
+    required_memory_bytes = parse_mem_to_bytes(str(required_memory)) if required_memory else None
+
+    entries = _gpu_entries(hw)
+    if entries:
+        if required_count is not None and len(entries) < required_count:
+            return False
+        if required_type:
+            pattern = re.compile(re.escape(required_type), re.IGNORECASE)
+            if not any(pattern.search(str(entry.get("name") or entry.get("type") or "")) for entry in entries):
                 return False
-            if required_type:
-                pattern = re.compile(re.escape(required_type), re.IGNORECASE)
-                if not any(pattern.search(str(gpu.get("name") or gpu.get("type") or "")) for gpu in gpu_info):
-                    return False
-        else:
-            count = safe_get(hw, "gpu.count") or safe_get(hw, "gpu_count") or safe_get(hw, "gpu.info.count")
-            try:
-                count = int(count)
-            except Exception:
-                count = 0
-            if required_count is not None and count < required_count:
+        if required_memory_bytes:
+            eligible = sum(1 for entry in entries if _gpu_memory_bytes(entry) >= required_memory_bytes)
+            needed = required_count or 1
+            if eligible < needed:
                 return False
-            type_value = (
-                safe_get(hw, "gpu.type")
-                or safe_get(hw, "gpu_info.type")
-                or safe_get(hw, "gpuType")
-            )
-            if required_type and not str(type_value or "").strip().lower().startswith(required_type):
-                return False
+        return True
+
+    # Fallback when workers report aggregate GPU data instead of per-device entries.
+    count = safe_get(hw, "gpu.count") or safe_get(hw, "gpu_count") or safe_get(hw, "gpu.info.count")
+    try:
+        count = int(count)
+    except Exception:
+        count = 0
+    if required_count is not None and count < required_count:
+        return False
+
+    type_value = safe_get(hw, "gpu.type") or safe_get(hw, "gpu_info.type") or safe_get(hw, "gpuType")
+    if required_type and not str(type_value or "").strip().lower().startswith(required_type):
+        return False
+
+    if required_memory_bytes:
+        total_mem = safe_get(hw, "gpu.total_memory_bytes") or safe_get(hw, "gpu_memory_bytes")
+        try:
+            total_mem = int(total_mem)
+        except Exception:
+            total_mem = 0
+        if total_mem <= 0:
+            return False
+        needed = required_count or 1
+        per_gpu = total_mem / max(needed, 1)
+        if per_gpu < required_memory_bytes:
+            return False
 
     return True
 

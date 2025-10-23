@@ -445,6 +445,9 @@ class MetricsRecorder:
         meta["last_heartbeat_ts"] = event.ts
         payload = event.payload or {}
         meta["cost_per_hour"] = _safe_float(payload.get("cost_per_hour"))
+        hardware = payload.get("hardware")
+        if isinstance(hardware, dict):
+            meta["hardware"] = hardware
         power = payload.get("power_metrics") or {}
         if isinstance(power, dict):
             meta["power_samples"] = [power]
@@ -471,6 +474,9 @@ class MetricsRecorder:
         accrued_cost = _safe_float(metrics.get("accrued_cost_usd"))
         if accrued_cost is not None:
             meta["accrued_cost_usd"] = accrued_cost
+        hardware = metrics.get("hardware")
+        if isinstance(hardware, dict):
+            meta["hardware"] = hardware
         energy_total = _safe_float(metrics.get("estimated_energy_kwh"))
         if energy_total is not None:
             meta["estimated_energy_kwh"] = energy_total
@@ -541,12 +547,20 @@ class MetricsRecorder:
             "cpu_energy_kwh": 0.0,
             "gpu_energy_kwh": 0.0,
             "workers_with_energy": 0,
+            "gpu_memory_total_bytes": 0,
         }
         detailed = {}
         for worker_id, meta in self._worker_meta.items():
             if worker_id in self._elastic_disabled_workers:
                 continue
             info = self._prepare_worker_summary(worker_id, meta)
+            gpu_mem_bytes = self._extract_gpu_memory_bytes(info)
+            if gpu_mem_bytes is not None:
+                totals["gpu_memory_total_bytes"] += gpu_mem_bytes
+                info["gpu_memory_total_bytes"] = gpu_mem_bytes
+            else:
+                info["gpu_memory_total_bytes"] = None
+            breakdown: Optional[Dict[str, Any]] = None
             cost = _safe_float(info.get("cost_per_hour"))
             uptime = _safe_float(info.get("uptime_sec"))
             accrued_cost = _safe_float(info.get("accrued_cost_usd"))
@@ -571,12 +585,14 @@ class MetricsRecorder:
                         totals["cpu_energy_kwh"] += cpu_energy
                     if gpu_energy is not None:
                         totals["gpu_energy_kwh"] += gpu_energy
-            info["estimated_energy_breakdown"] = breakdown
+            info["estimated_energy_breakdown"] = breakdown if isinstance(breakdown, dict) else None
             detailed[worker_id] = info
         if totals["workers_with_energy"] == 0:
             totals["estimated_energy_kwh"] = None
             totals["cpu_energy_kwh"] = None
             totals["gpu_energy_kwh"] = None
+        if totals["gpu_memory_total_bytes"] == 0:
+            totals["gpu_memory_total_bytes"] = None
         return {
             "totals": totals,
             "workers": detailed,
@@ -621,3 +637,26 @@ class MetricsRecorder:
             meta["accrued_cost_usd"] = inferred_cost
 
         return info
+
+    def _extract_gpu_memory_bytes(self, info: Dict[str, Any]) -> Optional[int]:
+        hardware = info.get("hardware")
+        if not isinstance(hardware, dict):
+            return None
+        gpu_info = hardware.get("gpu")
+        if not isinstance(gpu_info, dict):
+            return None
+        total = 0
+        found = False
+        gpus = gpu_info.get("gpus")
+        if isinstance(gpus, list):
+            for entry in gpus:
+                if not isinstance(entry, dict):
+                    continue
+                mem_bytes = entry.get("memory_total_bytes")
+                if isinstance(mem_bytes, (int, float)):
+                    if mem_bytes > 0:
+                        total += int(mem_bytes)
+                        found = True
+        if found:
+            return total
+        return None

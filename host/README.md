@@ -11,7 +11,10 @@ revision.
    `TaskRuntime` exposes the queue length for the elastic manager.
 2. **Candidate discovery** – for each task we build a pool of idle workers whose
    advertised hardware satisfies the task requirements (`idle_satisfying_pool`).
-   Workers disabled by the elastic coordinator are filtered out here.
+   Requirements now include per-device VRAM via
+   `spec.resources.hardware.gpu.memory`; workers report their VRAM at
+   registration so the pool automatically excludes nodes with insufficient
+   memory. Workers disabled by the elastic coordinator are filtered out here.
 3. **Context reuse** – when `ENABLE_CONTEXT_REUSE=true`, workers that recently
    cached the required model/dataset are preferred. Cache hints carry a TTL
    (`WORKER_CACHE_TTL_SEC`, default 1h); stale hints automatically fall back to
@@ -34,6 +37,16 @@ revision.
 5. **Logging & observability** – every dispatch logs the candidate pool size,
    reuse hits, lambda, and the final score of the chosen worker. Metrics exports
    (`/metrics`) include elastic disabled workers so tuning is auditable.
+
+### Stage affinity for fine-tunes
+When `ENABLE_STAGE_WEIGHT_STICKINESS=true` the adaptive dispatcher inspects each
+task's payload for `${stage.result...}` references under checkpoint/adapter
+fields. If a downstream stage needs the parent weights and the original worker
+is still alive, the dispatcher pins the child task to that worker to avoid
+re-downloading and unpacking large archives. If the worker is busy but healthy,
+the task is requeued with a `sticky_worker_busy` reason so metrics reflect the
+deferred dispatch. If the worker disappears, the dispatcher gracefully falls
+back to normal scoring.
 
 ## Dispatcher modes
 
@@ -89,6 +102,26 @@ root `README.md`. Key additions related to the scheduler:
 - `SCHEDULER_LAMBDA_INFERENCE`, `SCHEDULER_LAMBDA_TRAINING`, `SCHEDULER_LAMBDA_OTHER`
   – category-specific λ weights.
 - `SCHEDULER_SELECTION_JITTER` – jitter magnitude used to break ties.
+
+## Metrics instrumentation
+
+Host-side retries/failures now go through shared helpers:
+
+- `_requeue_task` records `TASK_REQUEUED` with a descriptive `reason`. This
+  keeps `/metrics` and `metrics.json` in sync with actual dispatch decisions,
+  even when the dispatcher loops waiting for a sticky worker or a publish retry.
+- `_fail_task` wraps `TaskRuntime.mark_failed`, emitting `TASK_FAILED` for the
+  primary task, any impacted dependents, and merged children. The payload
+  includes `dependency_failure`/`parent_task_id` hints so cascades are easy to
+  trace.
+- Worker-originated `TASK_FAILED` events now trigger automatic retries up to
+  `max_attempts` (per task). Only when the attempt budget is exhausted does the
+  orchestrator mark the task as failed and emit the corresponding metrics event.
+  Temporary dependency waits (`stage_reference_pending`) do not count toward the
+  attempt budget or requeue counters.
+
+Because the recorder is injected into every dispatcher variant, the counters stay
+accurate regardless of `ORCHESTRATOR_DISPATCH_MODE`.
 
 ## Testing ideas
 

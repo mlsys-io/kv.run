@@ -17,6 +17,7 @@ spec:
       gpu:
         type: "any"
         count: 1
+        memory: "24Gi"
 
   data:
     type: "dataset"
@@ -45,6 +46,7 @@ spec:
             gpu:
               type: "any"
               count: 1
+              memory: "24Gi"
 
         model:
           source:
@@ -81,6 +83,7 @@ spec:
             gpu:
               type: "any"
               count: 2
+              memory: "24Gi"
 
         model:
           source:
@@ -117,6 +120,7 @@ spec:
             gpu:
               type: "any"
               count: 2
+              memory: "24Gi"
 
         model:
           source:

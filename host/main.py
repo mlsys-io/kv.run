@@ -109,6 +109,7 @@ ENABLE_CONTEXT_REUSE = parse_bool_env("ENABLE_CONTEXT_REUSE", True)
 ENABLE_TASK_MERGE = parse_bool_env("ENABLE_TASK_MERGE", True)
 TASK_MERGE_MAX_BATCH_SIZE = max(1, parse_int_env("TASK_MERGE_MAX_BATCH_SIZE", 4))
 ENABLE_ELASTIC_SCALING = parse_bool_env("ENABLE_ELASTIC_SCALING", True)
+ENABLE_STAGE_WEIGHT_STICKINESS = parse_bool_env("ENABLE_STAGE_WEIGHT_STICKINESS", False)
 WORKER_CACHE_TTL_SEC = max(0, parse_int_env("WORKER_CACHE_TTL_SEC", 3600))
 SCHED_LAMBDA_INFERENCE = parse_float_env("SCHEDULER_LAMBDA_INFERENCE", 0.4)
 SCHED_LAMBDA_TRAINING = parse_float_env("SCHEDULER_LAMBDA_TRAINING", 0.8)
@@ -155,6 +156,8 @@ DISPATCHER = create_dispatcher(
     task_merge_max_batch_size=TASK_MERGE_MAX_BATCH_SIZE,
     elastic_coordinator=ELASTIC_COORDINATOR,
     reuse_cache_ttl_sec=WORKER_CACHE_TTL_SEC,
+    enable_stage_weight_stickiness=ENABLE_STAGE_WEIGHT_STICKINESS,
+    metrics_recorder=METRICS_RECORDER,
     lambda_config={
         "inference": SCHED_LAMBDA_INFERENCE,
         "training": SCHED_LAMBDA_TRAINING,
@@ -164,6 +167,8 @@ DISPATCHER = create_dispatcher(
 )
 STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []
+REDIS_FLUSH_LOCK = threading.Lock()
+REDIS_FLUSHED = False
 
 
 def _export_metrics_on_exit() -> None:
@@ -180,6 +185,24 @@ def _export_metrics_on_exit() -> None:
         logger.warning("Failed to export metrics summary: %s", exc)
 
 
+def _clear_redis_state() -> None:
+    global REDIS_FLUSHED
+    with REDIS_FLUSH_LOCK:
+        if REDIS_FLUSHED:
+            return
+        try:
+            RDS.flushdb()
+            logger.info("Cleared Redis database at %s", REDIS_URL)
+            REDIS_FLUSHED = True
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to clear Redis database on exit: %s", exc)
+
+
+def _clear_redis_on_exit() -> None:
+    _clear_redis_state()
+
+
+atexit.register(_clear_redis_on_exit)
 atexit.register(_export_metrics_on_exit)
 
 
@@ -229,12 +252,13 @@ def _tasks_events_loop() -> None:
 
 
 def _handle_task_event(event: TaskEvent) -> None:
-    METRICS_RECORDER.record_task_event(event)
     payload = event.payload or {}
     event_type = event.type
     if event_type == "TASK_STARTED":
+        METRICS_RECORDER.record_task_event(event)
         RUNTIME.mark_started(event.task_id, event.worker_id, payload, event.ts)
     elif event_type == "TASK_SUCCEEDED":
+        METRICS_RECORDER.record_task_event(event)
         ready_children, merged_children = RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
         try:
             queueing, dispatched, pending, done, total = RUNTIME.task_status_counts()
@@ -277,6 +301,36 @@ def _handle_task_event(event: TaskEvent) -> None:
         if merged_children:
             _mirror_task_results(event.task_id, merged_children)
     elif event_type == "TASK_FAILED":
+        record = RUNTIME.get_record(event.task_id)
+        attempts = record.attempts if record else 0
+        max_attempts = record.max_attempts if record else None
+        can_retry = (
+            record
+            and (max_attempts is None or max_attempts < 0 or attempts < max_attempts)
+        )
+        if can_retry:
+            limit_display = "∞" if max_attempts is None or max_attempts < 0 else max_attempts
+            if event.worker_id:
+                record.last_failed_worker = event.worker_id
+            logger.warning(
+                "Retrying task %s after worker failure (%d/%s)",
+                event.task_id,
+                attempts + 1,
+                limit_display,
+            )
+            DISPATCHER._requeue_task(
+                event.task_id,
+                reason="worker_failed",
+                front=True,
+                extra_payload={
+                    "error": event.error,
+                    "attempt": attempts + 1,
+                    "max_attempts": max_attempts,
+                },
+            )
+            return
+
+        METRICS_RECORDER.record_task_event(event)
         impacted, merged_children = RUNTIME.mark_failed(
             event.task_id,
             event.worker_id,
@@ -387,13 +441,14 @@ def _workers_events_loop() -> None:
                                 ", ".join(recovered),
                             )
                             for task_id in recovered:
-                                METRICS_RECORDER.record_task_event(
-                                    TaskEvent(
-                                        type="TASK_REQUEUED",
-                                        task_id=task_id,
-                                        worker_id=worker_id,
-                                        payload={"reason": "worker_unregistered"},
-                                    )
+                                record = RUNTIME.get_record(task_id)
+                                if record:
+                                    record.last_failed_worker = worker_id
+                                DISPATCHER._requeue_task(
+                                    task_id,
+                                    reason="worker_unregistered",
+                                    front=True,
+                                    extra_payload={"worker": worker_id},
                                 )
             try:
                 pubsub.close()
@@ -423,6 +478,7 @@ def _stop_background_threads() -> None:
     ELASTIC_COORDINATOR.shutdown()
     for thread in BACKGROUND_THREADS:
         thread.join(timeout=2.0)
+    _clear_redis_state()
 
 
 # --------------------------------------------------------------------------- #
@@ -536,8 +592,8 @@ async def submit_task(request: Request, _: Any = Depends(require_auth)):
                 "topic": info.get("topic"),
                 "waiting_on": info.get("pending_dependencies", []),
                 "depends_on": info.get("depends_on", []),
-                "retries": info.get("retries"),
-                "max_retries": info.get("max_retries"),
+                "attempts": info.get("attempts"),
+                "max_attempts": info.get("max_attempts"),
                 "load": info.get("load"),
             }
         )

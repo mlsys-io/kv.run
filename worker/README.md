@@ -38,6 +38,12 @@ On startup the worker:
    `final_lora/` into a `.tar.gz` file and uploads it to the orchestrator, recording
    the publicly retrievable URL in the task result.
 
+> ℹ️ The hardware probe now records per-GPU VRAM by shelling out to
+> `nvidia-smi`. This allows templates that specify
+> `spec.resources.hardware.gpu.memory` to be matched against the actual device
+> memory. Ensure the NVIDIA utilities are on `$PATH` (they are present in the
+> CUDA worker image by default).
+
 ## Output directories
 - Each task receives a dedicated directory inside `RESULTS_DIR`.
 - Executors write their JSON summary to `<task_id>/responses.json`.

@@ -17,6 +17,7 @@ spec:
       gpu:
         type: "any"
         count: 1
+        memory: "48Gi"
 
   model:
     source:

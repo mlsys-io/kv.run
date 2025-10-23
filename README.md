@@ -34,6 +34,13 @@ training pipelines.
 - Flexible artifact delivery: Workers can persist to shared storage or upload
   binaries (for example, fine-tuned checkpoints) back to the orchestrator over
   HTTP after every training run.
+- VRAM-aware placement with optional stage stickiness: declare
+  `spec.resources.hardware.gpu.memory` to require a minimum per-device VRAM, and
+  enable `ENABLE_STAGE_WEIGHT_STICKINESS` to keep finetune stages on the
+  worker that produced the prior checkpoint, avoiding redundant weight copies.
+- Metrics surface host retries: internal requeues/failures now emit synthetic
+  `TASK_REQUEUED` and `TASK_FAILED` events so `/metrics` mirrors every dispatch
+  decision, even when the orchestrator detects the issue before a worker starts.
 - Per-task output directory overrides via `spec.output.destination.path`
   (relative paths resolve under the worker `RESULTS_DIR`).
 - Shared storage ready: Docker Compose sample mounts an NFS export so all
@@ -120,6 +127,9 @@ spec:
   appropriate dataset split.
 - Define multi-stage flows using `spec.stages`; the orchestrator chains them via
   dependencies.
+- Enforce VRAM requirements by adding
+  `spec.resources.hardware.gpu.memory: "24Gi"` (per device). The orchestrator
+  filters and sorts workers based on the VRAM they reported at registration.
 - When `spec.output.destination.type` is `http`, the worker will upload the
   final model artifacts to the orchestrator (in addition to local persistence)
   so that downstream stages can fetch them by ID.
@@ -150,6 +160,8 @@ spec:
 - 指标快照默认写入 `${ORCHESTRATOR_METRICS_DIR:-./metrics}/metrics.json`，同时在
   `/metrics` HTTP 接口中提供实时快照。原始事件以 JSONL 形式写入
   `${ORCHESTRATOR_METRICS_DIR:-./metrics}/events.log`。
+- 主动重试/失败也会通过合成的 `TASK_REQUEUED` / `TASK_FAILED` 事件更新计数器，
+  因此 `/metrics` 的数字与实际调度决策完全一致。
 
 ### Key environment variables
 
@@ -176,6 +188,7 @@ spec:
 | `ENABLE_TASK_MERGE` | `true` | Enables DAG-level coalescing of identical tasks. |
 | `TASK_MERGE_MAX_BATCH_SIZE` | `4` | Max number of siblings merged per dispatch. |
 | `ENABLE_ELASTIC_SCALING` | `true` | Global toggle for auto disable/enable logic. |
+| `ENABLE_STAGE_WEIGHT_STICKINESS` | `false` | Stick stages that load prior checkpoints to the worker that produced them (unless the worker disappears). |
 | `SCHEDULER_LAMBDA_INFERENCE` | `0.4` | λ weight for inference tasks in the convex throughput/cost score. |
 | `SCHEDULER_LAMBDA_TRAINING` | `0.8` | λ weight for training-style tasks. |
 | `SCHEDULER_LAMBDA_OTHER` | `0.5` | λ weight for uncategorised tasks. |

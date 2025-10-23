@@ -33,6 +33,7 @@ class StaticWorkerDispatcher(Dispatcher):
         *,
         logger,
         worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
+        metrics_recorder=None,
     ) -> None:
         super().__init__(
             runtime,
@@ -40,6 +41,7 @@ class StaticWorkerDispatcher(Dispatcher):
             results_dir,
             logger=logger,
             worker_selection_strategy=worker_selection_strategy,
+            metrics_recorder=metrics_recorder,
         )
         self._workflow_to_worker: Dict[str, str] = {}
         self._worker_to_workflow: Dict[str, str] = {}
@@ -54,15 +56,13 @@ class StaticWorkerDispatcher(Dispatcher):
         workflow_id = self._workflow_key(record)
         if not workflow_id:
             self._logger.debug("Static worker dispatcher skipping %s: missing submission id", task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(task_id, reason="missing_workflow_id", release_merge=False)
             return False
 
         worker_id = self._resolve_worker(workflow_id, record.parsed)
         if not worker_id:
             self._logger.debug("Static worker dispatcher delaying %s: no worker available", task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(task_id, reason="static_worker_unavailable", release_merge=False)
             return False
 
         task_payload = copy.deepcopy(record.parsed)
@@ -79,12 +79,16 @@ class StaticWorkerDispatcher(Dispatcher):
             rendered_task = self._resolve_stage_references(task_id, task_payload, record)
         except StageReferenceNotReady as exc:
             self._logger.debug("Static worker dispatcher waiting for %s: %s", task_id, exc)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(
+                task_id,
+                reason="stage_reference_pending",
+                release_merge=False,
+                count_retry=False,
+            )
             return False
         except Exception as exc:  # noqa: broad-except
             self._logger.error("Static worker dispatcher failed to resolve %s: %s", task_id, exc)
-            self._runtime.mark_failed(task_id, None, {"error": str(exc)}, now_iso(), error=str(exc))
+            self._fail_task(task_id, str(exc), payload={"error": str(exc)})
             return True
 
         message["task"] = rendered_task
@@ -93,15 +97,13 @@ class StaticWorkerDispatcher(Dispatcher):
             receivers = int(self._redis.publish("tasks", json.dumps(message, ensure_ascii=False)))
         except Exception as exc:  # noqa: broad-except
             self._logger.warning("Static worker dispatcher failed to publish %s: %s", task_id, exc)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id, front=True)
+            self._requeue_task(task_id, reason="publish_failed", front=True, release_merge=False)
             self._invalidate_binding(workflow_id)
             return False
 
         if receivers <= 0:
             self._logger.info("Static worker dispatcher delaying %s: no subscribers", task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id, front=True)
+            self._requeue_task(task_id, reason="no_subscribers", front=True, release_merge=False)
             return False
 
         self._runtime.mark_dispatched(task_id, worker_id)

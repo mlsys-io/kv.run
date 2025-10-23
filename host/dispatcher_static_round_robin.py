@@ -28,6 +28,7 @@ class StaticRoundRobinDispatcher(Dispatcher):
         *,
         logger,
         worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
+        metrics_recorder=None,
     ) -> None:
         super().__init__(
             runtime,
@@ -35,6 +36,7 @@ class StaticRoundRobinDispatcher(Dispatcher):
             results_dir,
             logger=logger,
             worker_selection_strategy=worker_selection_strategy,
+            metrics_recorder=metrics_recorder,
         )
         self._rr_workers: List[str] = []
         self._rr_index: int = 0
@@ -47,8 +49,7 @@ class StaticRoundRobinDispatcher(Dispatcher):
         worker_id = self._next_worker()
         if not worker_id:
             self._logger.debug("Static RR: no idle worker available for %s; requeueing", task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(task_id, reason="no_idle_worker", release_merge=False)
             return False
 
         task_payload = copy.deepcopy(record.parsed)
@@ -65,11 +66,16 @@ class StaticRoundRobinDispatcher(Dispatcher):
             rendered_task = self._resolve_stage_references(task_id, task_payload, record)
         except StageReferenceNotReady as exc:
             self._logger.debug("Static RR: task %s waiting on stage artifacts: %s", task_id, exc)
-            self._runtime.requeue(task_id)
+            self._requeue_task(
+                task_id,
+                reason="stage_reference_pending",
+                release_merge=False,
+                count_retry=False,
+            )
             return False
         except Exception as exc:  # noqa: broad-except
             self._logger.error("Static RR: failed to resolve stage references for %s: %s", task_id, exc)
-            self._runtime.mark_failed(task_id, None, {"error": str(exc)}, now_iso(), error=str(exc))
+            self._fail_task(task_id, str(exc), payload={"error": str(exc)})
             return True
 
         message["task"] = rendered_task
@@ -78,15 +84,13 @@ class StaticRoundRobinDispatcher(Dispatcher):
             receivers = int(self._redis.publish("tasks", json.dumps(message, ensure_ascii=False)))
         except Exception as exc:  # noqa: broad-except
             self._logger.warning("Static RR: failed to publish task %s: %s", task_id, exc)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id, front=True)
+            self._requeue_task(task_id, reason="publish_failed", front=True, release_merge=False)
             self._invalidate_worker(worker_id)
             return False
 
         if receivers <= 0:
             self._logger.info("Static RR: no subscribers on tasks channel; delaying task %s", task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id, front=True)
+            self._requeue_task(task_id, reason="no_subscribers", front=True, release_merge=False)
             self._invalidate_worker(worker_id)
             return False
 

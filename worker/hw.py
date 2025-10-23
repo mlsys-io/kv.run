@@ -42,11 +42,31 @@ def collect_hw(*, bandwidth_bytes_per_sec: Optional[float] = None) -> Dict[str, 
     m = re.search(r"Driver Version:\s*([\w\.\-]+)", full)
     drv = m.group(1) if m else None
     lst = _run(["nvidia-smi", "-L"]) if full else ""
+    mem_listing = _run(["nvidia-smi", "--query-gpu=index,memory.total", "--format=csv,noheader,nounits"]) if full else ""
+    memory_map: Dict[int, Optional[int]] = {}
+    for line in mem_listing.splitlines():
+        parts = [segment.strip() for segment in line.split(",") if segment is not None]
+        if len(parts) < 2:
+            continue
+        try:
+            idx = int(parts[0])
+            mem_mb = float(parts[1])
+        except (ValueError, TypeError):
+            continue
+        if mem_mb <= 0:
+            memory_map[idx] = None
+            continue
+        memory_map[idx] = int(mem_mb * 1024 * 1024)
     gpus: List[Dict[str, Any]] = []
     for line in lst.splitlines():
         m = re.match(r"GPU\s+(\d+):\s+(.+?)\s+\(UUID:\s*([^\)]+)\)", line.strip())
         if m:
-            gpus.append({"index": int(m.group(1)), "name": m.group(2), "uuid": m.group(3)})
+            idx = int(m.group(1))
+            entry = {"index": idx, "name": m.group(2), "uuid": m.group(3)}
+            mem_bytes = memory_map.get(idx)
+            if mem_bytes is not None:
+                entry["memory_total_bytes"] = mem_bytes
+            gpus.append(entry)
     gpu = {"driver_version": drv, "cuda_version": cuda, "gpus": gpus}
 
     # Network

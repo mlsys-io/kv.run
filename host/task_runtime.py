@@ -200,7 +200,7 @@ class TaskRuntime:
                 self._cv.wait(timeout)
             return None
 
-    def mark_pending(self, task_id: str) -> None:
+    def mark_pending(self, task_id: str, *, increment_retry: bool = False) -> None:
         with self._cv:
             record = self._tasks.get(task_id)
             if not record:
@@ -212,6 +212,14 @@ class TaskRuntime:
             record.started_ts = None
             record.finished_ts = None
             record.error = None
+            if increment_retry:
+                try:
+                    if record.max_attempts is not None and record.max_attempts >= 0:
+                        record.attempts = min(record.attempts + 1, record.max_attempts)
+                    else:
+                        record.attempts = record.attempts + 1
+                except Exception:
+                    record.attempts = (record.attempts or 0) + 1
 
     def requeue(self, task_id: str, *, front: bool = False) -> bool:
         """Reinsert a task into the ready queue."""
@@ -517,6 +525,7 @@ class TaskRuntime:
                     record.started_ts = started_ts
                 if worker_id:
                     record.assigned_worker = worker_id
+                    record.last_failed_worker = worker_id
                 record.merged_children = None
 
             self._failed.add(task_id)
@@ -611,17 +620,7 @@ class TaskRuntime:
                     continue
                 if record.status != TaskStatus.DISPATCHED:
                     continue
-                self._release_merge_locked(task_id)
-                record.status = TaskStatus.PENDING
-                record.assigned_worker = None
-                record.dispatched_ts = None
-                record.started_ts = None
-                record.finished_ts = None
-                record.error = record.error or "Requeued after worker departure"
-                if self._enqueue_ready_locked(task_id, front=True):
-                    recovered.append(task_id)
-            if recovered:
-                self._cv.notify_all()
+                recovered.append(task_id)
         return recovered
 
     def shutdown(self) -> None:

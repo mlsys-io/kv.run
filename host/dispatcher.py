@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import redis
 
+from .event_schema import TaskEvent
 from .task_models import TaskStatus
 from .task_runtime import TaskRuntime
 from .results import result_file_path
@@ -17,7 +18,9 @@ from .utils import now_iso
 from .task_metadata import extract_model_dataset_names
 from .worker_registry import (
     Worker,
+    get_worker_from_redis,
     idle_satisfying_pool,
+    is_stale_by_redis,
     update_worker_status,
 )
 from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
@@ -50,6 +53,8 @@ class Dispatcher:
         reuse_cache_ttl_sec: int = 3600,
         lambda_config: Optional[Dict[str, float]] = None,
         selection_jitter_epsilon: float = 1e-3,
+        enable_stage_weight_stickiness: bool = False,
+        metrics_recorder=None,
     ) -> None:
         self._runtime = runtime
         self._redis = redis_client
@@ -63,6 +68,18 @@ class Dispatcher:
         self._cache_ttl_sec = max(0, int(reuse_cache_ttl_sec))
         self._lambda_config = lambda_config or {}
         self._selection_jitter = max(0.0, float(selection_jitter_epsilon))
+        self._stage_weight_stickiness_enabled = bool(enable_stage_weight_stickiness)
+        self._metrics = metrics_recorder
+        self._weight_reference_hints: Tuple[str, ...] = (
+            "checkpoint",
+            "weight",
+            "weights",
+            "model",
+            "adapter",
+            "lora",
+            "load",
+            "artifact",
+        )
 
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
@@ -72,6 +89,8 @@ class Dispatcher:
 
         task_payload = copy.deepcopy(record.parsed)
         merged_children: List[str] = []
+        worker = None
+        selection_info: Dict[str, Any] = {}
 
         model_names, dataset_names = extract_model_dataset_names(task_payload)
         task_category = (record.category or "other").lower() if hasattr(record, "category") else "other"
@@ -84,36 +103,58 @@ class Dispatcher:
         pool = idle_satisfying_pool(self._redis, task_payload, disabled_workers=disabled_workers)
         if not pool:
             self._logger.debug("No idle worker available for %s; requeueing", task_id)
-            self._runtime.release_merge(task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(task_id, reason="no_idle_worker")
             return False
 
-        preferred_pool: List[Worker] = []
-        if self._context_reuse_enabled:
-            preferred_pool = self._cached_worker_candidates(pool, model_names, dataset_names)
-        candidate_pool = preferred_pool or pool
-        if preferred_pool:
-            self._logger.debug(
-                "Preferring cached worker candidates for %s (models=%s datasets=%s)",
-                task_id,
-                model_names,
-                dataset_names,
-            )
+        sticky_worker_id: Optional[str] = None
+        if self._stage_weight_stickiness_enabled:
+            sticky_worker_id = self._preferred_stage_worker(record, task_payload)
+            if sticky_worker_id:
+                sticky_candidate = next((item for item in pool if item.worker_id == sticky_worker_id), None)
+                if sticky_candidate:
+                    worker = sticky_candidate
+                    selection_info = {
+                        "strategy": "stage_weight_affinity",
+                        "sticky_worker": sticky_worker_id,
+                        "candidate_pool": len(pool),
+                        "chosen_metrics": {"score": 1.0},
+                    }
+                    self._logger.debug(
+                        "Using stage-affinity worker %s for %s",
+                        sticky_worker_id,
+                        task_id,
+                    )
+                else:
+                    if self._should_wait_for_sticky_worker(record, sticky_worker_id):
+                        self._logger.debug(
+                            "Preferred stage worker %s busy for %s; waiting for availability",
+                            sticky_worker_id,
+                            task_id,
+                        )
+                        self._requeue_task(task_id, reason="sticky_worker_busy")
+                        return False
+                    else:
+                        self._logger.debug(
+                            "Preferred stage worker %s unavailable for %s; falling back to normal selection",
+                            sticky_worker_id,
+                            task_id,
+                        )
 
-        worker, selection_info = select_worker(
-            candidate_pool,
-            self._worker_selection_strategy,
-            logger=self._logger,
-            task_category=task_category,
-            lambda_overrides=self._lambda_config,
-            task_id=task_id,
-            jitter_epsilon=self._selection_jitter,
-            task_age=task_age,
-        )
-        if not worker and preferred_pool:
+        preferred_pool: List[Worker] = []
+        if worker is None and self._context_reuse_enabled:
+            preferred_pool = self._cached_worker_candidates(pool, model_names, dataset_names)
+        if worker is None:
+            candidate_pool = preferred_pool or pool
+            if preferred_pool:
+                self._logger.debug(
+                    "Preferring cached worker candidates for %s (models=%s datasets=%s)",
+                    task_id,
+                    model_names,
+                    dataset_names,
+                )
+
             worker, selection_info = select_worker(
-                pool,
+                candidate_pool,
                 self._worker_selection_strategy,
                 logger=self._logger,
                 task_category=task_category,
@@ -122,11 +163,20 @@ class Dispatcher:
                 jitter_epsilon=self._selection_jitter,
                 task_age=task_age,
             )
+            if not worker and preferred_pool:
+                worker, selection_info = select_worker(
+                    pool,
+                    self._worker_selection_strategy,
+                    logger=self._logger,
+                    task_category=task_category,
+                    lambda_overrides=self._lambda_config,
+                    task_id=task_id,
+                    jitter_epsilon=self._selection_jitter,
+                    task_age=task_age,
+                )
         if not worker:
             self._logger.debug("No suitable worker selected for %s; requeueing", task_id)
-            self._runtime.release_merge(task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(task_id, reason="no_selection")
             return False
 
         if self._task_merge_enabled and self._task_merge_max_batch_size > 1:
@@ -151,13 +201,12 @@ class Dispatcher:
             rendered_task = self._resolve_stage_references(task_id, task_payload, record)
         except StageReferenceNotReady as exc:
             self._logger.debug("Task %s waiting on stage artifacts: %s", task_id, exc)
-            self._runtime.release_merge(task_id)
-            self._runtime.requeue(task_id)
+            self._requeue_task(task_id, reason="stage_reference_pending", count_retry=False)
             return False
         except Exception as exc:
             self._logger.error("Failed to resolve stage references for %s: %s", task_id, exc)
             self._runtime.release_merge(task_id)
-            self._runtime.mark_failed(task_id, None, {"error": str(exc)}, now_iso(), error=str(exc))
+            self._fail_task(task_id, str(exc), payload={"error": str(exc)})
             return True
 
         message["task"] = rendered_task
@@ -168,16 +217,12 @@ class Dispatcher:
             receivers = int(self._redis.publish("tasks", json.dumps(message, ensure_ascii=False)))
         except Exception as exc:
             self._logger.warning("Failed to publish task %s: %s", task_id, exc)
-            self._runtime.release_merge(task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id, front=True)
+            self._requeue_task(task_id, reason="publish_failed", front=True)
             return False
 
         if receivers <= 0:
             self._logger.info("No subscribers on tasks channel; delaying task %s", task_id)
-            self._runtime.release_merge(task_id)
-            self._runtime.mark_pending(task_id)
-            self._runtime.requeue(task_id, front=True)
+            self._requeue_task(task_id, reason="no_subscribers", front=True)
             return False
 
         self._runtime.mark_dispatched(task_id, worker.worker_id)
@@ -222,10 +267,119 @@ class Dispatcher:
                     time.sleep(0.5)
             except Exception as exc:  # noqa: broad-except
                 self._logger.exception("Dispatch loop error for %s: %s", task_id, exc)
-                self._runtime.release_merge(task_id)
-                self._runtime.mark_pending(task_id)
-                self._runtime.requeue(task_id, front=True)
+                self._requeue_task(task_id, reason="dispatch_exception", front=True)
                 time.sleep(1.0)
+
+    def _requeue_task(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+        front: bool = False,
+        release_merge: bool = True,
+        mark_pending: bool = True,
+        count_retry: bool = True,
+        extra_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if release_merge:
+            self._runtime.release_merge(task_id)
+
+        if mark_pending:
+            self._runtime.mark_pending(task_id, increment_retry=count_retry)
+
+        record = self._runtime.get_record(task_id)
+        if count_retry and record:
+            attempts = record.attempts
+            max_attempts = record.max_attempts
+            if max_attempts is not None and max_attempts >= 0 and attempts >= max_attempts:
+                self._fail_task(
+                    task_id,
+                    "max_attempts_exceeded",
+                    payload={
+                        "reason": reason,
+                        "attempts": attempts,
+                        "max_attempts": max_attempts,
+                    },
+                    worker_id=record.last_failed_worker or record.assigned_worker,
+                )
+                return
+
+        self._runtime.requeue(task_id, front=front)
+        if count_retry:
+            payload = {"reason": reason}
+            if extra_payload:
+                payload.update(extra_payload)
+            self._emit_task_event("TASK_REQUEUED", task_id, payload=payload)
+
+    def _fail_task(
+        self,
+        task_id: str,
+        error_message: str,
+        *,
+        worker_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        failure_payload = payload.copy() if isinstance(payload, dict) else {}
+        if error_message and "error" not in failure_payload:
+            failure_payload["error"] = error_message
+        impacted, merged_children = self._runtime.mark_failed(
+            task_id,
+            worker_id,
+            failure_payload,
+            now_iso(),
+            error=error_message,
+        )
+        self._emit_task_event(
+            "TASK_FAILED",
+            task_id,
+            worker_id=worker_id,
+            payload=failure_payload,
+            error=error_message,
+        )
+        for dep_id, reason in impacted:
+            dependent_payload = {"dependency_failure": task_id, "error": reason}
+            self._emit_task_event(
+                "TASK_FAILED",
+                dep_id,
+                payload=dependent_payload,
+                error=reason,
+            )
+        for child_id in merged_children:
+            child_payload = failure_payload.copy()
+            child_payload["parent_task_id"] = task_id
+            child_payload["dependency_failure"] = task_id
+            child_payload["is_child_task"] = True
+            self._emit_task_event(
+                "TASK_FAILED",
+                child_id,
+                payload=child_payload,
+                error=error_message or "parent_failed",
+                is_child=True,
+            )
+
+    def _emit_task_event(
+        self,
+        event_type: str,
+        task_id: str,
+        *,
+        worker_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        is_child: bool = False,
+    ) -> None:
+        if not self._metrics:
+            return
+        event = TaskEvent(
+            type=event_type,
+            task_id=task_id,
+            worker_id=worker_id,
+            payload=payload or {},
+            error=error,
+            ts=now_iso(),
+        )
+        self._metrics.record_task_event(event, is_child=is_child)
+        if event_type == "TASK_FAILED":
+            self._metrics.finalize_task_failure(task_id)
 
     def _cached_worker_candidates(
         self,
@@ -272,6 +426,84 @@ class Dispatcher:
 
         max_score = max(score for _, score in scored)
         return [worker for worker, score in scored if score == max_score]
+
+    def _preferred_stage_worker(self, record, task_payload: Dict[str, Any]) -> Optional[str]:
+        if not record or not record.graph_node_name:
+            return None
+        task_type = (record.task_type or "").strip().lower()
+        if task_type.startswith("lora"):
+            return None
+        payload = task_payload or {}
+        if not isinstance(payload, dict):
+            return None
+        try:
+            info = self._runtime.describe_task(record.task_id) or {}
+        except Exception:
+            info = {}
+        depends_on = info.get("depends_on") or []
+        if not depends_on:
+            return None
+        for dep_id in depends_on:
+            dep_record = self._runtime.get_record(dep_id)
+            if not dep_record or not dep_record.assigned_worker:
+                continue
+            stage_refs = [dep_record.graph_node_name, dep_id]
+            for ref in stage_refs:
+                if not ref:
+                    continue
+                if self._spec_has_weight_reference(payload, ref):
+                    return dep_record.assigned_worker
+        return None
+
+    def _spec_has_weight_reference(self, payload: Dict[str, Any], stage_identifier: str) -> bool:
+        token = f"${{{stage_identifier}.result"
+        return self._search_weight_reference(payload, token, tuple())
+
+    def _search_weight_reference(self, value: Any, token: str, path: Tuple[str, ...]) -> bool:
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                next_path = path + (str(key).lower(),)
+                if self._search_weight_reference(sub, token, next_path):
+                    return True
+        elif isinstance(value, list):
+            for item in value:
+                if self._search_weight_reference(item, token, path):
+                    return True
+        elif isinstance(value, str):
+            if token in value:
+                lowered = value.lower()
+                if any(hint in path for hint in self._weight_reference_hints) or any(
+                    hint in lowered for hint in self._weight_reference_hints
+                ):
+                    return True
+        return False
+
+    def _should_wait_for_sticky_worker(self, record, worker_id: str) -> bool:
+        if not record or not worker_id:
+            return False
+        task_type = (record.task_type or "").strip().lower()
+        if not task_type:
+            return False
+        if task_type.startswith("lora"):
+            return False
+        category = (record.category or "").strip().lower()
+        if category != "training":
+            return False
+        try:
+            worker = get_worker_from_redis(self._redis, worker_id)
+        except Exception:
+            worker = None
+        if not worker:
+            return False
+        try:
+            if is_stale_by_redis(self._redis, worker_id):
+                return False
+        except Exception:
+            return False
+        status = (worker.status or "").upper()
+        if status == "IDLE":
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Stage reference handling

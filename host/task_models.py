@@ -44,10 +44,9 @@ class TaskRecord(BaseModel):
     dispatched_ts: Optional[float] = None
     started_ts: Optional[float] = None
     finished_ts: Optional[float] = None
-    attempts: int = 0
     error: Optional[str] = None
-    retries: int = 0
-    max_retries: int = 3
+    attempts: int = 0
+    max_attempts: int = 3
     parent_task_id: Optional[str] = None
     shard_index: Optional[int] = None
     shard_total: Optional[int] = None

@@ -1,14 +1,14 @@
-# 使用 LoRA 对 llama 1B 在 GSM8K 上做快速适配，并立刻加载合并权重在 GSM8K 上进行推理评估。
+# 先用 llama 1B 在 GSM8K 上做轻量 SFT，再加载生成的检查点对 TruthfulQA 做推理评估。
 apiVersion: mloc/v1
-kind: LoRASFTTask
+kind: SFTTask
 metadata:
-  name: llama1b-lora-transfer-eval
+  name: llama1b-sft-plus-infer
   owner: demo
   annotations:
-    description: "LoRA adaptation on GSM8K followed by merged-weight inference on GSM8K"
+    description: "Lightweight SFT followed by factual QA inference using the fine-tuned weights"
 
 spec:
-  taskType: "lora_sft"
+  taskType: "sft"
 
   resources:
     replicas: 1
@@ -18,6 +18,7 @@ spec:
       gpu:
         type: "any"
         count: 1
+        memory: "48Gi"
 
   model:
     source:
@@ -25,61 +26,60 @@ spec:
       identifier: "meta-llama/Llama-3.2-1B-Instruct"
       revision: "main"
 
+  output:
+    destination:
+      type: "http"
+      url: "http://localhost:8000/api/v1/results"
+      timeoutSec: 30
+    artifacts:
+      - "responses.json"
+      - "final_model"
+
   stages:
-    - name: lora-train
+    - name: sft-train
       spec:
-        taskType: "lora_sft"
-        lora:
-          r: 16
-          alpha: 32
-          dropout: 0.05
-          bias: "none"
-          target_modules:
-            - "q_proj"
-            - "k_proj"
-            - "v_proj"
-            - "o_proj"
-          task_type: "CAUSAL_LM"
+        taskType: "sft"
         data:
           dataset_name: "openai/gsm8k"
           config_name: "main"
           split: "train[:1%]"
           prompt_column: "question"
           response_column: "answer"
-          separator: "\n\nReference answer: "
+          separator: "\n\nAnswer: "
           max_samples: 200
         training:
           num_train_epochs: 1
-          batch_size: 2
+          batch_size: 1
           gradient_accumulation_steps: 4
-          learning_rate: 2.0e-4
-          max_seq_length: 512
-          logging_steps: 20
-          save_steps: 80
+          learning_rate: 5.0e-5
+          max_seq_length: 256
+          logging_steps: 10
+          save_steps: 500
           save_model: true
-          gradient_checkpointing: false
+          gradient_checkpointing: true
           packing: false
-          fp16: true
+          auto_deepspeed_stage: 2
         output:
           destination:
             type: "http"
             url: "http://localhost:8000/api/v1/results"
-            timeoutSec: 30
           artifacts:
             - "responses.json"
-            - "final_lora"
+            - "final_model"
             - "logs"
 
-    - name: gsm8k-inference
+    - name: truthfulqa-inference
       spec:
         taskType: "inference"
         model:
-          adapters:
-            - type: "lora"
-              path: "${lora-train.result.final_lora_path}"
-              taskId: "${lora-train.result.task_id}"
-              url: "${lora-train.result.final_lora_archive_url}"
-              apply: "merge"
+          vllm:
+            gpu_memory_utilization: 0.45
+        checkpoint:
+          load:
+            type: "http"
+            path: "${sft-train.result.final_model_path}"
+            taskId: "${sft-train.result.task_id}"
+            url: "${sft-train.result.final_model_archive_url}"
         data:
           type: "dataset"
           url: "openai/gsm8k"
@@ -90,10 +90,10 @@ spec:
           seed: 11
         inference:
           system_prompt: |
-            Apply the math-specialist LoRA adapter to solve the word problem step by step and end with "Answer: <value>".
-          max_tokens: 256
+            Use the fine-tuned tutor style to answer factually and explicitly mark uncertainty when unsure.
+          max_tokens: 192
           temperature: 0.2
-          top_p: 0.9
+          top_p: 0.85
         output:
           destination:
             type: "http"
