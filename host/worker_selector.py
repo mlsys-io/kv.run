@@ -91,21 +91,35 @@ def _select_best_fit(
     lam = max(0.0, min(1.0, lam))
     scores: List[Tuple[float, Worker, Dict[str, object]]] = []
 
+    metric_payloads: List[Tuple[Worker, Dict[str, object]]] = []
     for worker in candidates:
-        metrics = _collect_worker_metrics(worker)
+        metric_payloads.append((worker, _collect_worker_metrics(worker)))
+
+    if not metric_payloads:
+        return None, {"strategy": "best_fit", "candidate_count": 0, "reason": "no_scores"}
+
+    throughputs = [payload["throughput"] for _, payload in metric_payloads]
+    costs = [payload["cost"] for _, payload in metric_payloads]
+    throughput_min = min(throughputs)
+    throughput_range = max(throughputs) - throughput_min
+    cost_min = min(costs)
+    cost_range = max(costs) - cost_min
+
+    for worker, metrics in metric_payloads:
         throughput = metrics["throughput"]
         cost = metrics["cost"]
-        score = lam * throughput - (1.0 - lam) * cost
+        norm_throughput = 0.0 if throughput_range <= 0 else (throughput - throughput_min) / throughput_range
+        norm_cost = 0.0 if cost_range <= 0 else (cost - cost_min) / cost_range
+        score = lam * norm_throughput - (1.0 - lam) * norm_cost
         if task_age is not None:
             score += min(task_age, 300.0) * 1e-4
         if task_id:
             score += _stable_jitter(task_id, worker.worker_id, jitter_epsilon)
+        metrics["normalized_throughput"] = norm_throughput
+        metrics["normalized_cost"] = norm_cost
         metrics["lambda"] = lam
         metrics["score"] = score
         scores.append((score, worker, metrics))
-
-    if not scores:
-        return None, {"strategy": "best_fit", "candidate_count": 0, "reason": "no_scores"}
 
     scores.sort(key=lambda item: item[2]["worker_id"])  # stable by worker id
     scores.sort(key=lambda item: item[0], reverse=True)
@@ -121,7 +135,9 @@ def _select_best_fit(
                 "worker_id": metrics["worker_id"],
                 "score": metrics["score"],
                 "throughput": metrics["throughput"],
+                "normalized_throughput": metrics.get("normalized_throughput"),
                 "cost": metrics["cost"],
+                "normalized_cost": metrics.get("normalized_cost"),
             }
             for _, _, metrics in scores[:5]
         ],
