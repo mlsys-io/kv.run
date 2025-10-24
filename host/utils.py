@@ -73,13 +73,13 @@ def parse_mem_to_bytes(mem: str) -> Optional[int]:
         return None
     qty = int(match.group(1))
     unit = (match.group(2) or "").lower()
-    if unit in {"k", "kb", "kib"}:
+    if unit in {"k", "kb", "ki", "kib"}:
         return qty * 1024
-    if unit in {"m", "mb", "mib"}:
+    if unit in {"m", "mb", "mi", "mib"}:
         return qty * 1024 ** 2
-    if unit in {"g", "gb", "gib"}:
+    if unit in {"g", "gb", "gi", "gib"}:
         return qty * 1024 ** 3
-    if unit in {"t", "tb", "tib"}:
+    if unit in {"t", "tb", "ti", "tib"}:
         return qty * 1024 ** 4
     if unit == "":
         return qty

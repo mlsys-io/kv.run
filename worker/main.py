@@ -91,6 +91,7 @@ def main():
         power_monitor=PowerMonitor(),
     )
     hardware = collect_hw(bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec)
+    logger.info("Collected hardware info: %s", hardware)
     lifecycle.start(env={}, hardware=hardware, tags=cfg.tags)
 
     executors, default_executor = initialize_executors(logger)
