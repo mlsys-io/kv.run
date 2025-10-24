@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from .dispatcher import Dispatcher, StageReferenceNotReady
 from .task_models import TaskStatus
-from .utils import now_iso
+from .utils import now_iso, parse_mem_to_bytes
 from .worker_registry import (
     get_worker_from_redis,
     idle_satisfying_pool,
@@ -151,9 +151,10 @@ class StaticWorkerDispatcher(Dispatcher):
                 return None
             return worker.worker_id
 
+        selection_payload = self._selection_payload_for_workflow(workflow_id, payload)
         pool = [
             worker
-            for worker in idle_satisfying_pool(self._redis, payload)
+            for worker in idle_satisfying_pool(self._redis, selection_payload)
             if worker.worker_id not in self._worker_to_workflow
         ]
         if not pool:
@@ -171,6 +172,75 @@ class StaticWorkerDispatcher(Dispatcher):
             worker.worker_id,
         )
         return worker.worker_id
+
+    def _selection_payload_for_workflow(self, workflow_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        best_hardware, best_memory = self._heaviest_gpu_requirement(workflow_id)
+        if not best_hardware:
+            return payload
+
+        updated_payload = copy.deepcopy(payload)
+        spec = updated_payload.setdefault("spec", {})
+        resources = spec.setdefault("resources", {})
+        resources["hardware"] = best_hardware
+        if best_memory is not None and best_memory > 0:
+            try:
+                mem_gib = best_memory / float(1024 ** 3)
+                self._logger.debug(
+                    "Static worker dispatcher using aggregated GPU memory constraint %.2f GiB for workflow %s",
+                    mem_gib,
+                    workflow_id,
+                )
+            except Exception:
+                self._logger.debug(
+                    "Static worker dispatcher using aggregated GPU memory constraint %s bytes for workflow %s",
+                    best_memory,
+                    workflow_id,
+                )
+        return updated_payload
+
+    def _heaviest_gpu_requirement(self, workflow_id: str) -> tuple[Optional[Dict[str, Any]], Optional[int]]:
+        best_hardware: Optional[Dict[str, Any]] = None
+        best_memory = -1
+        for record in self._runtime.tasks.values():
+            if record.submission_id != workflow_id:
+                continue
+            spec = record.parsed.get("spec") if isinstance(record.parsed, dict) else None
+            if not isinstance(spec, dict):
+                continue
+            resources = spec.get("resources")
+            if not isinstance(resources, dict):
+                continue
+            hardware = resources.get("hardware")
+            if not isinstance(hardware, dict):
+                continue
+            gpu_memory = self._gpu_requirement_memory_bytes(hardware)
+            comparison_value = gpu_memory if gpu_memory is not None else -1
+            if comparison_value > best_memory:
+                best_memory = comparison_value
+                best_hardware = copy.deepcopy(hardware)
+
+        if best_hardware is None:
+            return None, None
+        return best_hardware, (best_memory if best_memory >= 0 else None)
+
+    def _gpu_requirement_memory_bytes(self, hardware: Dict[str, Any]) -> Optional[int]:
+        gpu_req = hardware.get("gpu")
+        if not isinstance(gpu_req, dict):
+            return None
+        memory = gpu_req.get("memory")
+        if memory is None:
+            return None
+        if isinstance(memory, (int, float)):
+            try:
+                return int(memory)
+            except Exception:
+                return None
+        if isinstance(memory, str):
+            try:
+                return parse_mem_to_bytes(memory)
+            except Exception:
+                return None
+        return None
 
     def _cleanup_completed_workflows(self) -> None:
         for workflow_id, worker_id in list(self._workflow_to_worker.items()):
