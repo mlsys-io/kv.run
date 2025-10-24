@@ -26,6 +26,8 @@ def parse_args():
                    help="Do not POST, only print the schedule")
     p.add_argument("--print_every", type=int, default=1,
                    help="Print every N requests (default: 1)")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed for reproducible YAML selection (default: None)")
     args = p.parse_args()
 
     args.duration_sec = args.duration_min * 60.0
@@ -59,7 +61,8 @@ def post_yaml(host_url, endpoint, token, yaml_path, use_jq):
     ]
     if use_jq:
         p1 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        p2 = subprocess.Popen(["jq", "."], stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p2 = subprocess.Popen(["jq", "."], stdin=p1.stdout,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         p1.stdout.close()
         out, err = p2.communicate()
         rc = p2.returncode
@@ -73,6 +76,11 @@ def post_yaml(host_url, endpoint, token, yaml_path, use_jq):
 
 def main():
     args = parse_args()
+
+    # apply RNG seed (affects pick_yaml randomness)
+    if args.seed is not None:
+        random.seed(args.seed)
+
     start_time = time.perf_counter()
     end_time = start_time + args.duration_sec
     use_jq = shutil.which("jq") is not None
@@ -82,6 +90,8 @@ def main():
     print(f"Mode={args.mode} | Ramp {args.start_rate:.1f} -> {args.end_rate:.1f} req/min "
           f"over {args.duration_min:.1f} min ({args.duration_sec:.1f}s)")
     print(f"POST {args.host_url}{args.task_endpoint}  (task_dir={args.task_dir})")
+    if args.seed is not None:
+        print(f"Seed={args.seed}")
 
     while True:
         now = time.perf_counter()
@@ -89,8 +99,13 @@ def main():
             break
 
         # current rate in req/min -> convert to req/sec for scheduling
-        r_min = rate_at_minute(now - start_time, args.duration_sec,
-                               args.start_rate, args.end_rate, args.mode)
+        r_min = rate_at_minute(
+            now - start_time,
+            args.duration_sec,
+            args.start_rate,
+            args.end_rate,
+            args.mode,
+        )
         r_sec = max(r_min / 60.0, 1e-6)
         interval = 1.0 / r_sec
 
@@ -102,7 +117,13 @@ def main():
         # send one request
         yaml_path = pick_yaml(args.task_dir)
         if not args.dry_run:
-            rc, out, err = post_yaml(args.host_url, args.task_endpoint, args.token, yaml_path, use_jq)
+            rc, out, err = post_yaml(
+                args.host_url,
+                args.task_endpoint,
+                args.token,
+                yaml_path,
+                use_jq,
+            )
             sent += 1
             if (sent % args.print_every) == 0:
                 base = os.path.basename(yaml_path)
