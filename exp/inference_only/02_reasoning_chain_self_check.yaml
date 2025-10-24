@@ -1,4 +1,5 @@
-# 在 GSM8K 上先生成草稿答案，再用自检提示复查并输出改写总结，演示 llama 1B 的线性推理组合。
+# Three-stage reasoning chain with draft, critique, and final synthesis
+
 apiVersion: mloc/v1
 kind: InferenceTask
 metadata:

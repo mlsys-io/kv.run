@@ -1,4 +1,5 @@
 # 顺序在 GSM8K、TruthfulQA 与 MMLU 上运行 llama 1B 推理，比较跨领域表现并产出分阶段结果。
+
 apiVersion: mloc/v1
 kind: InferenceTask
 metadata:
@@ -18,20 +19,21 @@ spec:
       gpu:
         type: "any"
         count: 1
-        memory: "24Gi"
+        memory: "48Gi"
+
+  model:
+    source:
+      type: "huggingface"
+      identifier: "meta-llama/Llama-3.2-3B-Instruct"
+      revision: "main"
+    vllm:
+      gpu_memory_utilization: 0.8
+      trust_remote_code: true
 
   stages:
     - name: gsm8k-pass
       spec:
         taskType: "inference"
-        model:
-          source:
-            type: "huggingface"
-            identifier: "meta-llama/Llama-3.2-1B-Instruct"
-            revision: "main"
-          vllm:
-            gpu_memory_utilization: 0.85
-            trust_remote_code: true
         data:
           type: "dataset"
           url: "openai/gsm8k"
@@ -58,14 +60,6 @@ spec:
     - name: truthfulqa-pass
       spec:
         taskType: "inference"
-        model:
-          source:
-            type: "huggingface"
-            identifier: "meta-llama/Llama-3.2-3B-Instruct"
-            revision: "main"
-          vllm:
-            gpu_memory_utilization: 0.85
-            trust_remote_code: true
         data:
           type: "dataset"
           url: "truthfulqa/truthful_qa"
@@ -92,14 +86,6 @@ spec:
     - name: mmlu-pass
       spec:
         taskType: "inference"
-        model:
-          source:
-            type: "huggingface"
-            identifier: "meta-llama/Llama-3.2-3B-Instruct"
-            revision: "main"
-          vllm:
-            gpu_memory_utilization: 0.85
-            trust_remote_code: true
         data:
           type: "dataset"
           url: "cais/mmlu"
