@@ -64,7 +64,7 @@ spec:
             identifier: "meta-llama/Llama-3.2-3B-Instruct"
             revision: "main"
           vllm:
-            gpu_memory_utilization: 0.85
+            gpu_memory_utilization: 0.6
             trust_remote_code: true
         data:
           type: "dataset"
@@ -98,7 +98,7 @@ spec:
             identifier: "meta-llama/Llama-3.2-3B-Instruct"
             revision: "main"
           vllm:
-            gpu_memory_utilization: 0.85
+            gpu_memory_utilization: 0.6
             trust_remote_code: true
         data:
           type: "dataset"
