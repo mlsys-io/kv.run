@@ -14,11 +14,11 @@ spec:
     replicas: 1
     hardware:
       cpu: "12"
-      memory: "48Gi"
+      memory: "46Gi"
       gpu:
         type: "any"
         count: 1
-        memory: "48Gi"
+        memory: "46Gi"
 
   model:
     source:

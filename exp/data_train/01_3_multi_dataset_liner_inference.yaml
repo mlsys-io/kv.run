@@ -19,11 +19,11 @@ spec:
           replicas: 1
           hardware:
             cpu: "12"
-            memory: "48Gi"
+            memory: "46Gi"
             gpu:
               type: "any"
               count: 1
-              memory: "24Gi"
+              memory: "22Gi"
         model:
           source:
             type: "huggingface"
@@ -62,11 +62,11 @@ spec:
           replicas: 1
           hardware:
             cpu: "12"
-            memory: "48Gi"
+            memory: "46Gi"
             gpu:
               type: "any"
               count: 1
-              memory: "24Gi"
+              memory: "22Gi"
         model:
           source:
             type: "huggingface"
@@ -109,6 +109,15 @@ spec:
           vllm:
             gpu_memory_utilization: 0.8
             trust_remote_code: true
+        resources:
+          replicas: 1
+          hardware:
+            cpu: "12"
+            memory: "46Gi"
+            gpu:
+              type: "any"
+              count: 1
+              memory: "46Gi"
         data:
           type: "dataset"
           url: "cais/mmlu"
