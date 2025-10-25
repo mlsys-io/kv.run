@@ -477,12 +477,13 @@ def _start_background_threads() -> None:
         threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True),
         threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True),
     ]
-    watchdog_thread = WATCHDOG.start(STOP_EVENT)
-    if watchdog_thread:
-        threads.append(watchdog_thread)
     for thread in threads:
         thread.start()
         BACKGROUND_THREADS.append(thread)
+
+    watchdog_thread = WATCHDOG.start(STOP_EVENT)
+    if watchdog_thread and watchdog_thread not in BACKGROUND_THREADS:
+        BACKGROUND_THREADS.append(watchdog_thread)
 
 
 def _stop_background_threads() -> None:
