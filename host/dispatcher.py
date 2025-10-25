@@ -288,14 +288,16 @@ class Dispatcher:
         except Exception as exc:  # noqa: broad-except
             self._logger.debug("Failed to update worker %s status: %s", worker.worker_id, exc)
         try:
+            chosen_score = selection_info.get("chosen_metrics", {}).get("score")
+            score_display = f"{chosen_score:.4f}" if isinstance(chosen_score, (int, float)) else "n/a"
             self._logger.info(
-                "Dispatch %s -> %s (strategy=%s reuse=%d/%d score=%.4f age=%.2fs)",
+                "Dispatch %s -> %s (strategy=%s reuse=%d/%d score=%s age=%.2fs)",
                 task_id,
                 worker.worker_id,
                 selection_info.get("strategy"),
                 len(preferred_pool),
                 len(pool),
-                selection_info.get("chosen_metrics", {}).get("score"),
+                score_display,
                 task_age if task_age is not None else -1.0,
             )
         except Exception:
