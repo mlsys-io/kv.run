@@ -141,7 +141,11 @@ class MetricsRecorder:
                 self._on_worker_unregister(worker_id, event)
             elif ev_type == "HEARTBEAT":
                 self._counters["worker_heartbeats"] += 1
-                self._on_worker_heartbeat(worker_id, event)
+                if worker_id and worker_id in self._elastic_disabled_workers:
+                    meta = self._worker_meta.setdefault(worker_id, {})
+                    meta["last_heartbeat_ts"] = event.ts
+                else:
+                    self._on_worker_heartbeat(worker_id, event)
             elif ev_type == "STATUS":
                 self._on_worker_status(worker_id, event)
 
@@ -179,6 +183,11 @@ class MetricsRecorder:
                 )
 
             self._record_timing(meta, queue_time, exec_time, total_time)
+
+            if queue_time is not None:
+                meta["queue_wait_accum"] = queue_time
+            if exec_time is not None:
+                meta["execution_time_accum"] = exec_time
 
             meta["finalized"] = True
             meta["pending_failure"] = None
@@ -275,6 +284,8 @@ class MetricsRecorder:
                 "category": "other",
                 "submitted_ts": None,
                 "last_queue_ts": None,
+                "queue_wait_accum": 0.0,
+                "execution_time_accum": 0.0,
                 "dispatched_ts": None,
                 "start_ts": None,
                 "finished_ts": None,
@@ -284,6 +295,11 @@ class MetricsRecorder:
                 "last_durations": None,
             }
             self._task_meta[task_id] = meta
+        else:
+            if meta.get("queue_wait_accum") is None:
+                meta["queue_wait_accum"] = 0.0
+            if meta.get("execution_time_accum") is None:
+                meta["execution_time_accum"] = 0.0
 
         payload = event.payload or {}
         if not meta["task_type"] and payload.get("taskType"):
@@ -300,6 +316,8 @@ class MetricsRecorder:
         ts = parse_iso_ts(event.ts)
         meta["submitted_ts"] = ts
         meta["last_queue_ts"] = ts
+        meta["queue_wait_accum"] = 0.0
+        meta["execution_time_accum"] = 0.0
         payload = event.payload or {}
         task_type = payload.get("taskType")
         if task_type:
@@ -342,6 +360,10 @@ class MetricsRecorder:
             finished_ts,
             runtime_override,
         )
+        if queue_time is not None:
+            meta["queue_wait_accum"] = queue_time
+        if exec_time is not None:
+            meta["execution_time_accum"] = exec_time
 
         self._record_timing(meta, queue_time, exec_time, total_time)
 
@@ -365,6 +387,10 @@ class MetricsRecorder:
             finished_ts,
             runtime_override,
         )
+        if queue_time is not None:
+            meta["queue_wait_accum"] = queue_time
+        if exec_time is not None:
+            meta["execution_time_accum"] = exec_time
         meta["pending_failure"] = {
             "queue": queue_time,
             "execution": exec_time,
@@ -373,6 +399,11 @@ class MetricsRecorder:
 
     def _on_task_requeued(self, meta: Dict[str, Any], event: TaskEvent) -> None:
         ts = parse_iso_ts(event.ts)
+        previous_anchor = meta.get("last_queue_ts") or meta.get("submitted_ts")
+        if previous_anchor is not None and meta.get("start_ts") is None:
+            wait = max(0.0, ts - previous_anchor)
+            if wait > 0.0:
+                meta["queue_wait_accum"] = (meta.get("queue_wait_accum") or 0.0) + wait
         meta["last_queue_ts"] = ts
         meta["start_ts"] = None
         meta["dispatched_ts"] = None
@@ -387,6 +418,8 @@ class MetricsRecorder:
         if finished_ts is None:
             finished_ts = time.time()
 
+        queue_accum = float(meta.get("queue_wait_accum") or 0.0)
+        exec_accum = float(meta.get("execution_time_accum") or 0.0)
         queue_anchor = (
             meta.get("last_queue_ts")
             or meta.get("submitted_ts")
@@ -394,17 +427,29 @@ class MetricsRecorder:
         )
         start_ts = meta.get("start_ts")
 
-        queue_time = None
+        queue_segment = None
         if start_ts is not None and queue_anchor is not None:
-            queue_time = max(0.0, start_ts - queue_anchor)
+            queue_segment = max(0.0, start_ts - queue_anchor)
         elif queue_anchor is not None:
-            queue_time = max(0.0, finished_ts - queue_anchor)
+            queue_segment = max(0.0, finished_ts - queue_anchor)
+
+        queue_time = None
+        if queue_segment is not None:
+            queue_time = queue_accum + queue_segment
+        elif queue_accum > 0.0:
+            queue_time = queue_accum
 
         exec_time = None
+        exec_segment = None
         if runtime_override is not None:
-            exec_time = max(0.0, runtime_override)
+            exec_segment = max(0.0, runtime_override)
         elif start_ts is not None:
-            exec_time = max(0.0, finished_ts - start_ts)
+            exec_segment = max(0.0, finished_ts - start_ts)
+
+        if exec_segment is not None:
+            exec_time = exec_accum + exec_segment
+        elif exec_accum > 0.0:
+            exec_time = exec_accum
 
         total_time = None
         if queue_time is not None and exec_time is not None:

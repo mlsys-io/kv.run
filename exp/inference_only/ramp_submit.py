@@ -8,10 +8,10 @@ def parse_args():
     )
     p.add_argument("--duration_min", type=float, default=10.0,
                    help="Total run time in minutes (default: 10)")
-    p.add_argument("--start_rate", type=float, default=10.0,
-                   help="Start rate in req/min (default: 10 = 0.1667 req/s)")
-    p.add_argument("--end_rate", type=float, default=1.0,
-                   help="End rate in req/min (default: 1 = 0.0167 req/s)")
+    p.add_argument("--start_rate", type=float, default=6.0,
+                   help="Start rate in req/min (default: 6 = 0.1 req/s)")
+    p.add_argument("--end_rate", type=float, default=0.6,
+                   help="End rate in req/min (default: 0.6 = 0.01 req/s)")
     p.add_argument("--mode", choices=["linear","exp"], default="linear",
                    help="Rate ramp mode: linear or exp (geometric). Default: linear")
     p.add_argument("--host_url", default=os.getenv("HOST_URL","http://localhost:8000"),
