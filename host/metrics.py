@@ -157,10 +157,23 @@ class MetricsRecorder:
         if not normalized:
             return
         with self._lock:
+            meta = self._worker_meta.setdefault(normalized, {})
             if disabled:
+                if normalized not in self._elastic_disabled_workers:
+                    freeze_ts = meta.get("last_heartbeat_ts") or meta.get("unregistered_at") or meta.get("registered_at") or _now_iso()
+                    meta["elastic_freeze_ts"] = freeze_ts
+                    frozen_uptime = _safe_float(meta.get("uptime_sec"))
+                    if frozen_uptime is not None:
+                        meta["elastic_frozen_uptime"] = frozen_uptime
+                    frozen_cost = _safe_float(meta.get("accrued_cost_usd"))
+                    if frozen_cost is not None:
+                        meta["elastic_frozen_cost"] = frozen_cost
                 self._elastic_disabled_workers.add(normalized)
             else:
                 self._elastic_disabled_workers.discard(normalized)
+                meta.pop("elastic_freeze_ts", None)
+                meta.pop("elastic_frozen_uptime", None)
+                meta.pop("elastic_frozen_cost", None)
             self._write_metrics()
 
     def finalize_task_failure(self, task_id: str) -> None:
@@ -596,9 +609,8 @@ class MetricsRecorder:
         }
         detailed = {}
         for worker_id, meta in self._worker_meta.items():
-            if worker_id in self._elastic_disabled_workers:
-                continue
             info = self._prepare_worker_summary(worker_id, meta)
+            info["elastic_disabled"] = worker_id in self._elastic_disabled_workers
             gpu_mem_bytes = self._extract_gpu_memory_bytes(info)
             if gpu_mem_bytes is not None:
                 totals["gpu_memory_total_bytes"] += gpu_mem_bytes
@@ -645,8 +657,7 @@ class MetricsRecorder:
 
     def _prepare_worker_summary(self, worker_id: str, meta: Dict[str, Any]) -> Dict[str, Any]:
         info = dict(meta)
-        if worker_id in self._elastic_disabled_workers:
-            return info
+        freeze_ts = info.get("elastic_freeze_ts")
 
         registered_at = info.get("registered_at")
         start_ts: Optional[float] = None
@@ -654,15 +665,21 @@ class MetricsRecorder:
             start_ts = parse_iso_ts(registered_at)
 
         end_ts = None
-        unregistered_at = info.get("unregistered_at")
-        if unregistered_at:
-            end_ts = parse_iso_ts(unregistered_at)
-        if end_ts is None:
-            last_hb = info.get("last_heartbeat_ts")
-            if last_hb:
-                end_ts = parse_iso_ts(last_hb)
-        if end_ts is None:
-            end_ts = time.time()
+        if freeze_ts:
+            try:
+                end_ts = parse_iso_ts(freeze_ts)
+            except Exception:
+                end_ts = time.time()
+        else:
+            unregistered_at = info.get("unregistered_at")
+            if unregistered_at:
+                end_ts = parse_iso_ts(unregistered_at)
+            if end_ts is None:
+                last_hb = info.get("last_heartbeat_ts")
+                if last_hb:
+                    end_ts = parse_iso_ts(last_hb)
+            if end_ts is None:
+                end_ts = time.time()
 
         if start_ts is not None:
             inferred_uptime = max(0.0, end_ts - start_ts)
@@ -670,6 +687,11 @@ class MetricsRecorder:
             if current_uptime is None or inferred_uptime > current_uptime:
                 info["uptime_sec"] = inferred_uptime
                 meta["uptime_sec"] = inferred_uptime
+
+        frozen_uptime = _safe_float(info.get("elastic_frozen_uptime"))
+        if frozen_uptime is not None:
+            info["uptime_sec"] = frozen_uptime
+            meta["uptime_sec"] = frozen_uptime
 
         uptime = _safe_float(info.get("uptime_sec"))
         cost_per_hour = _safe_float(info.get("cost_per_hour"))
@@ -680,6 +702,11 @@ class MetricsRecorder:
         if inferred_cost is not None and (current_cost is None or inferred_cost > current_cost):
             info["accrued_cost_usd"] = inferred_cost
             meta["accrued_cost_usd"] = inferred_cost
+
+        frozen_cost = _safe_float(info.get("elastic_frozen_cost"))
+        if frozen_cost is not None:
+            info["accrued_cost_usd"] = frozen_cost
+            meta["accrued_cost_usd"] = frozen_cost
 
         return info
 
