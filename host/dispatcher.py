@@ -106,6 +106,27 @@ class Dispatcher:
             self._requeue_task(task_id, reason="no_idle_worker", count_retry=False)
             return False
 
+        last_failed_worker = (getattr(record, "last_failed_worker", None) or "").strip()
+        if last_failed_worker:
+            filtered_pool = [candidate for candidate in pool if candidate.worker_id != last_failed_worker]
+            if not filtered_pool:
+                self._logger.debug(
+                    "Only previous failing worker %s available for %s; delaying retry",
+                    last_failed_worker,
+                    task_id,
+                )
+                self._requeue_task(task_id, reason="only_failed_worker_available", count_retry=False)
+                return False
+            if len(filtered_pool) != len(pool):
+                self._logger.debug(
+                    "Excluding last failed worker %s from candidate pool for %s (size %d -> %d)",
+                    last_failed_worker,
+                    task_id,
+                    len(pool),
+                    len(filtered_pool),
+                )
+            pool = filtered_pool
+
         sticky_worker_id: Optional[str] = None
         if self._stage_weight_stickiness_enabled:
             sticky_worker_id = self._preferred_stage_worker(record, task_payload)

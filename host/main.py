@@ -31,15 +31,7 @@ from .metrics import MetricsRecorder
 from .results import ResultPayload, read_result, result_file_path, write_result
 from .task_metadata import extract_model_dataset_names
 from .task_runtime import TaskRuntime
-from .utils import (
-    get_logger,
-    log_worker_event,
-    now_iso,
-    parse_bool_env,
-    parse_float_env,
-    parse_int_env,
-    safe_get,
-)
+from .utils import get_logger, log_worker_event, now_iso, parse_bool_env, parse_float_env, parse_int_env, safe_get
 from .elastic import ElasticCoordinator
 from .worker_registry import (
     get_worker_from_redis,
@@ -49,6 +41,7 @@ from .worker_registry import (
     update_worker_status,
     record_worker_cache,
 )
+from .watchdog import WorkerWatchdog
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +117,9 @@ AUTO_TOGGLE_COOLDOWN_SEC = max(
     parse_int_env("ELASTIC_AUTO_TOGGLE_COOLDOWN_SEC", max(60, AUTO_POLL_INTERVAL_SEC * 2)),
 )
 AUTO_MIN_ACTIVE_WORKERS = max(0, parse_int_env("ELASTIC_AUTO_MIN_ACTIVE_WORKERS", 1))
+ENABLE_WORKER_WATCHDOG = parse_bool_env("ENABLE_WORKER_WATCHDOG", True)
+WORKER_DEATH_CHECK_INTERVAL = max(5, parse_int_env("WORKER_DEATH_CHECK_INTERVAL", 30))
+WORKER_DEATH_GRACE_SEC = max(0, parse_int_env("WORKER_DEATH_GRACE_SEC", 60))
 
 PENDING_RESULT_CLONES: Dict[str, List[str]] = {}
 PENDING_RESULT_CLONES_LOCK = threading.RLock()
@@ -169,6 +165,15 @@ STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []
 REDIS_FLUSH_LOCK = threading.Lock()
 REDIS_FLUSHED = False
+WATCHDOG = WorkerWatchdog(
+    RDS,
+    RUNTIME,
+    DISPATCHER,
+    logger,
+    enabled=ENABLE_WORKER_WATCHDOG,
+    check_interval=WORKER_DEATH_CHECK_INTERVAL,
+    grace_seconds=WORKER_DEATH_GRACE_SEC,
+)
 
 
 def _export_metrics_on_exit() -> None:
@@ -432,6 +437,13 @@ def _workers_events_loop() -> None:
                 if event.type == "UNREGISTER":
                     worker_id = (event.worker_id or "").strip()
                     if worker_id:
+                        if WATCHDOG.enabled and WATCHDOG.is_marked_dead(worker_id):
+                            logger.info(
+                                "Skipping direct requeue for %s unregister; watchdog already emitted synthetic failures",
+                                worker_id,
+                            )
+                            WATCHDOG.clear_dead_mark(worker_id)
+                            continue
                         recovered = RUNTIME.recover_tasks_for_worker(worker_id)
                         if recovered:
                             logger.info(
@@ -459,14 +471,15 @@ def _workers_events_loop() -> None:
                 break
             logger.warning("workers.events listener error: %s; reconnecting...", exc)
             time.sleep(2.0)
-
-
 def _start_background_threads() -> None:
     threads = [
         threading.Thread(target=_dispatch_loop, name="dispatch-loop", daemon=True),
         threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True),
         threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True),
     ]
+    watchdog_thread = WATCHDOG.start(STOP_EVENT)
+    if watchdog_thread:
+        threads.append(watchdog_thread)
     for thread in threads:
         thread.start()
         BACKGROUND_THREADS.append(thread)
