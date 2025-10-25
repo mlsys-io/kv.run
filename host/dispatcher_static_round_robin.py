@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from .dispatcher import Dispatcher, StageReferenceNotReady
 from .utils import now_iso
-from .worker_registry import list_workers_from_redis, update_worker_status
+from .worker_registry import get_worker_from_redis, is_stale_by_redis, list_workers_from_redis, update_worker_status
 from .worker_selector import DEFAULT_WORKER_SELECTION
 
 
@@ -113,11 +113,15 @@ class StaticRoundRobinDispatcher(Dispatcher):
 
     def _next_worker(self) -> Optional[str]:
         self._refresh_worker_cache()
-        if not self._rr_workers:
-            return None
-        worker_id = self._rr_workers[self._rr_index]
-        self._rr_index = (self._rr_index + 1) % len(self._rr_workers)
-        return worker_id
+        remaining = len(self._rr_workers)
+        while self._rr_workers and remaining > 0:
+            worker_id = self._rr_workers[self._rr_index]
+            self._rr_index = (self._rr_index + 1) % len(self._rr_workers)
+            if self._worker_is_idle(worker_id):
+                return worker_id
+            self._invalidate_worker(worker_id)
+            remaining -= 1
+        return None
 
     def _refresh_worker_cache(self) -> None:
         available = self._available_worker_ids()
@@ -168,3 +172,15 @@ class StaticRoundRobinDispatcher(Dispatcher):
         if index < self._rr_index:
             self._rr_index -= 1
         self._rr_index %= len(self._rr_workers)
+
+    def _worker_is_idle(self, worker_id: str) -> bool:
+        try:
+            worker = get_worker_from_redis(self._redis, worker_id)
+        except Exception:  # noqa: broad-except
+            return False
+        if not worker or worker.status != "IDLE":
+            return False
+        try:
+            return not is_stale_by_redis(self._redis, worker_id)
+        except Exception:  # noqa: broad-except
+            return False
