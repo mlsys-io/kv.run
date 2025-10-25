@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Set
 
 from .dispatcher import Dispatcher, StageReferenceNotReady
 from .utils import now_iso
@@ -10,6 +10,7 @@ from .worker_registry import (
     get_worker_from_redis,
     idle_satisfying_pool,
     is_stale_by_redis,
+    list_workers_from_redis,
     update_worker_status,
 )
 from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
@@ -17,13 +18,13 @@ from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
 
 class FixedPipelineDispatcher(Dispatcher):
     """
-    Baseline dispatcher that locks each task type to a single worker.
+    Baseline dispatcher that pins each task type to a limited worker set.
 
-    The first time a task type is observed, the dispatcher chooses one idle worker
-    for it and remembers that assignment. Subsequent tasks of the same type are
-    only dispatched to the same worker, effectively simulating rigid executor
-    binding. Tasks for which the assigned worker is busy or unavailable are
-    requeued until the desired worker returns to idle state.
+    The first time a task type is observed, the dispatcher chooses an idle worker
+    and remembers that assignment. It may provision additional workers for the
+    same type, but never exceeds half of the currently known workers. Tasks wait
+    whenever all bound workers are busy or unavailable, preserving the fixed
+    pipeline flavour while capping concurrency per task type.
     """
 
     def __init__(
@@ -44,7 +45,10 @@ class FixedPipelineDispatcher(Dispatcher):
             worker_selection_strategy=worker_selection_strategy,
             metrics_recorder=metrics_recorder,
         )
-        self._type_to_worker: Dict[str, str] = {}
+        self._type_to_workers: Dict[str, Set[str]] = {}
+        self._type_order: Dict[str, List[str]] = {}
+        self._type_rr_index: Dict[str, int] = {}
+        self._worker_to_type: Dict[str, str] = {}
 
     def dispatch_once(self, task_id: str) -> bool:
         record = self._runtime.get_record(task_id)
@@ -120,32 +124,126 @@ class FixedPipelineDispatcher(Dispatcher):
     # ------------------------------------------------------------------ #
 
     def _resolve_worker(self, task_type: str, payload) -> Optional[str]:
-        existing = self._type_to_worker.get(task_type)
-        if existing:
-            worker = get_worker_from_redis(self._redis, existing)
-            if not worker:
-                self._logger.info(
-                    "Fixed pipeline dispatcher dropping binding for %s; worker %s missing",
-                    task_type,
-                    existing,
-                )
-                self._type_to_worker.pop(task_type, None)
-                return self._resolve_worker(task_type, payload)
-            if worker.status != "IDLE" or is_stale_by_redis(self._redis, worker.worker_id):
-                return None
-            return worker.worker_id
+        idle_bound = self._idle_bound_worker(task_type)
+        if idle_bound:
+            return idle_bound
+
+        max_workers_for_type = self._max_workers_for_type()
+        bound_workers = self._type_to_workers.get(task_type, set())
+        if len(bound_workers) >= max_workers_for_type:
+            return None
 
         pool = idle_satisfying_pool(self._redis, payload)
         if not pool:
             return None
 
-        worker, _ = select_worker(pool, self._worker_selection_strategy, logger=self._logger)
+        filtered_pool = [
+            worker
+            for worker in pool
+            if self._worker_to_type.get(worker.worker_id) in (None, task_type)
+        ]
+        if not filtered_pool:
+            return None
+
+        worker, _ = select_worker(filtered_pool, self._worker_selection_strategy, logger=self._logger)
         if not worker:
             return None
-        self._type_to_worker[task_type] = worker.worker_id
-        self._logger.info(
-            "Fixed pipeline dispatcher bound task type %s to worker %s",
-            task_type,
-            worker.worker_id,
-        )
+
+        if worker.worker_id not in bound_workers:
+            self._register_binding(task_type, worker.worker_id)
+            self._logger.info(
+                "Fixed pipeline dispatcher bound task type %s to worker %s (active bindings=%d, limit=%d)",
+                task_type,
+                worker.worker_id,
+                len(self._type_to_workers.get(task_type, set())),
+                max_workers_for_type,
+            )
         return worker.worker_id
+
+    def _idle_bound_worker(self, task_type: str) -> Optional[str]:
+        order = self._type_order.get(task_type, [])
+        if not order:
+            return None
+        start_index = self._type_rr_index.get(task_type, 0)
+        count = len(order)
+        idx = start_index % count
+        checked = 0
+        while order and checked < count:
+            worker_id = order[idx]
+            worker = get_worker_from_redis(self._redis, worker_id)
+            if not worker:
+                self._logger.info(
+                    "Fixed pipeline dispatcher dropping binding for %s; worker %s missing",
+                    task_type,
+                    worker_id,
+                )
+                self._unregister_binding(worker_id)
+                order = self._type_order.get(task_type, [])
+                count = len(order)
+                if count == 0:
+                    self._type_rr_index.pop(task_type, None)
+                    return None
+                idx %= count
+                checked += 1
+                continue
+            if worker.status != "IDLE":
+                idx = (idx + 1) % count
+                checked += 1
+                continue
+            try:
+                if is_stale_by_redis(self._redis, worker.worker_id):
+                    idx = (idx + 1) % count
+                    checked += 1
+                    continue
+            except Exception:  # noqa: broad-except
+                idx = (idx + 1) % count
+                checked += 1
+                continue
+            self._type_rr_index[task_type] = (idx + 1) % count
+            return worker.worker_id
+        if order:
+            self._type_rr_index[task_type] = idx % len(order)
+        else:
+            self._type_rr_index.pop(task_type, None)
+        return None
+
+    def _register_binding(self, task_type: str, worker_id: str) -> None:
+        workers = self._type_to_workers.setdefault(task_type, set())
+        workers.add(worker_id)
+        order = self._type_order.setdefault(task_type, [])
+        if worker_id not in order:
+            order.append(worker_id)
+        self._type_rr_index.setdefault(task_type, 0)
+        self._worker_to_type[worker_id] = task_type
+
+    def _unregister_binding(self, worker_id: str) -> None:
+        task_type = self._worker_to_type.pop(worker_id, None)
+        if not task_type:
+            return
+        workers = self._type_to_workers.get(task_type)
+        if not workers:
+            return
+        workers.discard(worker_id)
+        order = self._type_order.get(task_type)
+        if order and worker_id in order:
+            index = order.index(worker_id)
+            order.pop(index)
+            if not order:
+                self._type_order.pop(task_type, None)
+                self._type_rr_index.pop(task_type, None)
+            else:
+                self._type_rr_index[task_type] = min(self._type_rr_index.get(task_type, 0), len(order) - 1)
+        if not workers:
+            self._type_to_workers.pop(task_type, None)
+
+    def _max_workers_for_type(self) -> int:
+        try:
+            workers = list_workers_from_redis(self._redis)
+        except Exception:  # noqa: broad-except
+            workers = []
+        active_count = sum(1 for worker in workers if not worker.get("stale"))
+        total = active_count if active_count > 0 else len(workers)
+        limit = total // 2
+        if limit < 1:
+            limit = 1
+        return limit
