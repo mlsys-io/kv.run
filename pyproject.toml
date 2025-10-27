@@ -8,6 +8,7 @@ dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.116.1",
     "nvidia-ml-py>=13.580.82",
+    "peft>=0.17.1",
     "pytest>=8.4.2",
     "python-multipart>=0.0.20",
     "pyyaml>=6.0.2",
