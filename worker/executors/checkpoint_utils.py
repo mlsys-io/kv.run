@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import tarfile
 import urllib.error
 import urllib.request
 import zipfile
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -190,13 +191,80 @@ def select_extracted_subdir(extracted_dir: Path, subdir: Optional[str]) -> Path:
     return extracted_dir
 
 
-def archive_model_dir(model_dir: Path) -> Path:
+def archive_model_dir(model_dir: Path, *, compression_level: Optional[int] = None) -> Path:
     archive_path = model_dir.parent / f"{model_dir.name}.tar.gz"
     if archive_path.exists():
         archive_path.unlink()
-    with tarfile.open(archive_path, "w:gz") as tf:
+
+    level = _resolve_compression_level(compression_level)
+    pigz_enabled = _should_use_pigz()
+    pigz_binary = shutil.which(os.getenv("MODEL_ARCHIVE_PIGZ_BIN", "pigz")) if pigz_enabled else None
+    tar_binary = shutil.which(os.getenv("MODEL_ARCHIVE_TAR_BIN", "tar")) if pigz_binary else None
+
+    if pigz_binary and tar_binary:
+        temp_tar = archive_path.with_suffix(".tar")
+        if temp_tar.exists():
+            temp_tar.unlink()
+        try:
+            subprocess.run(
+                [
+                    tar_binary,
+                    "-C",
+                    str(model_dir.parent),
+                    "-cf",
+                    str(temp_tar),
+                    model_dir.name,
+                ],
+                check=True,
+            )
+
+            pigz_cmd = [pigz_binary, "-f"]
+            pigz_threads = os.getenv("MODEL_ARCHIVE_PIGZ_THREADS")
+            if pigz_threads:
+                pigz_cmd.extend(["-p", pigz_threads])
+            if level is not None:
+                pigz_cmd.append(f"-{level}")
+            pigz_cmd.append(str(temp_tar))
+            subprocess.run(pigz_cmd, check=True)
+
+            compressed_path = temp_tar.with_suffix(".tar.gz")
+            compressed_path.rename(archive_path)
+            return archive_path
+        except Exception:
+            # Fall back to python tarfile implementation below
+            if temp_tar.exists():
+                temp_tar.unlink(missing_ok=True)
+
+    tarfile_kwargs: Dict[str, Any] = {"mode": "w:gz"}
+    if level is not None:
+        tarfile_kwargs["compresslevel"] = level
+    with tarfile.open(archive_path, **tarfile_kwargs) as tf:
         tf.add(model_dir, arcname=model_dir.name)
     return archive_path
+
+
+def _resolve_compression_level(level: Optional[int]) -> Optional[int]:
+    if level is not None:
+        return _clamp_compression(level)
+    env_value = os.getenv("MODEL_ARCHIVE_COMPRESSION_LEVEL")
+    if env_value is None:
+        return None
+    try:
+        return _clamp_compression(int(env_value))
+    except ValueError:
+        return None
+
+
+def _clamp_compression(level: int) -> int:
+    return max(0, min(level, 9))
+
+
+def _should_use_pigz() -> bool:
+    setting = os.getenv("MODEL_ARCHIVE_USE_PIGZ")
+    if setting is None:
+        return True
+    normalized = setting.strip().lower()
+    return normalized not in {"0", "false", "no", "off"}
 
 
 def get_http_destination(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
