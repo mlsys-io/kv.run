@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .event_schema import Event, TaskEvent, WorkerEvent, serialize_event
 from .task_models import categorize_task_type
@@ -36,12 +36,20 @@ def _safe_float(value: Any) -> Optional[float]:
 class MetricsRecorder:
     """Aggregates task/worker metrics and persists snapshots to disk."""
 
-    def __init__(self, base_dir: Path, logger) -> None:
+    def __init__(
+        self,
+        base_dir: Path,
+        logger,
+        *,
+        enable_density_plot: bool = False,
+        density_bucket_seconds: int = 60,
+    ) -> None:
         self._dir = Path(base_dir).expanduser().resolve()
         self._dir.mkdir(parents=True, exist_ok=True)
         self._metrics_path = self._dir / "metrics.json"
         self._events_log = self._dir / "events.log"
         self._final_report_path = self._dir / "final_report.json"
+        self._density_data_path = self._dir / "task_worker_density.json"
         self._logger = logger
         self._lock = RLock()
 
@@ -68,6 +76,16 @@ class MetricsRecorder:
 
         self._worker_meta: Dict[str, Dict[str, Any]] = {}
         self._elastic_disabled_workers: Set[str] = set()
+
+        self._density_plot_enabled = bool(enable_density_plot)
+        self._density_bucket_sec = max(1, int(density_bucket_seconds))
+        self._task_density_buckets: Dict[int, int] = {}
+        self._worker_count_series: List[Tuple[float, int]] = []
+        if self._density_plot_enabled:
+            self._logger.info(
+                "Task density tracking enabled (bucket=%ds)",
+                self._density_bucket_sec,
+            )
 
         self._write_metrics()
 
@@ -130,15 +148,18 @@ class MetricsRecorder:
         with self._lock:
             ev_type = event.type
             worker_id = (event.worker_id or "").strip()
+            ts_float = parse_iso_ts(event.ts)
 
             if ev_type == "REGISTER" and worker_id:
                 self._active_workers.add(worker_id)
                 self._counters["workers_registered"] += 1
                 self._on_worker_register(worker_id, event)
+                self._record_worker_count(ts_float)
             elif ev_type == "UNREGISTER" and worker_id:
                 self._active_workers.discard(worker_id)
                 self._counters["workers_unregistered"] += 1
                 self._on_worker_unregister(worker_id, event)
+                self._record_worker_count(ts_float)
             elif ev_type == "HEARTBEAT":
                 self._counters["worker_heartbeats"] += 1
                 if worker_id and worker_id in self._elastic_disabled_workers:
@@ -146,6 +167,7 @@ class MetricsRecorder:
                     meta["last_heartbeat_ts"] = event.ts
                 else:
                     self._on_worker_heartbeat(worker_id, event)
+                    self._record_worker_count(ts_float)
             elif ev_type == "STATUS":
                 self._on_worker_status(worker_id, event)
 
@@ -175,6 +197,7 @@ class MetricsRecorder:
                 meta.pop("elastic_frozen_uptime", None)
                 meta.pop("elastic_frozen_cost", None)
             self._write_metrics()
+            self._record_worker_count(time.time())
 
     def finalize_task_failure(self, task_id: str) -> None:
         with self._lock:
@@ -221,6 +244,9 @@ class MetricsRecorder:
         with self._lock:
             report = self._build_snapshot()
             report["finalized_at"] = _now_iso()
+            density_data_path: Optional[str] = None
+            if self._density_plot_enabled and self._density_data_path.exists():
+                density_data_path = str(self._density_data_path)
             try:
                 self._final_report_path.write_text(
                     json.dumps(report, ensure_ascii=False, indent=2),
@@ -230,7 +256,11 @@ class MetricsRecorder:
             except Exception as exc:  # noqa: broad-except
                 path = ""
                 self._logger.warning("Failed to write final metrics report: %s", exc)
-            return {"path": path, "report": report}
+            result = {"path": path, "report": report}
+            if density_data_path:
+                report.setdefault("artifacts", {})["task_worker_density_data"] = density_data_path
+                result["density_data_path"] = density_data_path
+            return result
 
     def format_report(self, report: Dict[str, Any]) -> str:
         counters = report.get("counters", {})
@@ -331,6 +361,7 @@ class MetricsRecorder:
         meta["last_queue_ts"] = ts
         meta["queue_wait_accum"] = 0.0
         meta["execution_time_accum"] = 0.0
+        self._record_task_submission(ts)
         payload = event.payload or {}
         task_type = payload.get("taskType")
         if task_type:
@@ -551,6 +582,53 @@ class MetricsRecorder:
         meta["status"] = event.status
 
     # ------------------------------------------------------------------ #
+    # Density tracking helpers
+    # ------------------------------------------------------------------ #
+
+    def _record_task_submission(self, ts: float) -> None:
+        if not self._density_plot_enabled:
+            return
+        bucket = int(ts // self._density_bucket_sec) * self._density_bucket_sec
+        self._task_density_buckets[bucket] = self._task_density_buckets.get(bucket, 0) + 1
+
+    def _record_worker_count(self, ts: float) -> None:
+        if not self._density_plot_enabled:
+            return
+        active_workers = len({wid for wid in self._active_workers if wid not in self._elastic_disabled_workers})
+        if self._worker_count_series:
+            last_ts, last_value = self._worker_count_series[-1]
+            if last_value == active_workers and ts <= last_ts + 1:
+                return
+        self._worker_count_series.append((ts, active_workers))
+
+    def _serialize_task_density(self) -> List[Dict[str, Any]]:
+        if not self._density_plot_enabled:
+            return []
+        entries = []
+        for bucket_ts in sorted(self._task_density_buckets):
+            count = self._task_density_buckets[bucket_ts]
+            density = count * (60.0 / self._density_bucket_sec)
+            entries.append(
+                {
+                    "bucket_start": datetime.fromtimestamp(bucket_ts, tz=timezone.utc).isoformat(),
+                    "count": count,
+                    "tasks_per_minute": density,
+                }
+            )
+        return entries
+
+    def _serialize_worker_series(self) -> List[Dict[str, Any]]:
+        if not self._density_plot_enabled:
+            return []
+        return [
+            {
+                "ts": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                "active_workers": count,
+            }
+            for ts, count in self._worker_count_series
+        ]
+
+    # ------------------------------------------------------------------ #
     # Persistence helpers
     # ------------------------------------------------------------------ #
 
@@ -568,6 +646,21 @@ class MetricsRecorder:
             self._metrics_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:  # noqa: broad-except
             self._logger.debug("Failed to write metrics snapshot: %s", exc)
+        self._write_density_snapshot()
+
+    def _write_density_snapshot(self) -> None:
+        if not self._density_plot_enabled:
+            return
+        payload = {
+            "generated_at": _now_iso(),
+            "bucket_seconds": self._density_bucket_sec,
+            "task_density_buckets": self._serialize_task_density(),
+            "worker_count_series": self._serialize_worker_series(),
+        }
+        try:
+            self._density_data_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: broad-except
+            self._logger.debug("Failed to write density snapshot: %s", exc)
 
     def _build_snapshot(self) -> Dict[str, Any]:
         counters = dict(self._counters)
@@ -577,7 +670,7 @@ class MetricsRecorder:
         }
         workers = self._summarize_workers()
         active_workers = {wid for wid in self._active_workers if wid not in self._elastic_disabled_workers}
-        return {
+        snapshot = {
             "generated_at": _now_iso(),
             "counters": counters,
             "task_timings": timings,
@@ -586,6 +679,11 @@ class MetricsRecorder:
             "elastic_disabled_workers": sorted(self._elastic_disabled_workers),
             "completed_tasks": sorted(self._completed_tasks),
         }
+        if self._density_plot_enabled:
+            snapshot["density_bucket_seconds"] = self._density_bucket_sec
+            snapshot["task_density_buckets"] = self._serialize_task_density()
+            snapshot["worker_count_series"] = self._serialize_worker_series()
+        return snapshot
 
     def _summarize_timing(self, bucket: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
         summary: Dict[str, Any] = {}

@@ -102,6 +102,11 @@ root `README.md`. Key additions related to the scheduler:
 - `SCHEDULER_LAMBDA_INFERENCE`, `SCHEDULER_LAMBDA_TRAINING`, `SCHEDULER_LAMBDA_OTHER`
   – category-specific λ weights.
 - `SCHEDULER_SELECTION_JITTER` – jitter magnitude used to break ties.
+- `HOST_METRICS_ENABLE_DENSITY_PLOT` – when set to `true`, the orchestrator records
+  task submission density and active worker counts, exporting the raw series to
+  `${HOST_METRICS_DIR}/task_worker_density.json` (bucket size controlled by
+  `HOST_METRICS_DENSITY_BUCKET_SEC`, default 60s).
+  Use `pt/density_plot.py` to render the JSON into a figure when needed.
 
 ## Metrics instrumentation
 
