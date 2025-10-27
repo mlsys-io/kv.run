@@ -15,11 +15,20 @@ artifacts (for example, fine-tuned checkpoints).
 | `WORKER_TAGS` | empty | Comma-separated tags used by the scheduler. |
 | `LOG_LEVEL` | `INFO` | Worker log level. |
 | `ORCHESTRATOR_BASE_URL` | empty | Optional base URL (e.g. `http://127.0.0.1:8000`) used to construct artifact download links when templates specify `checkpoint.load` blocks without an explicit URL. |
+| `MODEL_ARCHIVE_USE_PIGZ` | `1` | Enable multi-threaded `pigz` compression for model archives when available (`0`/`false` to disable). |
+| `MODEL_ARCHIVE_COMPRESSION_LEVEL` | `6` | Override gzip compression level (`0-9`) for both `pigz` and Python fallback. |
+| `MODEL_ARCHIVE_PIGZ_THREADS` | – | Force a fixed number of threads for `pigz`; defaults to all CPUs when unset. |
+| `MODEL_ARCHIVE_PIGZ_BIN` | `pigz` | Path to the `pigz` executable (auto-detected otherwise). |
+| `MODEL_ARCHIVE_TAR_BIN` | `tar` | Path to the `tar` executable used prior to `pigz` compression. |
 
 > When `spec.output.destination.type` is `http`, the worker uploads generated
 > model archives back to the orchestrator using `POST /api/v1/results/{task_id}/files`.
 > Set `ORCHESTRATOR_BASE_URL` so staged pipelines can later download those files
 > through the orchestrator.
+
+> ℹ️ To accelerate large checkpoint uploads, install `pigz` on workers (the setup
+> script does this by default) and leave `MODEL_ARCHIVE_USE_PIGZ=1`. The worker
+> will fall back to Python’s `tarfile` implementation if `pigz` is unavailable.
 
 ## Startup
 ```bash
