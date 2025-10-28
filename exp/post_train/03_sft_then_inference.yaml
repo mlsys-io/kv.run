@@ -30,7 +30,7 @@ spec:
     destination:
       type: "http"
       url: "http://localhost:8000/api/v1/results"
-      timeoutSec: 1200
+      timeoutSec: 1800
     artifacts:
       - "responses.json"
       - "final_model"
@@ -63,7 +63,7 @@ spec:
           destination:
             type: "http"
             url: "http://localhost:8000/api/v1/results"
-            timeoutSec: 1200
+            timeoutSec: 1800
           artifacts:
             - "responses.json"
             - "final_model"
