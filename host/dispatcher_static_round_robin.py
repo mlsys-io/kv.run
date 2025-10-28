@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from .dispatcher import Dispatcher, StageReferenceNotReady
 from .utils import now_iso
-from .worker_registry import get_worker_from_redis, is_stale_by_redis, list_workers_from_redis, update_worker_status
+from .worker_registry import (
+    get_worker_from_redis,
+    idle_satisfying_pool,
+    is_stale_by_redis,
+    list_workers_from_redis,
+    update_worker_status,
+)
 from .worker_selector import DEFAULT_WORKER_SELECTION
 
 
 class StaticRoundRobinDispatcher(Dispatcher):
     """
-    Baseline dispatcher that ignores capability matching and assigns jobs
-    using a simple round-robin over idle workers.
+    Baseline dispatcher that hands out jobs using round-robin selection while
+    still honoring task hardware constraints (CPU, RAM, GPU).
 
-    The implementation keeps a rotating list of idle workers (filtered only by
-    status and staleness) and hands out tasks in that fixed order. It reuses the
-    base dispatcher for stage resolution so graph-based YAMLs remain compatible.
+    The implementation keeps a rotating list of idle workers and walks that list
+    for each dispatch, but it now filters candidates through the same resource
+    checks as the adaptive dispatcher before choosing the next worker.
     """
 
     def __init__(
@@ -46,7 +52,18 @@ class StaticRoundRobinDispatcher(Dispatcher):
         if not record:
             return True
 
-        worker_id = self._next_worker()
+        eligible = self._eligible_worker_ids(record.parsed)
+        if not eligible:
+            self._logger.debug("Static RR: no resource-compatible worker for %s; requeueing", task_id)
+            self._requeue_task(
+                task_id,
+                reason="no_resource_match",
+                release_merge=False,
+                count_retry=False,
+            )
+            return False
+
+        worker_id = self._next_worker(eligible)
         if not worker_id:
             self._logger.debug("Static RR: no idle worker available for %s; requeueing", task_id)
             self._requeue_task(
@@ -111,12 +128,15 @@ class StaticRoundRobinDispatcher(Dispatcher):
     # Round-robin helpers
     # ------------------------------------------------------------------ #
 
-    def _next_worker(self) -> Optional[str]:
+    def _next_worker(self, eligible_ids: Set[str]) -> Optional[str]:
         self._refresh_worker_cache()
         remaining = len(self._rr_workers)
         while self._rr_workers and remaining > 0:
             worker_id = self._rr_workers[self._rr_index]
             self._rr_index = (self._rr_index + 1) % len(self._rr_workers)
+            if worker_id not in eligible_ids:
+                remaining -= 1
+                continue
             if self._worker_is_idle(worker_id):
                 return worker_id
             self._invalidate_worker(worker_id)
@@ -184,3 +204,11 @@ class StaticRoundRobinDispatcher(Dispatcher):
             return not is_stale_by_redis(self._redis, worker_id)
         except Exception:  # noqa: broad-except
             return False
+
+    def _eligible_worker_ids(self, task_payload) -> Set[str]:
+        try:
+            pool = idle_satisfying_pool(self._redis, task_payload)
+        except Exception as exc:  # noqa: broad-except
+            self._logger.debug("Static RR: failed to compute eligible pool: %s", exc)
+            return set()
+        return {worker.worker_id for worker in pool}

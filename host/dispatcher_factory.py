@@ -35,6 +35,7 @@ def create_dispatcher(
     metrics_recorder=None,
     lambda_config: Optional[dict] = None,
     selection_jitter_epsilon: float = 1e-3,
+    fixed_pipeline_binding_idle_timeout_sec: int = 300,
 ):
     """
     Instantiate a dispatcher according to the selected baseline.
@@ -75,4 +76,6 @@ def create_dispatcher(
             lambda_config=lambda_config,
             selection_jitter_epsilon=selection_jitter_epsilon,
         )
+    elif dispatcher_cls is FixedPipelineDispatcher:
+        base_kwargs.update(binding_idle_timeout_sec=fixed_pipeline_binding_idle_timeout_sec)
     return dispatcher_cls(**base_kwargs)

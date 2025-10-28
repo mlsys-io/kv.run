@@ -109,11 +109,15 @@ AUTO_TOGGLE_COOLDOWN_SEC = max(
     parse_int_env("ELASTIC_AUTO_TOGGLE_COOLDOWN_SEC", max(60, AUTO_POLL_INTERVAL_SEC * 2)),
 )
 AUTO_MIN_ACTIVE_WORKERS = max(0, parse_int_env("ELASTIC_AUTO_MIN_ACTIVE_WORKERS", 1))
+AUTO_ENABLE_MULTI_WORKERS = parse_bool_env("ELASTIC_AUTO_ENABLE_MULTI_WORKERS", True)
 ENABLE_WORKER_WATCHDOG = parse_bool_env("ENABLE_WORKER_WATCHDOG", True)
 WORKER_DEATH_CHECK_INTERVAL = max(5, parse_int_env("WORKER_DEATH_CHECK_INTERVAL", 30))
 WORKER_DEATH_GRACE_SEC = max(0, parse_int_env("WORKER_DEATH_GRACE_SEC", 60))
 HOST_METRICS_ENABLE_DENSITY_PLOT = parse_bool_env("HOST_METRICS_ENABLE_DENSITY_PLOT", False)
 HOST_METRICS_DENSITY_BUCKET_SEC = max(1, parse_int_env("HOST_METRICS_DENSITY_BUCKET_SEC", 60))
+FIXED_PIPELINE_BINDING_IDLE_TIMEOUT_SEC = max(
+    0, parse_int_env("FIXED_PIPELINE_BINDING_IDLE_TIMEOUT_SEC", 300)
+)
 
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
@@ -132,6 +136,7 @@ ELASTIC_COORDINATOR = ElasticCoordinator(
     auto_poll_interval=AUTO_POLL_INTERVAL_SEC,
     auto_toggle_cooldown=AUTO_TOGGLE_COOLDOWN_SEC,
     min_active_workers=AUTO_MIN_ACTIVE_WORKERS,
+    auto_enable_multi=AUTO_ENABLE_MULTI_WORKERS,
     logger=logger,
 )
 ELASTIC_COORDINATOR.start()
@@ -156,6 +161,7 @@ DISPATCHER = create_dispatcher(
         "other": SCHED_LAMBDA_OTHER,
     },
     selection_jitter_epsilon=SCHED_SELECTION_JITTER,
+    fixed_pipeline_binding_idle_timeout_sec=FIXED_PIPELINE_BINDING_IDLE_TIMEOUT_SEC,
 )
 STOP_EVENT = threading.Event()
 BACKGROUND_THREADS: List[threading.Thread] = []

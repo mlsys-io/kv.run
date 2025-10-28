@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from typing import Dict, List, Optional, Set
 
 from .dispatcher import Dispatcher, StageReferenceNotReady
@@ -36,6 +37,7 @@ class FixedPipelineDispatcher(Dispatcher):
         logger,
         worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
         metrics_recorder=None,
+        binding_idle_timeout_sec: int = 0,
     ) -> None:
         super().__init__(
             runtime,
@@ -49,6 +51,8 @@ class FixedPipelineDispatcher(Dispatcher):
         self._type_order: Dict[str, List[str]] = {}
         self._type_rr_index: Dict[str, int] = {}
         self._worker_to_type: Dict[str, str] = {}
+        self._binding_idle_timeout_sec = max(0, int(binding_idle_timeout_sec))
+        self._binding_last_used: Dict[str, float] = {}
 
     def dispatch_once(self, task_id: str) -> bool:
         record = self._runtime.get_record(task_id)
@@ -117,6 +121,7 @@ class FixedPipelineDispatcher(Dispatcher):
             update_worker_status(self._redis, worker_id, "RUNNING")
         except Exception as exc:  # noqa: broad-except
             self._logger.debug("Fixed pipeline dispatcher failed to update %s status: %s", worker_id, exc)
+        self._note_binding_usage(worker_id)
         return True
 
     # ------------------------------------------------------------------ #
@@ -124,7 +129,16 @@ class FixedPipelineDispatcher(Dispatcher):
     # ------------------------------------------------------------------ #
 
     def _resolve_worker(self, task_type: str, payload) -> Optional[str]:
-        idle_bound = self._idle_bound_worker(task_type)
+        pool_valid = True
+        try:
+            pool = idle_satisfying_pool(self._redis, payload)
+        except Exception as exc:  # noqa: broad-except
+            self._logger.debug("Fixed pipeline dispatcher failed to build eligible pool for %s: %s", task_type, exc)
+            pool = []
+            pool_valid = False
+        eligible_ids = {worker.worker_id for worker in pool} if pool_valid else None
+
+        idle_bound = self._idle_bound_worker(task_type, eligible_ids)
         if idle_bound:
             return idle_bound
 
@@ -133,7 +147,6 @@ class FixedPipelineDispatcher(Dispatcher):
         if len(bound_workers) >= max_workers_for_type:
             return None
 
-        pool = idle_satisfying_pool(self._redis, payload)
         if not pool:
             return None
 
@@ -160,7 +173,7 @@ class FixedPipelineDispatcher(Dispatcher):
             )
         return worker.worker_id
 
-    def _idle_bound_worker(self, task_type: str) -> Optional[str]:
+    def _idle_bound_worker(self, task_type: str, eligible_ids: Optional[Set[str]]) -> Optional[str]:
         order = self._type_order.get(task_type, [])
         if not order:
             return None
@@ -199,6 +212,42 @@ class FixedPipelineDispatcher(Dispatcher):
                 idx = (idx + 1) % count
                 checked += 1
                 continue
+            if self._binding_idle_timeout_sec > 0:
+                last_used = self._binding_last_used.get(worker.worker_id)
+                now = time.time()
+                idle_duration = 0.0 if last_used is None else now - last_used
+                if last_used is None or idle_duration >= self._binding_idle_timeout_sec:
+                    self._logger.info(
+                        "Fixed pipeline dispatcher releasing binding for %s; worker %s idle for %.0fs (limit=%ds)",
+                        task_type,
+                        worker.worker_id,
+                        idle_duration,
+                        self._binding_idle_timeout_sec,
+                    )
+                    self._unregister_binding(worker.worker_id)
+                    order = self._type_order.get(task_type, [])
+                    count = len(order)
+                    if count == 0:
+                        self._type_rr_index.pop(task_type, None)
+                        return None
+                    idx %= count
+                    checked += 1
+                    continue
+            if eligible_ids is not None and worker.worker_id not in eligible_ids:
+                self._logger.info(
+                    "Fixed pipeline dispatcher dropping binding for %s; worker %s no longer satisfies resources",
+                    task_type,
+                    worker.worker_id,
+                )
+                self._unregister_binding(worker.worker_id)
+                order = self._type_order.get(task_type, [])
+                count = len(order)
+                if count == 0:
+                    self._type_rr_index.pop(task_type, None)
+                    return None
+                idx %= count
+                checked += 1
+                continue
             self._type_rr_index[task_type] = (idx + 1) % count
             return worker.worker_id
         if order:
@@ -206,6 +255,9 @@ class FixedPipelineDispatcher(Dispatcher):
         else:
             self._type_rr_index.pop(task_type, None)
         return None
+
+    def _note_binding_usage(self, worker_id: str) -> None:
+        self._binding_last_used[worker_id] = time.time()
 
     def _register_binding(self, task_type: str, worker_id: str) -> None:
         workers = self._type_to_workers.setdefault(task_type, set())
@@ -215,6 +267,7 @@ class FixedPipelineDispatcher(Dispatcher):
             order.append(worker_id)
         self._type_rr_index.setdefault(task_type, 0)
         self._worker_to_type[worker_id] = task_type
+        self._binding_last_used[worker_id] = time.time()
 
     def _unregister_binding(self, worker_id: str) -> None:
         task_type = self._worker_to_type.pop(worker_id, None)
@@ -235,6 +288,7 @@ class FixedPipelineDispatcher(Dispatcher):
                 self._type_rr_index[task_type] = min(self._type_rr_index.get(task_type, 0), len(order) - 1)
         if not workers:
             self._type_to_workers.pop(task_type, None)
+        self._binding_last_used.pop(worker_id, None)
 
     def _max_workers_for_type(self) -> int:
         try:

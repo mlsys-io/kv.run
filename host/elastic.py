@@ -32,6 +32,7 @@ class ElasticCoordinator:
         auto_poll_interval: int = 30,
         auto_toggle_cooldown: int = 120,
         min_active_workers: int = 1,
+        auto_enable_multi: bool = True,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._rds = rds
@@ -50,6 +51,7 @@ class ElasticCoordinator:
         self._auto_poll_interval = max(5, int(auto_poll_interval))
         self._auto_toggle_cooldown = max(30, int(auto_toggle_cooldown))
         self._min_active_workers = max(0, int(min_active_workers))
+        self._auto_enable_multi = bool(auto_enable_multi)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         if enabled:
@@ -239,6 +241,7 @@ class ElasticCoordinator:
             return
 
         ordered = sort_workers(candidates)
+        enabled_count = 0
         for worker in ordered:
             worker_id = worker.worker_id
             last_toggle = self._last_toggle_ts.get(worker_id, 0.0)
@@ -249,7 +252,14 @@ class ElasticCoordinator:
             except Exception as exc:  # pragma: no cover
                 self._logger.debug("Failed to auto-enable worker %s: %s", worker_id, exc)
                 continue
-            break
+            enabled_count += 1
+            if not self._auto_enable_multi:
+                break
+            queue_len = self._runtime.ready_queue_length()
+            if queue_len < self._auto_enable_queue_threshold:
+                break
+        if enabled_count > 1:
+            self._logger.info("Elastic coordinator auto-enabled %d workers", enabled_count)
 
     def _parse_ts(self, value: Optional[str]) -> float:
         if not value:
