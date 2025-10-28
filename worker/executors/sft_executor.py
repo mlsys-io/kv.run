@@ -33,6 +33,7 @@ from .checkpoint_utils import (
     get_http_destination,
     is_cleanup_enabled,
 )
+from .data_utils import resolve_jsonl_path
 
 logger = logging.getLogger("worker.sft")
 
@@ -532,49 +533,44 @@ class SFTExecutor(Executor):
                 checkpoint_dir,
             )
 
-    def _ensure_jsonl_local(self, jsonl_cfg: Dict[str, Any], default_name: str) -> Path:
-        path_value = str(jsonl_cfg.get("path") or "").strip()
-        url_value = str(jsonl_cfg.get("url") or jsonl_cfg.get("download_url") or "").strip()
+    def _ensure_jsonl_local(self, jsonl_cfg: Dict[str, Any]) -> Path:
+        headers_cfg = jsonl_cfg.get("download_headers") or jsonl_cfg.get("headers") or {}
+        headers = {str(k): str(v) for k, v in headers_cfg.items()} if headers_cfg else None
+        timeout = float(
+            jsonl_cfg.get("download_timeoutSec")
+            or jsonl_cfg.get("timeoutSec")
+            or jsonl_cfg.get("timeout")
+            or 60
+        )
 
-        candidate: Optional[Path] = None
-        if path_value:
-            candidate_path = Path(path_value).expanduser()
-            if not candidate_path.is_absolute() and self._task_out_dir:
-                candidate_path = (self._task_out_dir / candidate_path).resolve()
-            else:
-                candidate_path = candidate_path.resolve()
-            if candidate_path.exists():
-                jsonl_cfg["path"] = str(candidate_path)
-                return candidate_path
-            candidate = candidate_path
+        candidates: List[str] = []
+        for key in ("download_url", "url", "path", "worker_path"):
+            value = str(jsonl_cfg.get(key) or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
 
-        if url_value:
-            if self._task_out_dir:
-                cache_dir = (self._task_out_dir / "_jsonl_cache").resolve()
-            else:
-                cache_dir = Path(tempfile.mkdtemp(prefix="mloc_jsonl_")).resolve()
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            parsed = urlparse(url_value)
-            name = Path(parsed.path).name or (candidate.name if candidate else default_name)
-            if not name:
-                name = default_name
-            target = cache_dir / name
+        base_dir = self._task_out_dir or Path(tempfile.mkdtemp(prefix="mloc_jsonl_")).resolve()
+        last_error: Optional[Exception] = None
+
+        for candidate in candidates:
             try:
-                import requests
+                resolved = resolve_jsonl_path(
+                    candidate,
+                    out_dir=base_dir,
+                    headers=headers,
+                    timeout=timeout,
+                    logger=logger,
+                )
+                jsonl_cfg["path"] = str(resolved)
+                return resolved
+            except ExecutionError as exc:
+                last_error = exc
+                continue
 
-                with requests.get(url_value, stream=True, timeout=60) as resp:
-                    resp.raise_for_status()
-                    with target.open("wb") as fh:
-                        for chunk in resp.iter_content(chunk_size=65536):
-                            if chunk:
-                                fh.write(chunk)
-            except Exception as exc:  # pragma: no cover - network handling
-                raise ValueError(f"Failed to download JSONL dataset from {url_value}: {exc}") from exc
-            jsonl_cfg["path"] = str(target)
-            return target.resolve()
-
-        if candidate is not None:
-            raise ValueError(f"JSONL dataset not found: {candidate}")
+        if last_error is not None:
+            raise ValueError(str(last_error)) from last_error
+        if candidates:
+            raise ValueError(f"JSONL dataset not found: {candidates[-1]}")
         raise ValueError("data.jsonl.path is required when using JSONL inputs for SFT")
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
@@ -593,8 +589,7 @@ class SFTExecutor(Executor):
             if jsonl_path:
                 jsonl_cfg.setdefault("path", jsonl_path)
 
-            default_name = Path(str(jsonl_cfg.get("path") or "dataset.jsonl")).name or "dataset.jsonl"
-            jsonl_file = self._ensure_jsonl_local(jsonl_cfg, default_name=default_name)
+            jsonl_file = self._ensure_jsonl_local(jsonl_cfg)
 
             text_field = (
                 jsonl_cfg.get("text_field")

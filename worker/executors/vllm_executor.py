@@ -643,11 +643,49 @@ class VLLMExecutor(Executor):
 
         export_payload = {
             "path": str(resolved),
+            "worker_path": str(resolved),
             "record_count": len(records),
             "fields": list(fields_cfg.keys()),
         }
         if relative_path:
             export_payload["relative_path"] = relative_path
+
+        destination = (spec.get("output") or {}).get("destination") or {}
+        dest_type = str(destination.get("type") or "local").lower()
+        if dest_type == "http":
+            url = destination.get("url")
+            if not url:
+                raise ExecutionError("spec.output.destination.url is required for HTTP results")
+            upload_url = url.rstrip("/") + f"/{task_id}/files"
+            headers = {
+                str(k): str(v)
+                for k, v in (destination.get("headers") or {}).items()
+                if str(k).lower() != "content-type"
+            }
+            timeout = float(destination.get("timeoutSec") or 30)
+            try:
+                import requests
+
+                with target_path.open("rb") as fh:
+                    files = {"file": (target_path.name, fh, "application/json")}
+                    response = requests.post(upload_url, files=files, headers=headers, timeout=timeout)
+                response.raise_for_status()
+            except Exception as exc:
+                raise ExecutionError(f"Failed to upload JSONL export to {upload_url}: {exc}") from exc
+
+            download_url = url.rstrip("/") + f"/{task_id}/files/{target_path.name}"
+            export_payload["uploaded"] = True
+            export_payload["artifact_name"] = target_path.name
+            export_payload["host_path"] = f"artifacts/{target_path.name}"
+            export_payload["download_url"] = download_url
+            export_payload["path"] = download_url
+            export_payload["download_timeoutSec"] = timeout
+            logger.info(
+                "Task %s uploaded JSONL export to %s (download=%s)",
+                task_id,
+                upload_url,
+                download_url,
+            )
 
         result["jsonl_export"] = export_payload
         logger.info(
