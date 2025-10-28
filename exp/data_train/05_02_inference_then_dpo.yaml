@@ -103,7 +103,7 @@ spec:
           destination:
             type: "http"
             url: "http://localhost:8000/api/v1/results"
-            timeoutSec: 600
+            timeoutSec: 1200
           artifacts:
             - "responses.json"
             - "checkpoints"
