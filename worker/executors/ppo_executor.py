@@ -23,7 +23,12 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, Gene
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 
 from .base_executor import Executor, ExecutionError
-from .checkpoint_utils import archive_model_dir, get_http_destination
+from .checkpoint_utils import (
+    archive_model_dir,
+    cleanup_artifact_path,
+    get_http_destination,
+    is_cleanup_enabled,
+)
 
 logger = logging.getLogger("worker.ppo")
 
@@ -788,6 +793,13 @@ class PPOExecutor(Executor):
             results["final_model_archive"] = final_archive_path.name
             results["final_model_archive_path"] = str(final_archive_path)
             self._upload_model_archive(task, final_archive_path, results)
+        self._cleanup_local_artifacts(
+            task,
+            checkpoint_dir,
+            final_model_path,
+            final_archive_path,
+            results,
+        )
         self.save_json(out_dir / "responses.json", results)
 
         logger.info("PPO training task completed in %.2f seconds", training_time)
@@ -1038,6 +1050,42 @@ class PPOExecutor(Executor):
             logger.info("Uploaded PPO model archive to %s (%d bytes)", upload_url, file_size)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("PPO model archive upload failed for %s: %s", task_id, exc)
+
+    def _cleanup_local_artifacts(
+        self,
+        task: Dict[str, Any],
+        checkpoint_dir: Path,
+        final_model_path: Optional[Path],
+        final_archive_path: Optional[Path],
+        payload: Dict[str, Any],
+    ) -> None:
+        if not is_cleanup_enabled():
+            logger.info(
+                "Skipping PPO checkpoint cleanup for task %s because MODEL_CLEANUP_AFTER_UPLOAD is disabled",
+                (task or {}).get("task_id"),
+            )
+            return
+        destination = get_http_destination(task)
+        if not destination:
+            return
+        uploaded = bool(payload.get("final_model_archive_uploaded"))
+        remove_checkpoints = uploaded or final_model_path is None
+        if not remove_checkpoints:
+            logger.info(
+                "Skipping PPO checkpoint cleanup for task %s because archive upload did not complete",
+                (task or {}).get("task_id"),
+            )
+            return
+        if uploaded:
+            cleanup_artifact_path(final_model_path, logger=logger)
+            cleanup_artifact_path(final_archive_path, logger=logger)
+        cleanup_artifact_path(checkpoint_dir, logger=logger)
+        if not checkpoint_dir.exists():
+            logger.info(
+                "Deleted local PPO checkpoints for task %s at %s",
+                (task or {}).get("task_id"),
+                checkpoint_dir,
+            )
 
     @staticmethod
     def _detect_gpu_count(training_config: Dict[str, Any]) -> int:

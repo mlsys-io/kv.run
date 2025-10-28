@@ -28,8 +28,10 @@ from trl import SFTTrainer, SFTConfig
 from .base_executor import Executor, ExecutionError
 from .checkpoint_utils import (
     archive_model_dir,
+    cleanup_artifact_path,
     determine_resume_path,
     get_http_destination,
+    is_cleanup_enabled,
 )
 
 logger = logging.getLogger("worker.sft")
@@ -361,6 +363,13 @@ class SFTExecutor(Executor):
                     result_payload["final_model_archive"] = final_archive_path.name
                     result_payload["final_model_archive_path"] = str(final_archive_path)
                     self._upload_model_archive(task, final_archive_path, result_payload)
+            self._cleanup_local_artifacts(
+                task,
+                checkpoint_dir,
+                final_model_path,
+                final_archive_path,
+                result_payload,
+            )
 
             # Drop heavy references before runner-level cleanup
             trainer = None
@@ -486,6 +495,42 @@ class SFTExecutor(Executor):
             )
         except Exception as exc:
             logger.warning("Model archive upload failed for %s: %s", task_id, exc)
+
+    def _cleanup_local_artifacts(
+        self,
+        task: Dict[str, Any],
+        checkpoint_dir: Path,
+        final_model_path: Optional[Path],
+        final_archive_path: Optional[Path],
+        payload: Dict[str, Any],
+    ) -> None:
+        if not is_cleanup_enabled():
+            logger.info(
+                "Skipping SFT checkpoint cleanup for task %s because MODEL_CLEANUP_AFTER_UPLOAD is disabled",
+                (task or {}).get("task_id"),
+            )
+            return
+        destination = get_http_destination(task)
+        if not destination:
+            return
+        uploaded = bool(payload.get("final_model_archive_uploaded"))
+        remove_checkpoints = uploaded or final_model_path is None
+        if not remove_checkpoints:
+            logger.info(
+                "Skipping checkpoint cleanup for task %s because model archive is not uploaded",
+                (task or {}).get("task_id"),
+            )
+            return
+        if uploaded:
+            cleanup_artifact_path(final_model_path, logger=logger)
+            cleanup_artifact_path(final_archive_path, logger=logger)
+        cleanup_artifact_path(checkpoint_dir, logger=logger)
+        if not checkpoint_dir.exists():
+            logger.info(
+                "Deleted local SFT checkpoints for task %s at %s",
+                (task or {}).get("task_id"),
+                checkpoint_dir,
+            )
 
     def _ensure_jsonl_local(self, jsonl_cfg: Dict[str, Any], default_name: str) -> Path:
         path_value = str(jsonl_cfg.get("path") or "").strip()

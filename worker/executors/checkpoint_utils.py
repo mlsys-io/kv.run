@@ -279,3 +279,33 @@ def get_http_destination(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "headers": {str(k): str(v) for k, v in (dest.get("headers") or {}).items()},
         "timeout": float(dest.get("timeoutSec", 30)),
     }
+
+
+def cleanup_artifact_path(path: Optional[Path], *, logger=None) -> None:
+    """Remove a local file or directory if it exists, ignoring missing paths."""
+    if not path:
+        return
+    try:
+        target = Path(path)
+    except TypeError:
+        return
+    try:
+        if not target.exists():
+            return
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # pragma: no cover - best effort cleanup
+        if logger:
+            logger.warning("Failed to remove artifact at %s: %s", target, exc)
+
+
+def is_cleanup_enabled() -> bool:
+    setting = os.getenv("MODEL_CLEANUP_AFTER_UPLOAD")
+    if setting is None:
+        return True
+    normalized = setting.strip().lower()
+    return normalized not in {"0", "false", "no", "off"}

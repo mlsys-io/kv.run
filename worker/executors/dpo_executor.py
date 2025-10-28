@@ -21,7 +21,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import DPOTrainer, DPOConfig
 
 from .base_executor import Executor, ExecutionError
-from .checkpoint_utils import archive_model_dir, get_http_destination
+from .checkpoint_utils import (
+    archive_model_dir,
+    cleanup_artifact_path,
+    get_http_destination,
+    is_cleanup_enabled,
+)
 
 logger = logging.getLogger("worker.dpo")
 
@@ -409,6 +414,13 @@ class DPOExecutor(Executor):
                 results["final_model_archive"] = final_archive_path.name
                 results["final_model_archive_path"] = str(final_archive_path)
                 self._upload_model_archive(task, final_archive_path, results)
+            self._cleanup_local_artifacts(
+                task,
+                checkpoint_dir,
+                final_model_path,
+                final_archive_path,
+                results,
+            )
             self.save_json(out_dir / "responses.json", results)
             return results
         except Exception as exc:
@@ -452,6 +464,42 @@ class DPOExecutor(Executor):
             logger.info("Uploaded DPO model archive to %s (%d bytes)", upload_url, file_size)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("DPO model archive upload failed for %s: %s", task_id, exc)
+
+    def _cleanup_local_artifacts(
+        self,
+        task: Dict[str, Any],
+        checkpoint_dir: Path,
+        final_model_path: Optional[Path],
+        final_archive_path: Optional[Path],
+        payload: Dict[str, Any],
+    ) -> None:
+        if not is_cleanup_enabled():
+            logger.info(
+                "Skipping DPO checkpoint cleanup for task %s because MODEL_CLEANUP_AFTER_UPLOAD is disabled",
+                (task or {}).get("task_id"),
+            )
+            return
+        destination = get_http_destination(task)
+        if not destination:
+            return
+        uploaded = bool(payload.get("final_model_archive_uploaded"))
+        remove_checkpoints = uploaded or final_model_path is None
+        if not remove_checkpoints:
+            logger.info(
+                "Skipping DPO checkpoint cleanup for task %s because archive upload did not complete",
+                (task or {}).get("task_id"),
+            )
+            return
+        if uploaded:
+            cleanup_artifact_path(final_model_path, logger=logger)
+            cleanup_artifact_path(final_archive_path, logger=logger)
+        cleanup_artifact_path(checkpoint_dir, logger=logger)
+        if not checkpoint_dir.exists():
+            logger.info(
+                "Deleted local DPO checkpoints for task %s at %s",
+                (task or {}).get("task_id"),
+                checkpoint_dir,
+            )
 
     def _spawn_distributed(
         self,

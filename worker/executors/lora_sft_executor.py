@@ -19,8 +19,10 @@ from transformers import Trainer
 from .base_executor import Executor, ExecutionError
 from .checkpoint_utils import (
     archive_model_dir,
+    cleanup_artifact_path,
     determine_resume_path,
     get_http_destination,
+    is_cleanup_enabled,
 )
 from .sft_executor import SFTExecutor
 
@@ -215,6 +217,7 @@ class LoRASFTExecutor(Executor):
             logger.info("LoRA SFT training completed")
 
             final_adapter_path: Optional[Path] = None
+            archive_path: Optional[Path] = None
             if bool(training_cfg.get("save_model", True)):
                 model_path = out_dir / "final_lora"
                 trainer.save_model(model_path)
@@ -241,6 +244,13 @@ class LoRASFTExecutor(Executor):
                 result_payload["final_lora_archive_path"] = str(archive_path)
                 logger.info("Prepared LoRA archive at %s", archive_path)
                 self._upload_model_archive(task, archive_path, result_payload)
+            self._cleanup_local_artifacts(
+                task,
+                checkpoint_dir,
+                final_adapter_path,
+                archive_path,
+                result_payload,
+            )
             return result_payload
 
         except Exception as exc:  # pylint: disable=broad-except
@@ -331,9 +341,47 @@ class LoRASFTExecutor(Executor):
                 response.raise_for_status()
             download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
             payload["final_lora_archive_url"] = download_url
+            payload["final_lora_archive_bytes"] = file_size
+            payload["final_lora_archive_uploaded"] = True
             logger.info("Uploaded LoRA model archive to %s", upload_url)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("LoRA model archive upload failed for %s: %s", task_id, exc)
+
+    def _cleanup_local_artifacts(
+        self,
+        task: Dict[str, Any],
+        checkpoint_dir: Path,
+        final_adapter_path: Optional[Path],
+        archive_path: Optional[Path],
+        payload: Dict[str, Any],
+    ) -> None:
+        if not is_cleanup_enabled():
+            logger.info(
+                "Skipping LoRA checkpoint cleanup for task %s because MODEL_CLEANUP_AFTER_UPLOAD is disabled",
+                (task or {}).get("task_id"),
+            )
+            return
+        destination = get_http_destination(task)
+        if not destination:
+            return
+        uploaded = bool(payload.get("final_lora_archive_uploaded"))
+        remove_checkpoints = uploaded or final_adapter_path is None
+        if not remove_checkpoints:
+            logger.info(
+                "Skipping LoRA checkpoint cleanup for task %s because archive upload did not complete",
+                (task or {}).get("task_id"),
+            )
+            return
+        if uploaded:
+            cleanup_artifact_path(final_adapter_path, logger=logger)
+            cleanup_artifact_path(archive_path, logger=logger)
+        cleanup_artifact_path(checkpoint_dir, logger=logger)
+        if not checkpoint_dir.exists():
+            logger.info(
+                "Deleted local LoRA checkpoints for task %s at %s",
+                (task or {}).get("task_id"),
+                checkpoint_dir,
+            )
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
         data_cfg = spec.get("data", {}) or {}
