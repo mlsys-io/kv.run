@@ -26,6 +26,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
+import requests
+
 from datasets import load_dataset
 
 try:
@@ -654,6 +656,60 @@ class VLLMExecutor(Executor):
             len(records),
             export_payload["path"],
         )
+        self._maybe_upload_jsonl(spec, task_id, export_payload)
+
+    def _maybe_upload_jsonl(self, spec: Dict[str, Any], task_id: str, export_payload: Dict[str, Any]) -> None:
+        destination = ((spec.get("output") or {}).get("destination") or {}) if isinstance(spec, dict) else {}
+        dest_type = str(destination.get("type") or "local").lower()
+        if dest_type != "http":
+            return
+
+        url = destination.get("url")
+        if not url:
+            logger.warning("JSONL export for task %s skipped: output.destination.url is missing", task_id)
+            return
+
+        path_value = export_payload.get("path")
+        if not path_value:
+            logger.warning("JSONL export for task %s skipped: export path is missing", task_id)
+            return
+
+        file_path = Path(path_value)
+        if not file_path.exists():
+            logger.warning("JSONL export for task %s skipped: %s does not exist", task_id, file_path)
+            return
+
+        base_url = url.rstrip("/")
+        upload_url = base_url + f"/{task_id}/files"
+        headers = {
+            k: v
+            for k, v in (destination.get("headers") or {}).items()
+            if str(k).lower() != "content-type"
+        }
+        timeout = float(destination.get("timeoutSec") or 30)
+
+        try:
+            with file_path.open("rb") as fh:
+                files = {"file": (file_path.name, fh, "application/json")}
+                response = requests.post(upload_url, files=files, headers=headers, timeout=timeout)
+            if response.status_code >= 400:
+                logger.warning(
+                    "JSONL export upload failed for task %s (status %s): %s",
+                    task_id,
+                    response.status_code,
+                    response.text[:200],
+                )
+                return
+        except requests.RequestException as exc:
+            logger.warning("JSONL export upload failed for task %s: %s", task_id, exc)
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("JSONL export upload failed for task %s: %s", task_id, exc)
+            return
+
+        export_payload["uploaded"] = True
+        export_payload["url"] = base_url + f"/{task_id}/files/{file_path.name}"
+        logger.info("Uploaded JSONL export for task %s to %s", task_id, export_payload["url"])
 
     def _build_sampling_params(self, inference: Dict[str, Any]) -> SamplingParams:
         cfg = copy.deepcopy(inference)

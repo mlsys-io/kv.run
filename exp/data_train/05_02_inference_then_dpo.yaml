@@ -88,6 +88,7 @@ spec:
         data:
           jsonl:
             path: "${preference-bootstrap.result.jsonl_export.path}"
+            url: "${preference-bootstrap.result.jsonl_export.url}"
             prompt_field: "prompt"
             chosen_field: "chosen"
             rejected_field: "rejected"

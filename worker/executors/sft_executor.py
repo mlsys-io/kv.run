@@ -15,8 +15,10 @@ import json
 import subprocess
 import gc
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
+from urllib.parse import urlparse
 
 from datasets import Dataset, load_dataset
 import torch
@@ -39,6 +41,7 @@ class SFTExecutor(Executor):
         self._current_trainer: Optional[Any] = None
         self._current_tokenizer: Optional[Any] = None
         self._final_model_dir: Optional[Path] = None
+        self._task_out_dir: Optional[Path] = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         spec = (task or {}).get("spec") or {}
@@ -47,6 +50,7 @@ class SFTExecutor(Executor):
         training_successful = False
         error_msg: Optional[str] = None
         caught_exc: Optional[Exception] = None
+        self._task_out_dir = out_dir
 
         training_cfg = spec.get("training", {}) or {}
         self._configure_devices(training_cfg)  # only constrain visible devices when explicit
@@ -162,7 +166,10 @@ class SFTExecutor(Executor):
                 subprocess.check_call(cmd, env=env)
                 resp_path = out_dir / "responses.json"
                 if resp_path.exists():
-                    return self.load_json(resp_path)
+                    result = self.load_json(resp_path)
+                    self._task_out_dir = None
+                    return result
+                self._task_out_dir = None
                 return {
                     "training_successful": True,
                     "spawned_torchrun": True,
@@ -365,6 +372,7 @@ class SFTExecutor(Executor):
             self._current_tokenizer = None
             self._final_model_dir = None
 
+            self._task_out_dir = None
             return result_payload
 
         except Exception as exc:
@@ -395,7 +403,9 @@ class SFTExecutor(Executor):
         }
         self.save_json(out_dir / "responses.json", result)
         if caught_exc is not None:
+            self._task_out_dir = None
             raise ExecutionError(error_msg or "SFT training failed") from caught_exc
+        self._task_out_dir = None
         raise ExecutionError(error_msg or "SFT training failed")
 
     def cleanup_after_run(self) -> None:
@@ -447,6 +457,7 @@ class SFTExecutor(Executor):
         if not destination or not task_id:
             return
         upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
+        base_url = destination["url"].rstrip("/")
         try:
             import requests
             file_size = archive_path.stat().st_size if archive_path.exists() else 0
@@ -457,14 +468,69 @@ class SFTExecutor(Executor):
                     for k, v in (destination.get("headers") or {}).items()
                     if str(k).lower() != "content-type"
                 }
-                response = requests.post(upload_url, files=files, headers=headers,
-                                         timeout=destination["timeout"])
+                response = requests.post(
+                    upload_url,
+                    files=files,
+                    headers=headers,
+                    timeout=destination["timeout"],
+                )
                 response.raise_for_status()
-            download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
+            download_url = f"{base_url}/{task_id}/files/{archive_path.name}"
             payload["final_model_archive_url"] = download_url
-            logger.info("Uploaded SFT model archive to %s", upload_url)
+            payload["final_model_archive_bytes"] = file_size
+            payload["final_model_archive_uploaded"] = True
+            logger.info(
+                "Uploaded SFT model archive to %s (%d bytes)",
+                upload_url,
+                file_size,
+            )
         except Exception as exc:
             logger.warning("Model archive upload failed for %s: %s", task_id, exc)
+
+    def _ensure_jsonl_local(self, jsonl_cfg: Dict[str, Any], default_name: str) -> Path:
+        path_value = str(jsonl_cfg.get("path") or "").strip()
+        url_value = str(jsonl_cfg.get("url") or jsonl_cfg.get("download_url") or "").strip()
+
+        candidate: Optional[Path] = None
+        if path_value:
+            candidate_path = Path(path_value).expanduser()
+            if not candidate_path.is_absolute() and self._task_out_dir:
+                candidate_path = (self._task_out_dir / candidate_path).resolve()
+            else:
+                candidate_path = candidate_path.resolve()
+            if candidate_path.exists():
+                jsonl_cfg["path"] = str(candidate_path)
+                return candidate_path
+            candidate = candidate_path
+
+        if url_value:
+            if self._task_out_dir:
+                cache_dir = (self._task_out_dir / "_jsonl_cache").resolve()
+            else:
+                cache_dir = Path(tempfile.mkdtemp(prefix="mloc_jsonl_")).resolve()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            parsed = urlparse(url_value)
+            name = Path(parsed.path).name or (candidate.name if candidate else default_name)
+            if not name:
+                name = default_name
+            target = cache_dir / name
+            try:
+                import requests
+
+                with requests.get(url_value, stream=True, timeout=60) as resp:
+                    resp.raise_for_status()
+                    with target.open("wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            if chunk:
+                                fh.write(chunk)
+            except Exception as exc:  # pragma: no cover - network handling
+                raise ValueError(f"Failed to download JSONL dataset from {url_value}: {exc}") from exc
+            jsonl_cfg["path"] = str(target)
+            return target.resolve()
+
+        if candidate is not None:
+            raise ValueError(f"JSONL dataset not found: {candidate}")
+        raise ValueError("data.jsonl.path is required when using JSONL inputs for SFT")
 
     def _prepare_dataset(self, spec: Dict[str, Any]) -> Tuple[Dataset, str]:
         data_cfg = spec.get("data", {}) or {}
@@ -482,12 +548,8 @@ class SFTExecutor(Executor):
             if jsonl_path:
                 jsonl_cfg.setdefault("path", jsonl_path)
 
-            path_value = jsonl_cfg.get("path")
-            if not path_value:
-                raise ValueError("data.jsonl.path is required when using JSONL inputs for SFT")
-            jsonl_file = Path(path_value).expanduser().resolve()
-            if not jsonl_file.exists():
-                raise ValueError(f"JSONL dataset not found: {jsonl_file}")
+            default_name = Path(str(jsonl_cfg.get("path") or "dataset.jsonl")).name or "dataset.jsonl"
+            jsonl_file = self._ensure_jsonl_local(jsonl_cfg, default_name=default_name)
 
             text_field = (
                 jsonl_cfg.get("text_field")

@@ -94,6 +94,7 @@ spec:
         data:
           jsonl:
             path: "${gsm8k-bootstrap.result.jsonl_export.path}"
+            url: "${gsm8k-bootstrap.result.jsonl_export.url}"
             prompt_field: "prompt"
             response_field: "response"
           separator: "\n\nAnswer: "

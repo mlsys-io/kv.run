@@ -704,6 +704,8 @@ async def upload_result_file(task_id: str, file: UploadFile = File(...), _: Any 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to store artifact: {exc}") from exc
 
+    _rewrite_jsonl_export_paths(task_id, base_dir, target_path)
+
     record = RUNTIME.get_record(task_id)
     expected_artifacts: List[str] = []
     if record:
@@ -738,6 +740,52 @@ async def download_result_file(task_id: str, filename: str, _: Any = Depends(req
         target_path = fallback
 
     return FileResponse(target_path)
+
+
+def _rewrite_jsonl_export_paths(task_id: str, base_dir: Path, artifact_path: Path) -> None:
+    responses_path = base_dir / "responses.json"
+    if not responses_path.exists():
+        return
+    try:
+        payload = json.loads(responses_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read responses for %s while updating JSONL export: %s", task_id, exc)
+        return
+
+    filename = artifact_path.name
+    new_abs = str(artifact_path)
+    new_relative = f"{ARTIFACTS_DIR}/{filename}"
+    updated = False
+
+    def _update(entry: Dict[str, Any]) -> None:
+        nonlocal updated
+        if not isinstance(entry, dict):
+            return
+        block = entry.get("jsonl_export")
+        if isinstance(block, dict):
+            path_value = str(block.get("path") or "")
+            if path_value and Path(path_value).name == filename:
+                if "worker_path" not in block and path_value != new_abs:
+                    block["worker_path"] = path_value
+                block["path"] = new_abs
+                block["relative_path"] = new_relative
+                block.setdefault("url", f"/api/v1/results/{task_id}/files/{filename}")
+                updated = True
+        children = entry.get("children")
+        if isinstance(children, dict):
+            for child_entry in children.values():
+                if isinstance(child_entry, dict):
+                    _update(child_entry)
+
+    result_entry = payload.get("result") if isinstance(payload, dict) else None
+    if isinstance(result_entry, dict):
+        _update(result_entry)
+
+    if updated:
+        try:
+            responses_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to rewrite responses for %s after JSONL upload: %s", task_id, exc)
 
 
 @asynccontextmanager

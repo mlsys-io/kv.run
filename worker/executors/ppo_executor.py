@@ -11,9 +11,11 @@ import os
 import subprocess
 import time
 import logging
+import tempfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from urllib.parse import urlparse
 
 import torch
 from datasets import Dataset
@@ -253,6 +255,7 @@ class PPOExecutor(Executor):
         self._tokenizer = None
         self._ppo_trainer = None
         self._reward_module = None
+        self._task_out_dir: Optional[Path] = None
 
     def run(self, task: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
         logger.info("Starting PPO training task")
@@ -260,6 +263,8 @@ class PPOExecutor(Executor):
         training_config = spec.get("training", {}) or {}
         checkpoint_dir = out_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        self._task_out_dir = out_dir
 
         launcher_flag = "KV_PPO_DISTRIBUTED"
         already_spawned = os.environ.get(launcher_flag) == "1"
@@ -271,7 +276,10 @@ class PPOExecutor(Executor):
             self._spawn_distributed(task, out_dir, gpu_count, launcher_flag, training_config)
             resp_path = out_dir / "responses.json"
             if resp_path.exists():
-                return self.load_json(resp_path)
+                result = self.load_json(resp_path)
+                self._task_out_dir = None
+                return result
+            self._task_out_dir = None
             return {
                 "training_successful": True,
                 "spawned_torchrun": True,
@@ -761,6 +769,7 @@ class PPOExecutor(Executor):
                 "output_dir": str(out_dir),
             }
             self.save_json(out_dir / "responses.json", results)
+            self._task_out_dir = None
             raise ExecutionError(error_msg or "PPO training failed") from exc
 
         training_time = time.time() - start_time
@@ -782,7 +791,53 @@ class PPOExecutor(Executor):
         self.save_json(out_dir / "responses.json", results)
 
         logger.info("PPO training task completed in %.2f seconds", training_time)
+        self._task_out_dir = None
         return results
+
+    def _ensure_jsonl_local(self, jsonl_cfg: Dict[str, Any], default_name: str) -> Path:
+        path_value = str(jsonl_cfg.get("path") or "").strip()
+        url_value = str(jsonl_cfg.get("url") or jsonl_cfg.get("download_url") or "").strip()
+
+        candidate: Optional[Path] = None
+        if path_value:
+            candidate_path = Path(path_value).expanduser()
+            if not candidate_path.is_absolute() and self._task_out_dir:
+                candidate_path = (self._task_out_dir / candidate_path).resolve()
+            else:
+                candidate_path = candidate_path.resolve()
+            if candidate_path.exists():
+                jsonl_cfg["path"] = str(candidate_path)
+                return candidate_path
+            candidate = candidate_path
+
+        if url_value:
+            if self._task_out_dir:
+                cache_dir = (self._task_out_dir / "_jsonl_cache").resolve()
+            else:
+                cache_dir = Path(tempfile.mkdtemp(prefix="mloc_jsonl_")).resolve()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            parsed = urlparse(url_value)
+            name = Path(parsed.path).name or (candidate.name if candidate else default_name)
+            if not name:
+                name = default_name
+            target = cache_dir / name
+            try:
+                import requests
+
+                with requests.get(url_value, stream=True, timeout=60) as resp:
+                    resp.raise_for_status()
+                    with target.open("wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            if chunk:
+                                fh.write(chunk)
+            except Exception as exc:  # pragma: no cover
+                raise ExecutionError(f"Failed to download JSONL dataset from {url_value}: {exc}") from exc
+            jsonl_cfg["path"] = str(target)
+            return target.resolve()
+
+        if candidate is not None:
+            raise ExecutionError(f"JSONL dataset not found: {candidate}")
+        raise ExecutionError("data.jsonl.path is required when using JSONL input")
 
     def _load_dataset(self, spec: Dict[str, Any]) -> Dataset:
         """Load training dataset"""
@@ -798,12 +853,8 @@ class PPOExecutor(Executor):
             if jsonl_path:
                 jsonl_cfg.setdefault("path", jsonl_path)
 
-            path_value = jsonl_cfg.get("path")
-            if not path_value:
-                raise ExecutionError("data.jsonl.path is required when using JSONL input")
-            jsonl_file = Path(path_value).expanduser().resolve()
-            if not jsonl_file.exists():
-                raise ExecutionError(f"JSONL dataset not found: {jsonl_file}")
+            default_name = Path(str(jsonl_cfg.get("path") or "dataset.jsonl")).name or "dataset.jsonl"
+            jsonl_file = self._ensure_jsonl_local(jsonl_cfg, default_name=default_name)
 
             query_field = (
                 jsonl_cfg.get("query_field")
@@ -960,7 +1011,8 @@ class PPOExecutor(Executor):
         task_id = (task or {}).get("task_id")
         if not destination or not task_id:
             return
-        upload_url = destination["url"].rstrip("/") + f"/{task_id}/files"
+        base_url = destination["url"].rstrip("/")
+        upload_url = base_url + f"/{task_id}/files"
         try:
             import requests
 
@@ -979,9 +1031,11 @@ class PPOExecutor(Executor):
                     timeout=destination["timeout"],
                 )
                 response.raise_for_status()
-            download_url = destination["url"].rstrip("/") + f"/{task_id}/files/{archive_path.name}"
+            download_url = base_url + f"/{task_id}/files/{archive_path.name}"
             payload["final_model_archive_url"] = download_url
-            logger.info("Uploaded PPO model archive to %s", upload_url)
+            payload["final_model_archive_bytes"] = file_size
+            payload["final_model_archive_uploaded"] = True
+            logger.info("Uploaded PPO model archive to %s (%d bytes)", upload_url, file_size)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("PPO model archive upload failed for %s: %s", task_id, exc)
 

@@ -86,6 +86,7 @@ spec:
         data:
           jsonl:
             path: "${motivation-bootstrap.result.jsonl_export.path}"
+            url: "${motivation-bootstrap.result.jsonl_export.url}"
             query_field: "query"
         training:
           learning_rate: 1.41e-5
