@@ -262,6 +262,24 @@ class MetricsRecorder:
                 result["density_data_path"] = density_data_path
             return result
 
+    def finalize_density_series(self) -> None:
+        if not self._density_plot_enabled:
+            return
+        with self._lock:
+            last_bucket_ts = max(self._task_density_buckets) if self._task_density_buckets else None
+            if self._worker_count_series:
+                final_ts = self._worker_count_series[-1][0]
+            elif last_bucket_ts is not None:
+                final_ts = last_bucket_ts + self._density_bucket_sec
+            else:
+                final_ts = time.time()
+            bucket_ts = int(final_ts // self._density_bucket_sec) * self._density_bucket_sec
+            if last_bucket_ts is not None and bucket_ts <= last_bucket_ts:
+                bucket_ts = last_bucket_ts + self._density_bucket_sec
+            if self._task_density_buckets.get(bucket_ts) is None:
+                self._task_density_buckets[bucket_ts] = 0
+        self._write_density_snapshot()
+
     def format_report(self, report: Dict[str, Any]) -> str:
         counters = report.get("counters", {})
         timings = report.get("task_timings", {})

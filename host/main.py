@@ -3,7 +3,6 @@ from __future__ import annotations
 import atexit
 import json
 import os
-import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -23,24 +22,17 @@ if __name__ == "__main__" and __package__ is None:
     __package__ = "host"
     sys.modules.setdefault("host.main", sys.modules[__name__])
 
-from .event_schema import TaskEvent, WorkerEvent, parse_event
+from .event_schema import TaskEvent
 from .dispatcher_factory import DEFAULT_DISPATCH_MODE, create_dispatcher
 from .worker_selector import DEFAULT_WORKER_SELECTION
 from .manifest_utils import ARTIFACTS_DIR, sync_manifest
 from .metrics import MetricsRecorder
+from .monitoring import TaskWorkerMonitor
 from .results import ResultPayload, read_result, result_file_path, write_result
-from .task_metadata import extract_model_dataset_names
 from .task_runtime import TaskRuntime
-from .utils import get_logger, log_worker_event, now_iso, parse_bool_env, parse_float_env, parse_int_env, safe_get
+from .utils import get_logger, now_iso, parse_bool_env, parse_float_env, parse_int_env, safe_get
 from .elastic import ElasticCoordinator
-from .worker_registry import (
-    get_worker_from_redis,
-    is_stale_by_redis,
-    list_workers_from_redis,
-    sort_workers,
-    update_worker_status,
-    record_worker_cache,
-)
+from .worker_registry import get_worker_from_redis, is_stale_by_redis, list_workers_from_redis
 from .watchdog import WorkerWatchdog
 
 
@@ -123,9 +115,6 @@ WORKER_DEATH_GRACE_SEC = max(0, parse_int_env("WORKER_DEATH_GRACE_SEC", 60))
 HOST_METRICS_ENABLE_DENSITY_PLOT = parse_bool_env("HOST_METRICS_ENABLE_DENSITY_PLOT", False)
 HOST_METRICS_DENSITY_BUCKET_SEC = max(1, parse_int_env("HOST_METRICS_DENSITY_BUCKET_SEC", 60))
 
-PENDING_RESULT_CLONES: Dict[str, List[str]] = {}
-PENDING_RESULT_CLONES_LOCK = threading.RLock()
-
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
     logger,
@@ -182,9 +171,23 @@ WATCHDOG = WorkerWatchdog(
     grace_seconds=WORKER_DEATH_GRACE_SEC,
 )
 
+EVENT_MONITOR = TaskWorkerMonitor(
+    redis_url=REDIS_URL,
+    redis_client=RDS,
+    stop_event=STOP_EVENT,
+    logger=logger,
+    runtime=RUNTIME,
+    dispatcher=DISPATCHER,
+    metrics_recorder=METRICS_RECORDER,
+    elastic_coordinator=ELASTIC_COORDINATOR,
+    watchdog=WATCHDOG,
+    results_dir=RESULTS_DIR,
+)
+
 
 def _export_metrics_on_exit() -> None:
     try:
+        METRICS_RECORDER.finalize_density_series()
         result = METRICS_RECORDER.export_final_report()
         report = result.get("report") or {}
         summary = METRICS_RECORDER.format_report(report)
@@ -226,266 +229,12 @@ def _dispatch_loop() -> None:
     DISPATCHER.dispatch_loop(STOP_EVENT, poll_interval=1.0)
 
 
-def _tasks_events_loop() -> None:
-    while not STOP_EVENT.is_set():
-        try:
-            sub_rds = redis.from_url(REDIS_URL, decode_responses=True)
-            pubsub = sub_rds.pubsub(ignore_subscribe_messages=True)
-            pubsub.subscribe("tasks.events")
-            logger.info("Subscribed to tasks.events")
-            for msg in pubsub.listen():
-                if STOP_EVENT.is_set():
-                    break
-                if msg.get("type") != "message":
-                    continue
-                raw = msg.get("data")
-                try:
-                    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "ignore"))
-                except Exception as exc:
-                    logger.debug("Invalid tasks.events payload: %s", exc)
-                    continue
-                try:
-                    event = parse_event(data)
-                except Exception as exc:
-                    logger.debug("Failed to parse task event: %s (%s)", data, exc)
-                    continue
-                if not isinstance(event, TaskEvent):
-                    continue
-                _handle_task_event(event)
-            try:
-                pubsub.close()
-            except Exception:
-                pass
-        except Exception as exc:
-            if STOP_EVENT.is_set():
-                break
-            logger.warning("tasks.events listener error: %s; reconnecting...", exc)
-            time.sleep(2.0)
-
-
-def _handle_task_event(event: TaskEvent) -> None:
-    payload = event.payload or {}
-    event_type = event.type
-    if event_type == "TASK_STARTED":
-        METRICS_RECORDER.record_task_event(event)
-        RUNTIME.mark_started(event.task_id, event.worker_id, payload, event.ts)
-    elif event_type == "TASK_SUCCEEDED":
-        METRICS_RECORDER.record_task_event(event)
-        ready_children, merged_children = RUNTIME.mark_succeeded(event.task_id, event.worker_id, payload, event.ts)
-        try:
-            queueing, dispatched, pending, done, total = RUNTIME.task_status_counts()
-            summary = (
-                f"QUEUEING {queueing}, DISPATCHED {dispatched}, PENDING {pending}, "
-                f"DONE {done}, TOTAL {total}"
-            )
-        except Exception:
-            summary = (
-                "QUEUEING UNKNOWN, DISPATCHED UNKNOWN, PENDING UNKNOWN, "
-                "DONE UNKNOWN, TOTAL UNKNOWN"
-            )
-        logger.info("Task %s completed; %s", event.task_id, summary)
-        if merged_children:
-            for child_id in merged_children:
-                child_payload = dict(payload)
-                child_payload["parent_task_id"] = event.task_id
-                child_payload["is_child_task"] = True
-                child_event = TaskEvent(
-                    type="TASK_SUCCEEDED",
-                    task_id=child_id,
-                    worker_id=event.worker_id,
-                    payload=child_payload,
-                    ts=event.ts,
-                )
-                METRICS_RECORDER.record_task_event(child_event, is_child=True)
-        if event.worker_id:
-            try:
-                record = RUNTIME.get_record(event.task_id)
-                if record:
-                    models, datasets = extract_model_dataset_names(record.parsed)
-                    if models or datasets:
-                        record_worker_cache(RDS, event.worker_id, models=models, datasets=datasets)
-            except Exception as exc:
-                logger.debug("Failed to update cache metadata for worker %s: %s", event.worker_id, exc)
-            try:
-                update_worker_status(RDS, event.worker_id, "IDLE")
-            except Exception:
-                pass
-        if merged_children:
-            _mirror_task_results(event.task_id, merged_children)
-    elif event_type == "TASK_FAILED":
-        record = RUNTIME.get_record(event.task_id)
-        attempts = record.attempts if record else 0
-        max_attempts = record.max_attempts if record else None
-        can_retry = (
-            record
-            and (max_attempts is None or max_attempts < 0 or attempts < max_attempts)
-        )
-        if can_retry:
-            limit_display = "∞" if max_attempts is None or max_attempts < 0 else max_attempts
-            if event.worker_id:
-                record.last_failed_worker = event.worker_id
-            logger.warning(
-                "Retrying task %s after worker failure (%d/%s)",
-                event.task_id,
-                attempts + 1,
-                limit_display,
-            )
-            DISPATCHER._requeue_task(
-                event.task_id,
-                reason="worker_failed",
-                front=True,
-                extra_payload={
-                    "error": event.error,
-                    "attempt": attempts + 1,
-                    "max_attempts": max_attempts,
-                },
-            )
-            return
-
-        METRICS_RECORDER.record_task_event(event)
-        impacted, merged_children = RUNTIME.mark_failed(
-            event.task_id,
-            event.worker_id,
-            payload,
-            event.ts,
-            error=event.error,
-        )
-        METRICS_RECORDER.finalize_task_failure(event.task_id)
-        for task_id, reason in impacted:
-            derived = TaskEvent(
-                type="TASK_FAILED",
-                task_id=task_id,
-                error=reason,
-                payload={"dependency_failure": event.task_id},
-            )
-            METRICS_RECORDER.record_task_event(derived)
-            METRICS_RECORDER.finalize_task_failure(task_id)
-        for child_id in merged_children:
-            child_payload = dict(payload)
-            child_payload["parent_task_id"] = event.task_id
-            child_payload["dependency_failure"] = event.task_id
-            child_payload["is_child_task"] = True
-            child_event = TaskEvent(
-                type="TASK_FAILED",
-                task_id=child_id,
-                worker_id=event.worker_id,
-                error=event.error or "parent_failed",
-                payload=child_payload,
-            )
-            METRICS_RECORDER.record_task_event(child_event, is_child=True)
-            METRICS_RECORDER.finalize_task_failure(child_id)
-    else:
-        logger.debug("Ignoring task event type=%s payload=%s", event_type, payload)
-
-
-def _mirror_task_results(parent_task_id: str, child_ids: List[str]) -> None:
-    if not child_ids:
-        return
-    parent_dir = result_file_path(RESULTS_DIR, parent_task_id).parent
-    if not parent_dir.exists():
-        with PENDING_RESULT_CLONES_LOCK:
-            pending = PENDING_RESULT_CLONES.setdefault(parent_task_id, [])
-            for child in child_ids:
-                if child not in pending:
-                    pending.append(child)
-        logger.debug("Deferring result mirroring for %s (waiting for artifacts)", parent_task_id)
-        return
-
-    for child_id in child_ids:
-        if child_id == parent_task_id:
-            continue
-        dst_dir = result_file_path(RESULTS_DIR, child_id).parent
-        if dst_dir.exists() and (dst_dir / "responses.json").exists():
-            continue
-        try:
-            if dst_dir.exists():
-                shutil.rmtree(dst_dir, ignore_errors=True)
-            shutil.copytree(parent_dir, dst_dir)
-            record = RUNTIME.get_record(child_id)
-            expected_artifacts: List[str] = []
-            if record:
-                expected_artifacts = ((record.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
-            sync_manifest(dst_dir, child_id, expected_artifacts)
-        except Exception as exc:  # pragma: no cover
-            logger.debug("Failed to mirror results from %s to %s: %s", parent_task_id, child_id, exc)
-
-    with PENDING_RESULT_CLONES_LOCK:
-        PENDING_RESULT_CLONES.pop(parent_task_id, None)
-
-
-def _workers_events_loop() -> None:
-    while not STOP_EVENT.is_set():
-        try:
-            sub_rds = redis.from_url(REDIS_URL, decode_responses=True)
-            pubsub = sub_rds.pubsub(ignore_subscribe_messages=True)
-            pubsub.subscribe("workers.events")
-            logger.info("Subscribed to workers.events")
-            for msg in pubsub.listen():
-                if STOP_EVENT.is_set():
-                    break
-                if msg.get("type") != "message":
-                    continue
-                raw = msg.get("data")
-                try:
-                    data = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "ignore"))
-                except Exception as exc:
-                    logger.debug("Invalid workers.events payload: %s", exc)
-                    continue
-                try:
-                    event = parse_event(data)
-                except Exception as exc:
-                    logger.debug("Failed to parse worker event: %s (%s)", data, exc)
-                    continue
-                if not isinstance(event, WorkerEvent):
-                    continue
-                log_worker_event(logger, event)
-                METRICS_RECORDER.record_worker_event(event)
-                ELASTIC_COORDINATOR.record_worker_event(event)
-                if event.type == "UNREGISTER":
-                    worker_id = (event.worker_id or "").strip()
-                    if worker_id:
-                        if WATCHDOG.enabled and WATCHDOG.is_marked_dead(worker_id):
-                            logger.info(
-                                "Skipping direct requeue for %s unregister; watchdog already emitted synthetic failures",
-                                worker_id,
-                            )
-                            WATCHDOG.clear_dead_mark(worker_id)
-                            continue
-                        recovered = RUNTIME.recover_tasks_for_worker(worker_id)
-                        if recovered:
-                            logger.info(
-                                "Requeued %d task(s) after worker %s unregistered: %s",
-                                len(recovered),
-                                worker_id,
-                                ", ".join(recovered),
-                            )
-                            for task_id in recovered:
-                                record = RUNTIME.get_record(task_id)
-                                if record:
-                                    record.last_failed_worker = worker_id
-                                DISPATCHER._requeue_task(
-                                    task_id,
-                                    reason="worker_unregistered",
-                                    front=True,
-                                    extra_payload={"worker": worker_id},
-                                )
-            try:
-                pubsub.close()
-            except Exception:
-                pass
-        except Exception as exc:
-            if STOP_EVENT.is_set():
-                break
-            logger.warning("workers.events listener error: %s; reconnecting...", exc)
-            time.sleep(2.0)
 def _start_background_threads() -> None:
-    threads = [
-        threading.Thread(target=_dispatch_loop, name="dispatch-loop", daemon=True),
-        threading.Thread(target=_tasks_events_loop, name="tasks-events", daemon=True),
-        threading.Thread(target=_workers_events_loop, name="workers-events", daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
+    dispatch_thread = threading.Thread(target=_dispatch_loop, name="dispatch-loop", daemon=True)
+    dispatch_thread.start()
+    BACKGROUND_THREADS.append(dispatch_thread)
+
+    for thread in EVENT_MONITOR.start():
         BACKGROUND_THREADS.append(thread)
 
     watchdog_thread = WATCHDOG.start(STOP_EVENT)
@@ -659,10 +408,9 @@ async def ingest_result(payload: ResultPayload, _: Any = Depends(require_auth)):
     if record:
         expected_artifacts = ((record.parsed or {}).get("spec") or {}).get("output", {}).get("artifacts", []) or []
     sync_manifest(path.parent, task_id, expected_artifacts)
-    with PENDING_RESULT_CLONES_LOCK:
-        pending_children = PENDING_RESULT_CLONES.pop(task_id, [])
+    pending_children = EVENT_MONITOR.pop_pending_clones(task_id)
     if pending_children:
-        _mirror_task_results(task_id, pending_children)
+        EVENT_MONITOR.mirror_task_results(task_id, pending_children)
     return {"ok": True, "path": str(path)}
 
 
