@@ -306,6 +306,6 @@ def cleanup_artifact_path(path: Optional[Path], *, logger=None) -> None:
 def is_cleanup_enabled() -> bool:
     setting = os.getenv("MODEL_CLEANUP_AFTER_UPLOAD")
     if setting is None:
-        return True
+        return False
     normalized = setting.strip().lower()
     return normalized not in {"0", "false", "no", "off"}

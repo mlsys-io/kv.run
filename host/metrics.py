@@ -80,6 +80,7 @@ class MetricsRecorder:
         self._density_plot_enabled = bool(enable_density_plot)
         self._density_bucket_sec = max(1, int(density_bucket_seconds))
         self._task_density_buckets: Dict[int, int] = {}
+        self._task_completion_buckets: Dict[int, int] = {}
         self._worker_count_series: List[Tuple[float, int]] = []
         if self._density_plot_enabled:
             self._logger.info(
@@ -234,6 +235,8 @@ class MetricsRecorder:
                 "status": "failed",
             }
             self._completed_tasks.add(task_id)
+            completion_anchor = finished_ts if finished_ts is not None else time.time()
+            self._record_task_completion(completion_anchor)
             self._write_metrics()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -266,7 +269,9 @@ class MetricsRecorder:
         if not self._density_plot_enabled:
             return
         with self._lock:
-            last_bucket_ts = max(self._task_density_buckets) if self._task_density_buckets else None
+            bucket_sources = [self._task_density_buckets, self._task_completion_buckets]
+            bucket_candidates = [max(store) for store in bucket_sources if store]
+            last_bucket_ts = max(bucket_candidates) if bucket_candidates else None
             if self._worker_count_series:
                 final_ts = self._worker_count_series[-1][0]
             elif last_bucket_ts is not None:
@@ -276,8 +281,9 @@ class MetricsRecorder:
             bucket_ts = int(final_ts // self._density_bucket_sec) * self._density_bucket_sec
             if last_bucket_ts is not None and bucket_ts <= last_bucket_ts:
                 bucket_ts = last_bucket_ts + self._density_bucket_sec
-            if self._task_density_buckets.get(bucket_ts) is None:
-                self._task_density_buckets[bucket_ts] = 0
+            for store in bucket_sources:
+                if store.get(bucket_ts) is None:
+                    store[bucket_ts] = 0
         self._write_density_snapshot()
 
     def format_report(self, report: Dict[str, Any]) -> str:
@@ -437,6 +443,7 @@ class MetricsRecorder:
             "status": "succeeded",
         }
         self._completed_tasks.add(event.task_id)
+        self._record_task_completion(finished_ts)
 
     def _on_task_failed(self, meta: Dict[str, Any], event: TaskEvent) -> None:
         payload = event.payload or {}
@@ -609,6 +616,12 @@ class MetricsRecorder:
         bucket = int(ts // self._density_bucket_sec) * self._density_bucket_sec
         self._task_density_buckets[bucket] = self._task_density_buckets.get(bucket, 0) + 1
 
+    def _record_task_completion(self, ts: float) -> None:
+        if not self._density_plot_enabled:
+            return
+        bucket = int(ts // self._density_bucket_sec) * self._density_bucket_sec
+        self._task_completion_buckets[bucket] = self._task_completion_buckets.get(bucket, 0) + 1
+
     def _record_worker_count(self, ts: float) -> None:
         if not self._density_plot_enabled:
             return
@@ -619,12 +632,12 @@ class MetricsRecorder:
                 return
         self._worker_count_series.append((ts, active_workers))
 
-    def _serialize_task_density(self) -> List[Dict[str, Any]]:
+    def _serialize_task_buckets(self, buckets: Dict[int, int]) -> List[Dict[str, Any]]:
         if not self._density_plot_enabled:
             return []
         entries = []
-        for bucket_ts in sorted(self._task_density_buckets):
-            count = self._task_density_buckets[bucket_ts]
+        for bucket_ts in sorted(buckets):
+            count = buckets[bucket_ts]
             density = count * (60.0 / self._density_bucket_sec)
             entries.append(
                 {
@@ -634,6 +647,12 @@ class MetricsRecorder:
                 }
             )
         return entries
+
+    def _serialize_task_density(self) -> List[Dict[str, Any]]:
+        return self._serialize_task_buckets(self._task_density_buckets)
+
+    def _serialize_task_completion_density(self) -> List[Dict[str, Any]]:
+        return self._serialize_task_buckets(self._task_completion_buckets)
 
     def _serialize_worker_series(self) -> List[Dict[str, Any]]:
         if not self._density_plot_enabled:
@@ -673,6 +692,7 @@ class MetricsRecorder:
             "generated_at": _now_iso(),
             "bucket_seconds": self._density_bucket_sec,
             "task_density_buckets": self._serialize_task_density(),
+            "task_completion_buckets": self._serialize_task_completion_density(),
             "worker_count_series": self._serialize_worker_series(),
         }
         try:
@@ -700,6 +720,7 @@ class MetricsRecorder:
         if self._density_plot_enabled:
             snapshot["density_bucket_seconds"] = self._density_bucket_sec
             snapshot["task_density_buckets"] = self._serialize_task_density()
+            snapshot["task_completion_buckets"] = self._serialize_task_completion_density()
             snapshot["worker_count_series"] = self._serialize_worker_series()
         return snapshot
 
