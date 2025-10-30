@@ -6,6 +6,7 @@ import time
 from typing import Dict, List, Optional, Set
 
 from .dispatcher import Dispatcher, StageReferenceNotReady
+from .task_models import TaskStatus
 from .utils import now_iso
 from .worker_registry import (
     get_worker_from_redis,
@@ -144,6 +145,7 @@ class FixedPipelineDispatcher(Dispatcher):
 
         max_workers_for_type = self._max_workers_for_type()
         bound_workers = self._type_to_workers.get(task_type, set())
+        # Preserve fixed-pipeline cap semantics: cap by total bound workers
         if len(bound_workers) >= max_workers_for_type:
             return None
 
@@ -156,6 +158,36 @@ class FixedPipelineDispatcher(Dispatcher):
             if self._worker_to_type.get(worker.worker_id) in (None, task_type)
         ]
         if not filtered_pool:
+            # Cross-type steal: prefer workers from other types that have no pending tasks,
+            # otherwise allow stealing if their binding has been idle for at least the configured timeout.
+            steal_candidates = []
+            for cand in pool:
+                prev_type = self._worker_to_type.get(cand.worker_id)
+                if not prev_type or prev_type == task_type:
+                    continue
+                if not self._type_has_pending_tasks(prev_type):
+                    steal_candidates.append(cand)
+                    continue
+                if self._binding_idle_timeout_sec > 0:
+                    last_used = self._binding_last_used.get(cand.worker_id)
+                    if last_used is None or (time.time() - last_used) >= self._binding_idle_timeout_sec:
+                        steal_candidates.append(cand)
+            if steal_candidates:
+                victim, _ = select_worker(steal_candidates, self._worker_selection_strategy, logger=self._logger)
+                if victim:
+                    prev_type = self._worker_to_type.get(victim.worker_id)
+                    self._unregister_binding(victim.worker_id)
+                    self._register_binding(task_type, victim.worker_id)
+                    try:
+                        self._logger.info(
+                            "Fixed pipeline dispatcher re-bound worker %s from %s to %s",
+                            victim.worker_id,
+                            prev_type,
+                            task_type,
+                        )
+                    except Exception:
+                        pass
+                    return victim.worker_id
             return None
 
         worker, _ = select_worker(filtered_pool, self._worker_selection_strategy, logger=self._logger)
@@ -173,88 +205,11 @@ class FixedPipelineDispatcher(Dispatcher):
             )
         return worker.worker_id
 
-    def _idle_bound_worker(self, task_type: str, eligible_ids: Optional[Set[str]]) -> Optional[str]:
-        order = self._type_order.get(task_type, [])
-        if not order:
-            return None
-        start_index = self._type_rr_index.get(task_type, 0)
-        count = len(order)
-        idx = start_index % count
-        checked = 0
-        while order and checked < count:
-            worker_id = order[idx]
-            worker = get_worker_from_redis(self._redis, worker_id)
-            if not worker:
-                self._logger.info(
-                    "Fixed pipeline dispatcher dropping binding for %s; worker %s missing",
-                    task_type,
-                    worker_id,
-                )
-                self._unregister_binding(worker_id)
-                order = self._type_order.get(task_type, [])
-                count = len(order)
-                if count == 0:
-                    self._type_rr_index.pop(task_type, None)
-                    return None
-                idx %= count
-                checked += 1
-                continue
-            if worker.status != "IDLE":
-                idx = (idx + 1) % count
-                checked += 1
-                continue
-            try:
-                if is_stale_by_redis(self._redis, worker.worker_id):
-                    idx = (idx + 1) % count
-                    checked += 1
-                    continue
-            except Exception:  # noqa: broad-except
-                idx = (idx + 1) % count
-                checked += 1
-                continue
-            if self._binding_idle_timeout_sec > 0:
-                last_used = self._binding_last_used.get(worker.worker_id)
-                now = time.time()
-                idle_duration = 0.0 if last_used is None else now - last_used
-                if last_used is None or idle_duration >= self._binding_idle_timeout_sec:
-                    self._logger.info(
-                        "Fixed pipeline dispatcher releasing binding for %s; worker %s idle for %.0fs (limit=%ds)",
-                        task_type,
-                        worker.worker_id,
-                        idle_duration,
-                        self._binding_idle_timeout_sec,
-                    )
-                    self._unregister_binding(worker.worker_id)
-                    order = self._type_order.get(task_type, [])
-                    count = len(order)
-                    if count == 0:
-                        self._type_rr_index.pop(task_type, None)
-                        return None
-                    idx %= count
-                    checked += 1
-                    continue
-            if eligible_ids is not None and worker.worker_id not in eligible_ids:
-                self._logger.info(
-                    "Fixed pipeline dispatcher dropping binding for %s; worker %s no longer satisfies resources",
-                    task_type,
-                    worker.worker_id,
-                )
-                self._unregister_binding(worker.worker_id)
-                order = self._type_order.get(task_type, [])
-                count = len(order)
-                if count == 0:
-                    self._type_rr_index.pop(task_type, None)
-                    return None
-                idx %= count
-                checked += 1
-                continue
-            self._type_rr_index[task_type] = (idx + 1) % count
-            return worker.worker_id
-        if order:
-            self._type_rr_index[task_type] = idx % len(order)
-        else:
-            self._type_rr_index.pop(task_type, None)
-        return None
+    def _binding_idle_seconds(self, worker_id: str) -> float:
+        last_used = self._binding_last_used.get(worker_id)
+        if last_used is None:
+            return float("inf")
+        return max(0.0, time.time() - last_used)
 
     def _note_binding_usage(self, worker_id: str) -> None:
         self._binding_last_used[worker_id] = time.time()
@@ -301,3 +256,109 @@ class FixedPipelineDispatcher(Dispatcher):
         if limit < 1:
             limit = 1
         return limit
+
+    def _idle_bound_worker(self, task_type: str, eligible_ids: Optional[Set[str]]) -> Optional[str]:
+        order = self._type_order.get(task_type, [])
+        if not order:
+            return None
+        start_index = self._type_rr_index.get(task_type, 0)
+        count = len(order)
+        idx = start_index % count
+        checked = 0
+        while order and checked < count:
+            worker_id = order[idx]
+            worker = get_worker_from_redis(self._redis, worker_id)
+            if not worker:
+                self._logger.info(
+                    "Fixed pipeline dispatcher dropping binding for %s; worker %s missing",
+                    task_type,
+                    worker_id,
+                )
+                self._unregister_binding(worker_id)
+                order = self._type_order.get(task_type, [])
+                count = len(order)
+                if count == 0:
+                    self._type_rr_index.pop(task_type, None)
+                    return None
+                idx %= count
+                checked += 1
+                continue
+            try:
+                if is_stale_by_redis(self._redis, worker.worker_id):
+                    self._logger.info(
+                        "Fixed pipeline dispatcher dropping binding for %s; worker %s is stale",
+                        task_type,
+                        worker.worker_id,
+                    )
+                    self._unregister_binding(worker.worker_id)
+                    order = self._type_order.get(task_type, [])
+                    count = len(order)
+                    if count == 0:
+                        self._type_rr_index.pop(task_type, None)
+                        return None
+                    idx %= count
+                    checked += 1
+                    continue
+            except Exception:  # noqa: broad-except
+                idx = (idx + 1) % count
+                checked += 1
+                continue
+            if worker.status != "IDLE":
+                idx = (idx + 1) % count
+                checked += 1
+                continue
+            if self._binding_idle_timeout_sec > 0:
+                last_used = self._binding_last_used.get(worker.worker_id)
+                now = time.time()
+                idle_duration = 0.0 if last_used is None else now - last_used
+                # Release if never used or idle past timeout
+                if last_used is None or idle_duration >= self._binding_idle_timeout_sec:
+                    self._logger.info(
+                        "Fixed pipeline dispatcher releasing binding for %s; worker %s idle for %.0fs (limit=%ds)",
+                        task_type,
+                        worker.worker_id,
+                        idle_duration,
+                        self._binding_idle_timeout_sec,
+                    )
+                    self._unregister_binding(worker.worker_id)
+                    order = self._type_order.get(task_type, [])
+                    count = len(order)
+                    if count == 0:
+                        self._type_rr_index.pop(task_type, None)
+                        return None
+                    idx %= count
+                    checked += 1
+                    continue
+            if eligible_ids is not None and worker.worker_id not in eligible_ids:
+                self._logger.info(
+                    "Fixed pipeline dispatcher dropping binding for %s; worker %s no longer satisfies resources",
+                    task_type,
+                    worker.worker_id,
+                )
+                self._unregister_binding(worker.worker_id)
+                order = self._type_order.get(task_type, [])
+                count = len(order)
+                if count == 0:
+                    self._type_rr_index.pop(task_type, None)
+                    return None
+                idx %= count
+                checked += 1
+                continue
+            self._type_rr_index[task_type] = (idx + 1) % count
+            return worker.worker_id
+        if order:
+            self._type_rr_index[task_type] = idx % len(order)
+        else:
+            self._type_rr_index.pop(task_type, None)
+        return None
+
+    def _type_has_pending_tasks(self, task_type: Optional[str]) -> bool:
+        if not task_type:
+            return False
+        try:
+            for record in self._runtime.tasks.values():
+                if getattr(record, "task_type", None) == task_type and record.status == TaskStatus.PENDING:
+                    return True
+        except Exception:
+            pass
+        return False
