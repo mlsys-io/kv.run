@@ -699,12 +699,15 @@ class MetricsRecorder:
     def _write_density_snapshot(self) -> None:
         if not self._density_plot_enabled:
             return
+        rates = self._compute_density_rates()
         payload = {
             "generated_at": _now_iso(),
             "bucket_seconds": self._density_bucket_sec,
             "task_density_buckets": self._serialize_task_density(),
             "task_completion_buckets": self._serialize_task_completion_density(),
             "worker_count_series": self._serialize_worker_series(),
+            "avg_submission_rate_per_min": rates.get("submission_per_min"),
+            "avg_completion_rate_per_min": rates.get("completion_per_min"),
         }
         try:
             self._density_data_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -733,8 +736,10 @@ class MetricsRecorder:
             snapshot["task_density_buckets"] = self._serialize_task_density()
             snapshot["task_completion_buckets"] = self._serialize_task_completion_density()
             snapshot["worker_count_series"] = self._serialize_worker_series()
-            snapshot["avg_submission_rate_per_min"] = self._compute_average_rate(self._task_density_buckets)
-            snapshot["avg_completion_rate_per_min"] = self._compute_average_rate(self._task_completion_buckets)
+            rates = self._compute_density_rates()
+            snapshot["avg_submission_rate_per_min"] = rates.get("submission_per_min")
+            snapshot["avg_completion_rate_per_min"] = rates.get("completion_per_min")
+            snapshot["density_rates"] = rates
         return snapshot
 
     def _summarize_timing(self, bucket: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
@@ -746,6 +751,12 @@ class MetricsRecorder:
             summary[f"{name}_count"] = count
             summary[f"{name}_total_sec"] = total
         return summary
+
+    def _compute_density_rates(self) -> Dict[str, Optional[float]]:
+        return {
+            "submission_per_min": self._compute_average_rate(self._task_density_buckets),
+            "completion_per_min": self._compute_average_rate(self._task_completion_buckets),
+        }
 
     def _compute_average_rate(self, buckets: Dict[int, int]) -> Optional[float]:
         if not self._density_plot_enabled or not buckets:
