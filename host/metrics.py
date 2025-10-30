@@ -315,6 +315,17 @@ class MetricsRecorder:
                 totals.get("accrued_cost_usd", 0.0) or 0.0,
             )
         )
+        avg_submit = report.get("avg_submission_rate_per_min")
+        avg_completion = report.get("avg_completion_rate_per_min")
+
+        def _fmt_rate(value: Optional[float]) -> str:
+            return f"{value:.2f}/min" if isinstance(value, (int, float)) else "n/a"
+
+        if avg_submit is not None or avg_completion is not None:
+            lines.append(
+                "Rates: submit=%s, complete=%s"
+                % (_fmt_rate(avg_submit), _fmt_rate(avg_completion))
+            )
         energy_total = totals.get("estimated_energy_kwh")
         cpu_energy = totals.get("cpu_energy_kwh")
         gpu_energy = totals.get("gpu_energy_kwh")
@@ -722,6 +733,8 @@ class MetricsRecorder:
             snapshot["task_density_buckets"] = self._serialize_task_density()
             snapshot["task_completion_buckets"] = self._serialize_task_completion_density()
             snapshot["worker_count_series"] = self._serialize_worker_series()
+            snapshot["avg_submission_rate_per_min"] = self._compute_average_rate(self._task_density_buckets)
+            snapshot["avg_completion_rate_per_min"] = self._compute_average_rate(self._task_completion_buckets)
         return snapshot
 
     def _summarize_timing(self, bucket: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
@@ -733,6 +746,16 @@ class MetricsRecorder:
             summary[f"{name}_count"] = count
             summary[f"{name}_total_sec"] = total
         return summary
+
+    def _compute_average_rate(self, buckets: Dict[int, int]) -> Optional[float]:
+        if not self._density_plot_enabled or not buckets:
+            return None
+        total = sum(buckets.values())
+        bucket_count = len(buckets)
+        total_seconds = bucket_count * self._density_bucket_sec
+        if total_seconds <= 0:
+            return None
+        return (total / total_seconds) * 60.0
 
     def _summarize_workers(self) -> Dict[str, Any]:
         totals: Dict[str, Any] = {
