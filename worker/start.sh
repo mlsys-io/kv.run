@@ -4,10 +4,10 @@ set -euo pipefail
 # -----------------------------
 # Config via env (with defaults)
 # -----------------------------
-IMAGE_BASE="${IMAGE_BASE:-mloc_worker}"          # your local image repo/name (you have mloc:cpu-latest, mloc:cuda-latest)
+IMAGE_BASE="${IMAGE_BASE:-flowmesh_worker}"      # your local image repo/name (e.g. flowmesh:cpu-latest, flowmesh:cuda-latest)
 TAG="${TAG:-latest}"                      # suffix after variant, e.g. cpu-latest / cuda-latest
 DEVICE="${DEVICE:-auto}"                  # auto|cpu|cuda (or pass --device)
-NAME="${NAME:-mloc}"                      # container name
+NAME="${NAME:-flowmesh}"                  # container name
 RUNTIME_ARGS="${RUNTIME_ARGS:-}"          # extra docker run args (e.g. "-p 8000:8000 -e LOG_LEVEL=DEBUG")
 DETECT_CMD="${DETECT_CMD:-nvidia-smi}"    # GPU detection command on host
 PULL_POLICY="${PULL_POLICY:-if-not-present}" # if-not-present|always|never
@@ -28,14 +28,14 @@ Env overrides:
   PULL_POLICY   (default: ${PULL_POLICY})
 
 Examples:
-  IMAGE_BASE=mloc $(basename "$0")                 # auto-detect GPU, prefer local image
+  IMAGE_BASE=flowmesh $(basename "$0")             # auto-detect GPU, prefer local image
   DEVICE=cpu $(basename "$0")                      # force CPU variant
   PULL_POLICY=never $(basename "$0")               # never pull; use local only
   RUNTIME_ARGS="-p 8000:8000" $(basename "$0")     # pass extra docker args
 EOF
 }
 
-log() { printf '[mloc] %s\n' "$*"; }
+log() { printf '[FlowMesh] %s\n' "$*"; }
 has_gpu() { command -v "${DETECT_CMD}" >/dev/null 2>&1 && "${DETECT_CMD}" -L >/dev/null 2>&1; }
 image_exists() { docker image inspect "$1" >/dev/null 2>&1; }
 

@@ -1,16 +1,18 @@
 # GPU-enabled worker image with CUDA runtime; host must provide NVIDIA drivers
 FROM nvidia/cuda:12.6.2-runtime-ubuntu22.04
 
-# Avoid interactive tzdata prompts and set default timezone
-ENV DEBIAN_FRONTEND=noninteractive
 ARG TZ=Asia/Singapore
-ENV TZ=${TZ}
+ENV TZ=${TZ} \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_TORCH_BACKEND=cu126
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
  && echo $TZ > /etc/timezone \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl tini gnupg2 software-properties-common tzdata \
+      ca-certificates curl gnupg2 software-properties-common tini tzdata \
  && dpkg-reconfigure -f noninteractive tzdata \
  && rm -rf /var/lib/apt/lists/*
 
@@ -21,39 +23,31 @@ RUN add-apt-repository ppa:deadsnakes/ppa -y \
       python3.12 python3.12-venv python3-pip \
  && rm -rf /var/lib/apt/lists/*
 
-# Create isolated venv and upgrade pip
+# Create isolated venv and upgrade pip + uv
 RUN python3.12 -m venv /opt/py312 \
- && /opt/py312/bin/pip install --upgrade pip
+ && /opt/py312/bin/pip install --upgrade pip uv
 ENV PATH=/opt/py312/bin:$PATH
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-# App defaults
-ENV RESULTS_DIR=/app/results \
-    TASK_TOPIC="tasks" \
-    LOG_LEVEL=INFO \
-    HEARTBEAT_INTERVAL_SEC=30
-
-# Security: non-root user
+# Non-root runtime user
 RUN useradd -m -u 10001 appuser
+
 WORKDIR /app
 
-# Install common deps + GPU-only deps (e.g., vLLM)
-COPY requirements/requirements.txt /app/
-COPY requirements/requirements.gpu.txt /app/
-RUN pip install --no-cache-dir -r /app/requirements.txt \
- && pip install --no-cache-dir -r /app/requirements.gpu.txt
+# Install Python dependencies (CPU + GPU stacks)
+COPY requirements/requirements.txt /tmp/requirements.txt
+COPY requirements/requirements.gpu.txt /tmp/requirements.gpu.txt
+RUN uv pip install --python /opt/py312/bin/python --system --requirement /tmp/requirements.txt \
+ && uv pip install --python /opt/py312/bin/python --system --requirement /tmp/requirements.gpu.txt \
+ && rm -f /tmp/requirements.txt /tmp/requirements.gpu.txt
 
-# App code and scripts
-COPY main.py /app/
-COPY executors /app/executors
-COPY entrypoint.sh /app/
-COPY healthcheck.py /app/
-COPY utils.py /app/
-COPY runner.py /app/
-COPY lifecycle.py /app/
-COPY hw.py /app/
-COPY config.py /app/
-COPY redis_worker.py /app/
+# Application code
+COPY . /app
+
+# Default worker env knobs
+ENV RESULTS_DIR=/app/results \
+    TASK_TOPIC=tasks \
+    LOG_LEVEL=INFO \
+    HEARTBEAT_INTERVAL_SEC=30
 
 # Permissions and writable dir
 RUN chmod +x /app/entrypoint.sh \
@@ -62,7 +56,6 @@ RUN chmod +x /app/entrypoint.sh \
 
 USER appuser
 
-# Health check (adjust to your app readiness)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "/app/healthcheck.py"]
 

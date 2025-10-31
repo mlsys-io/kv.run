@@ -56,7 +56,7 @@ def initialize_executors(
     executors: dict[str, object] = {}
     default_executor = init_executor("default")
     if not default_executor:
-        raise SystemExit("HFTransformers executor unavailable; install inference extras (mloc[inference])")
+        raise SystemExit("HFTransformers executor unavailable; install inference extras (flowmesh[inference])")
     executors["default"] = default_executor
 
     for key in ["echo", "rag", "agent", "sft", "lora_sft"]:

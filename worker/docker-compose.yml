@@ -5,8 +5,11 @@ services:
     ports: ["6379:6379"]
     restart: unless-stopped
 
-  mloc_worker:
-    image: mloc_worker:gpu-latest
+  flowmesh_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cuda
+    image: flowmesh_worker:cuda-latest
     depends_on: [redis]
     environment:
       TZ: Asia/Singapore
@@ -14,9 +17,10 @@ services:
       HEARTBEAT_INTERVAL_SEC: "30"
       TASK_TOPIC: "tasks"
       REDIS_URL: "redis://redis:6379/0"
-      RESULTS_DIR: "/mnt/mloc-results"
+      RESULTS_DIR: "/mnt/flowmesh-results"
+      WORKER_COST_PER_HOUR: "1.0"
     volumes:
-      - results_share:/mnt/mloc-results
+      - flowmesh_results:/mnt/flowmesh-results
     restart: unless-stopped
     deploy:
       resources:
@@ -27,9 +31,9 @@ services:
               capabilities: [gpu]
 
 volumes:
-  results_share:
+  flowmesh_results:
     driver: local
     driver_opts:
       type: "nfs"
       o: "addr=${NFS_SERVER:-127.0.0.1},rw,nfsvers=${NFS_VERSION:-4},tcp"
-      device: ":${NFS_EXPORT_PATH:-/srv/mloc/results}"
+      device: ":${NFS_EXPORT_PATH:-/srv/flowmesh/results}"

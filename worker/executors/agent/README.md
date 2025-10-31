@@ -1,23 +1,23 @@
 # Agent Executor - Youtu-Agent Integration
 
-This directory integrates the [Youtu-Agent (UTU)](https://github.com/TencentCloudADP/youtu-agent) framework into MLOC as a pluggable executor to provide autonomous agent capabilities.
+This directory integrates the [Youtu-Agent (UTU)](https://github.com/TencentCloudADP/youtu-agent) framework into FlowMesh as a pluggable executor to provide autonomous agent capabilities.
 
 ## Acknowledgments
 
-We would like to thank the **Youtu-Agent (UTU)** team for their excellent open-source contribution. This integration leverages their framework to bring powerful autonomous agent capabilities to the MLOC distributed system.
+We would like to thank the **Youtu-Agent (UTU)** team for their excellent open-source contribution. This integration leverages their framework to bring powerful autonomous agent capabilities to the FlowMesh distributed system.
 
 - **Original Project**: [Youtu-Agent](https://github.com/TencentCloudADP/youtu-agent)
 - **License**: Apache 2.0
-- **Integration Purpose**: Autonomous agent task execution within MLOC workers
+- **Integration Purpose**: Autonomous agent task execution within FlowMesh workers
 
 ## About the Integration
 
-Youtu-Agent is a comprehensive framework for building, running, and evaluating autonomous agents based on open-source models. By integrating it into MLOC, we enable:
+Youtu-Agent is a comprehensive framework for building, running, and evaluating autonomous agents based on open-source models. By integrating it into FlowMesh, we enable:
 
 - **Streaming Agent Execution**: Real-time agent task processing with progress tracking
 - **Multi-Agent Support**: Various pre-configured agent types for different use cases
 - **Tool Integration**: Search, document processing, code execution, and web browsing capabilities
-- **Distributed Processing**: Agent tasks distributed across MLOC worker nodes
+- **Distributed Processing**: Agent tasks distributed across FlowMesh worker nodes
 
 ## Quick Setup
 
@@ -82,7 +82,7 @@ Use the provided YAML templates in the `templates/` directory:
 ### Basic Search Agent
 ```yaml
 # templates/agent_query_search.yaml
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: AgentTask
 spec:
   taskType: "agent"
@@ -93,7 +93,7 @@ spec:
 ### Academic Paper Collector
 ```yaml
 # templates/agent_paper_collector.yaml
-apiVersion: mloc/v1
+apiVersion: flowmesh/v1
 kind: AgentTask
 spec:
   taskType: "agent"
@@ -112,7 +112,7 @@ The integration works with various LLM providers through OpenAI-compatible APIs:
 
 ## Output Structure
 
-Agent tasks produce standardized MLOC output format:
+Agent tasks produce standardized FlowMesh output format:
 
 ```json
 {
@@ -157,7 +157,7 @@ When contributing to this integration:
 ## License
 
 This integration maintains compatibility with:
-- **MLOC Project License**
+- **FlowMesh Project License**
 - **Youtu-Agent Apache 2.0 License**
 
 Special thanks to the Youtu-Agent team for their valuable open-source contribution that makes this integration possible.

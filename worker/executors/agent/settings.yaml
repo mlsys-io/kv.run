@@ -4,7 +4,7 @@
 browser:
   headless: true
   timeout: 30000
-  user_agent: "Mozilla/5.0 (compatible; MLOC-Agent/1.0)"
+  user_agent: "Mozilla/5.0 (compatible; FlowMesh-Agent/1.0)"
 
 data_collection:
   default_sample_size: 10

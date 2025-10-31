@@ -2,7 +2,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 def get_logger(
-    name: str = "orchestrator",
+    name: str = "flowmesh_worker",
     log_file: str = "worker.log",
     max_bytes: int = 5_242_880,
     backup_count: int = 5,

@@ -2,7 +2,7 @@
 """
 Agent Executor
 
-Integrates youtu-agent framework into MLOC system.
+Integrates youtu-agent framework into FlowMesh system.
 Supports task-based agent execution with streaming output and progress tracking.
 """
 

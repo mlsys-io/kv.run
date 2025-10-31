@@ -1,65 +1,54 @@
-# CPU-only worker image (Debian bookworm), no CUDA, no vLLM
+# CPU-only worker image (Debian bookworm), installs worker deps via uv
 FROM python:3.12-slim
 
-# Avoid interactive tzdata prompts and set default timezone
-ENV DEBIAN_FRONTEND=noninteractive
 ARG TZ=Asia/Singapore
-ENV TZ=${TZ}
+ENV TZ=${TZ} \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_TORCH_BACKEND=cpu
 
-# Install minimal OS packages (tini, tzdata, certificates, curl, etc.)
-# Keep the layer small and clean apt lists afterwards
+# Install base OS packages and tini
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
  && echo $TZ > /etc/timezone \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl tzdata tini \
+      ca-certificates curl tini tzdata \
  && rm -rf /var/lib/apt/lists/*
 
-# Optional: create an isolated venv to mirror the CUDA image layout
-# (You can skip venv and just use the system Python if preferred.)
+# Create isolated venv and install uv for dependency resolution
 RUN python -m venv /opt/py312 \
- && /opt/py312/bin/pip install --upgrade pip
+ && /opt/py312/bin/pip install --upgrade pip uv
 ENV PATH=/opt/py312/bin:$PATH
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
-# App defaults
+# Non-root user for runtime
+RUN useradd -m -u 10001 appuser
+
+WORKDIR /app
+
+# Install Python dependencies (CPU stack only)
+COPY requirements/requirements.txt /tmp/requirements.txt
+RUN uv pip install --python /opt/py312/bin/python --system --requirement /tmp/requirements.txt \
+ && rm -f /tmp/requirements.txt
+
+# Application code
+COPY . /app
+
+# Default worker env knobs
 ENV RESULTS_DIR=/app/results \
-    TASK_TOPIC="tasks" \
+    TASK_TOPIC=tasks \
     LOG_LEVEL=INFO \
     HEARTBEAT_INTERVAL_SEC=30
 
-# Security: non-root user
-RUN useradd -m -u 10001 appuser
-WORKDIR /app
-
-# Dependencies (common only; do NOT include vLLM here)
-COPY requirements/requirements.txt /app/
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-# App code and scripts
-COPY main.py /app/
-COPY executors /app/executors
-COPY entrypoint.sh /app/
-COPY healthcheck.py /app/
-COPY utils.py /app/
-COPY runner.py /app/
-COPY lifecycle.py /app/
-COPY hw.py /app/
-COPY config.py /app/
-COPY redis_worker.py /app/
-
-# Permissions and writable dir
+# Ensure scripts are executable and directories owned by appuser
 RUN chmod +x /app/entrypoint.sh \
  && mkdir -p /app/results \
  && chown -R appuser:appuser /app
 
 USER appuser
 
-# Health check (adjust to your app readiness)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "/app/healthcheck.py"]
 
-# Use tini as PID 1 (you can also use `docker run --init` instead)
 ENTRYPOINT ["/usr/bin/tini", "--"]
-# Entrypoint should exec your worker, e.g., `exec python listener.py`
 CMD ["/app/entrypoint.sh"]
